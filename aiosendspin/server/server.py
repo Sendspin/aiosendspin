@@ -434,6 +434,10 @@ class SendspinServer:
 
     async def close(self) -> None:
         """Close the server and cleanup resources."""
+        disconnect_tasks = [client.disconnect(retry_connection=False) for client in self.clients]
+        if disconnect_tasks:
+            await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+
         await self.stop_server()
         # Stop mDNS if active
         await self._stop_mdns()
