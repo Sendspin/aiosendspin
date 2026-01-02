@@ -268,6 +268,11 @@ class SendspinClient:
         return self._closing
 
     @property
+    def is_server_initiated(self) -> bool:
+        """True if the server initiated this connection (connected to the client)."""
+        return self._wsock_client is not None
+
+    @property
     def roles(self) -> list[Roles]:
         """List of roles this client supports."""
         return self._roles
