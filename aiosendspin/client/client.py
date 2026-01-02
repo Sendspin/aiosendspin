@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -76,33 +76,33 @@ class PCMFormat:
 
 
 # Callback invoked when server state metadata updates are received.
-MetadataCallback = Callable[[ServerStatePayload], Awaitable[None] | None]
+MetadataCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when group state updates are received.
-GroupUpdateCallback = Callable[[GroupUpdateServerPayload], Awaitable[None] | None]
+GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
 
 # Callback invoked when controller state updates are received.
-ControllerStateCallback = Callable[[ServerStatePayload], Awaitable[None] | None]
+ControllerStateCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when audio streaming begins.
-StreamStartCallback = Callable[[StreamStartMessage], Awaitable[None] | None]
+StreamStartCallback = Callable[[StreamStartMessage], None]
 
 # Callback invoked when audio streaming ends.
 # Receives list of roles to end, or None if all roles should be ended.
-StreamEndCallback = Callable[[list[Roles] | None], Awaitable[None] | None]
+StreamEndCallback = Callable[[list[Roles] | None], None]
 
 # Callback invoked when stream buffers should be cleared (e.g., seek operation).
 # Receives list of roles to clear, or None if all roles should be cleared.
-StreamClearCallback = Callable[[list[Roles] | None], Awaitable[None] | None]
+StreamClearCallback = Callable[[list[Roles] | None], None]
 
 # Callback invoked with (server_timestamp_us, audio_data, format) when audio chunks arrive.
-AudioChunkCallback = Callable[[int, bytes, PCMFormat], Awaitable[None] | None]
+AudioChunkCallback = Callable[[int, bytes, PCMFormat], None]
 
 # Callback invoked when the client disconnects from the server.
-DisconnectCallback = Callable[[], Awaitable[None] | None]
+DisconnectCallback = Callable[[], None]
 
 # Callback invoked when server sends player commands (volume, mute).
-ServerCommandCallback = Callable[[ServerCommandPayload], Awaitable[None] | None]
+ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
 
 @dataclass(slots=True)
@@ -175,24 +175,24 @@ class SendspinClient:
     _server_state: ServerStatePayload | None = None
     """Latest server state received from server."""
 
-    _metadata_callback: MetadataCallback | None = None
-    """Callback invoked on server/state messages with metadata."""
-    _group_callback: GroupUpdateCallback | None = None
-    """Callback invoked on group/update messages."""
-    _controller_callback: ControllerStateCallback | None = None
-    """Callback invoked on server/state messages."""
-    _stream_start_callback: StreamStartCallback | None = None
-    """Callback invoked when a stream starts."""
-    _stream_end_callback: StreamEndCallback | None = None
-    """Callback invoked when a stream ends."""
-    _stream_clear_callback: StreamClearCallback | None = None
-    """Callback invoked when stream buffers should be cleared."""
-    _audio_chunk_callback: AudioChunkCallback | None = None
-    """Callback invoked when audio chunks are received."""
-    _disconnect_callback: DisconnectCallback | None = None
-    """Callback invoked when the client disconnects."""
-    _server_command_callback: ServerCommandCallback | None = None
-    """Callback invoked when server sends player commands."""
+    _metadata_callbacks: list[MetadataCallback]
+    """Callbacks invoked on server/state messages with metadata."""
+    _group_callbacks: list[GroupUpdateCallback]
+    """Callbacks invoked on group/update messages."""
+    _controller_callbacks: list[ControllerStateCallback]
+    """Callbacks invoked on server/state messages."""
+    _stream_start_callbacks: list[StreamStartCallback]
+    """Callbacks invoked when a stream starts."""
+    _stream_end_callbacks: list[StreamEndCallback]
+    """Callbacks invoked when a stream ends."""
+    _stream_clear_callbacks: list[StreamClearCallback]
+    """Callbacks invoked when stream buffers should be cleared."""
+    _audio_chunk_callbacks: list[AudioChunkCallback]
+    """Callbacks invoked when audio chunks are received."""
+    _disconnect_callbacks: list[DisconnectCallback]
+    """Callbacks invoked when the client disconnects."""
+    _server_command_callbacks: list[ServerCommandCallback]
+    """Callbacks invoked when server sends player commands."""
 
     _initial_volume: int
     """Initial volume level for player role (0-100)."""
@@ -270,6 +270,17 @@ class SendspinClient:
         self._initial_volume = initial_volume
         self._initial_muted = initial_muted
         self.set_static_delay_ms(static_delay_ms)
+
+        # Initialize callback lists
+        self._metadata_callbacks = []
+        self._group_callbacks = []
+        self._controller_callbacks = []
+        self._stream_start_callbacks = []
+        self._stream_end_callbacks = []
+        self._stream_clear_callbacks = []
+        self._audio_chunk_callbacks = []
+        self._disconnect_callbacks = []
+        self._server_command_callbacks = []
 
     @property
     def server_info(self) -> ServerInfo | None:
@@ -361,7 +372,7 @@ class SendspinClient:
         self._current_player = None
 
         # Notify disconnect callback
-        await self._notify_disconnect_callback()
+        self._notify_disconnect_callback()
 
     async def send_player_state(
         self,
@@ -395,33 +406,86 @@ class SendspinClient:
         message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())
 
-    def set_metadata_listener(self, callback: MetadataCallback | None) -> None:
-        """Set or clear (if None) the callback invoked on server/state messages with metadata."""
-        self._metadata_callback = callback
+    def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:
+        """Add a listener for server/state messages with metadata.
 
-    def set_group_update_listener(self, callback: GroupUpdateCallback | None) -> None:
-        """Set or clear (if None) the callback invoked on group/update messages."""
-        self._group_callback = callback
-
-    def set_controller_state_listener(self, callback: ControllerStateCallback | None) -> None:
-        """Set or clear (if None) the callback invoked on server/state messages."""
-        self._controller_callback = callback
-
-    def set_stream_start_listener(self, callback: StreamStartCallback | None) -> None:
-        """Set or clear (if None) the callback invoked when a stream starts."""
-        self._stream_start_callback = callback
-
-    def set_stream_end_listener(self, callback: StreamEndCallback | None) -> None:
-        """Set or clear (if None) the callback invoked when a stream ends."""
-        self._stream_end_callback = callback
-
-    def set_stream_clear_listener(self, callback: StreamClearCallback | None) -> None:
-        """Set or clear (if None) the callback invoked when stream buffers should be cleared."""
-        self._stream_clear_callback = callback
-
-    def set_audio_chunk_listener(self, callback: AudioChunkCallback | None) -> None:
+        Returns:
+            A function that removes this listener when called.
         """
-        Set or clear (if None) the callback invoked when audio chunks are received.
+        self._metadata_callbacks.append(callback)
+        return lambda: (
+            self._metadata_callbacks.remove(callback)
+            if callback in self._metadata_callbacks
+            else None
+        )
+
+    def add_group_update_listener(self, callback: GroupUpdateCallback) -> Callable[[], None]:
+        """Add a listener for group/update messages.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._group_callbacks.append(callback)
+        return lambda: (
+            self._group_callbacks.remove(callback) if callback in self._group_callbacks else None
+        )
+
+    def add_controller_state_listener(
+        self, callback: ControllerStateCallback
+    ) -> Callable[[], None]:
+        """Add a listener for server/state messages.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._controller_callbacks.append(callback)
+        return lambda: (
+            self._controller_callbacks.remove(callback)
+            if callback in self._controller_callbacks
+            else None
+        )
+
+    def add_stream_start_listener(self, callback: StreamStartCallback) -> Callable[[], None]:
+        """Add a listener for stream start events.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._stream_start_callbacks.append(callback)
+        return lambda: (
+            self._stream_start_callbacks.remove(callback)
+            if callback in self._stream_start_callbacks
+            else None
+        )
+
+    def add_stream_end_listener(self, callback: StreamEndCallback) -> Callable[[], None]:
+        """Add a listener for stream end events.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._stream_end_callbacks.append(callback)
+        return lambda: (
+            self._stream_end_callbacks.remove(callback)
+            if callback in self._stream_end_callbacks
+            else None
+        )
+
+    def add_stream_clear_listener(self, callback: StreamClearCallback) -> Callable[[], None]:
+        """Add a listener for stream clear events.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._stream_clear_callbacks.append(callback)
+        return lambda: (
+            self._stream_clear_callbacks.remove(callback)
+            if callback in self._stream_clear_callbacks
+            else None
+        )
+
+    def add_audio_chunk_listener(self, callback: AudioChunkCallback) -> Callable[[], None]:
+        """Add a listener for audio chunk events.
 
         The callback receives:
         - server_timestamp_us: Server timestamp when this audio should play
@@ -432,16 +496,42 @@ class SendspinClient:
         use the compute_play_time() and compute_server_time() methods provided
         by this client instance. These handle time synchronization and static delay
         automatically.
+
+        Returns:
+            A function that removes this listener when called.
         """
-        self._audio_chunk_callback = callback
+        self._audio_chunk_callbacks.append(callback)
+        return lambda: (
+            self._audio_chunk_callbacks.remove(callback)
+            if callback in self._audio_chunk_callbacks
+            else None
+        )
 
-    def set_disconnect_listener(self, callback: DisconnectCallback | None) -> None:
-        """Set or clear (if None) the callback invoked when the client disconnects."""
-        self._disconnect_callback = callback
+    def add_disconnect_listener(self, callback: DisconnectCallback) -> Callable[[], None]:
+        """Add a listener for disconnect events.
 
-    def set_server_command_listener(self, callback: ServerCommandCallback | None) -> None:
-        """Set or clear (if None) the callback invoked when server sends player commands."""
-        self._server_command_callback = callback
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._disconnect_callbacks.append(callback)
+        return lambda: (
+            self._disconnect_callbacks.remove(callback)
+            if callback in self._disconnect_callbacks
+            else None
+        )
+
+    def add_server_command_listener(self, callback: ServerCommandCallback) -> Callable[[], None]:
+        """Add a listener for server command events.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._server_command_callbacks.append(callback)
+        return lambda: (
+            self._server_command_callbacks.remove(callback)
+            if callback in self._server_command_callbacks
+            else None
+        )
 
     def is_time_synchronized(self) -> bool:
         """Return whether time synchronization with the server has converged."""
@@ -493,7 +583,7 @@ class SendspinClient:
         if msg.type is WSMsgType.TEXT:
             await self._handle_json_message(msg.data)
         elif msg.type is WSMsgType.BINARY:
-            await self._handle_binary_message(msg.data)
+            self._handle_binary_message(msg.data)
         elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
             logger.info("WebSocket closed by server")
             await self.disconnect()
@@ -516,19 +606,19 @@ class SendspinClient:
             case StreamStartMessage():
                 await self._handle_stream_start(message)
             case StreamClearMessage():
-                await self._handle_stream_clear(message)
+                self._handle_stream_clear(message)
             case StreamEndMessage():
-                await self._handle_stream_end(message)
+                self._handle_stream_end(message)
             case GroupUpdateServerMessage(payload=payload):
-                await self._handle_group_update(payload)
+                self._handle_group_update(payload)
             case ServerStateMessage(payload=payload):
-                await self._handle_server_state(payload)
+                self._handle_server_state(payload)
             case ServerCommandMessage(payload=payload):
-                await self._handle_server_command(payload)
+                self._handle_server_command(payload)
             case _:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
-    async def _handle_binary_message(self, payload: bytes) -> None:
+    def _handle_binary_message(self, payload: bytes) -> None:
         try:
             header = unpack_binary_header(payload)
         except Exception:
@@ -548,7 +638,7 @@ class SendspinClient:
             return
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
-            await self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
+            self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
         else:
             logger.debug("Ignoring unsupported binary message type: %s", message_type)
 
@@ -612,15 +702,15 @@ class SendspinClient:
         )
 
         if not is_format_update:
-            await self._notify_stream_start(message)
+            self._notify_stream_start(message)
             await self._send_time_message()
 
-    async def _handle_stream_clear(self, message: StreamClearMessage) -> None:
+    def _handle_stream_clear(self, message: StreamClearMessage) -> None:
         roles = message.payload.roles
         logger.info("Stream clear received for roles: %s", roles or "all")
-        await self._notify_stream_clear(roles)
+        self._notify_stream_clear(roles)
 
-    async def _handle_stream_end(self, message: StreamEndMessage) -> None:
+    def _handle_stream_end(self, message: StreamEndMessage) -> None:
         roles = message.payload.roles
         logger.info("Stream ended for roles: %s", roles or "all")
 
@@ -630,31 +720,31 @@ class SendspinClient:
             self._current_player = None
             self._current_pcm_format = None
 
-        await self._notify_stream_end(roles)
+        self._notify_stream_end(roles)
 
-    async def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
+    def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload
-        await self._notify_group_callback(payload)
+        self._notify_group_callback(payload)
 
-    async def _handle_server_state(self, payload: ServerStatePayload) -> None:
+    def _handle_server_state(self, payload: ServerStatePayload) -> None:
         self._server_state = payload
         # Notify controller callback for controller state
-        await self._notify_controller_callback(payload)
+        self._notify_controller_callback(payload)
         # Notify metadata callback when metadata is present
         if payload.metadata is not None:
-            await self._notify_metadata_callback(payload)
+            self._notify_metadata_callback(payload)
 
-    async def _handle_server_command(self, payload: ServerCommandPayload) -> None:
+    def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
-        await self._notify_server_command_callback(payload)
+        self._notify_server_command_callback(payload)
 
     def _configure_audio_output(self, pcm_format: PCMFormat) -> None:
         """Store the current audio format for use in callbacks."""
         self._current_pcm_format = pcm_format
 
-    async def _handle_audio_chunk(self, timestamp_us: int, payload: bytes) -> None:
-        """Handle incoming audio chunk and notify callback."""
-        if self._audio_chunk_callback is None:
+    def _handle_audio_chunk(self, timestamp_us: int, payload: bytes) -> None:
+        """Handle incoming audio chunk and notify callbacks."""
+        if not self._audio_chunk_callbacks:
             return
         if self._current_pcm_format is None:
             logger.debug("Dropping audio chunk without format")
@@ -662,12 +752,11 @@ class SendspinClient:
 
         # Pass server timestamp directly to callback - it handles time conversion
         # to allow for dynamic time base updates
-        try:
-            result = self._audio_chunk_callback(timestamp_us, payload, self._current_pcm_format)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in audio chunk callback %s", self._audio_chunk_callback)
+        for callback in self._audio_chunk_callbacks:
+            try:
+                callback(timestamp_us, payload, self._current_pcm_format)
+            except Exception:
+                logger.exception("Error in audio chunk callback %s", callback)
 
     def compute_play_time(self, server_timestamp_us: int) -> int:
         """
@@ -707,85 +796,61 @@ class SendspinClient:
         adjusted_client_time = client_timestamp_us - self._static_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
-    async def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
-        if self._metadata_callback is None:
-            return
-        try:
-            result = self._metadata_callback(payload)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in metadata callback %s", self._metadata_callback)
+    def _notify_metadata_callback(self, payload: ServerStatePayload) -> None:
+        for callback in self._metadata_callbacks:
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in metadata callback %s", callback)
 
-    async def _notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
-        if self._group_callback is None:
-            return
-        try:
-            result = self._group_callback(payload)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in group callback %s", self._group_callback)
+    def _notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
+        for callback in self._group_callbacks:
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in group callback %s", callback)
 
-    async def _notify_controller_callback(self, payload: ServerStatePayload) -> None:
-        if self._controller_callback is None:
-            return
-        try:
-            result = self._controller_callback(payload)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in controller callback %s", self._controller_callback)
+    def _notify_controller_callback(self, payload: ServerStatePayload) -> None:
+        for callback in self._controller_callbacks:
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in controller callback %s", callback)
 
-    async def _notify_stream_start(self, message: StreamStartMessage) -> None:
-        if self._stream_start_callback is None:
-            return
-        try:
-            result = self._stream_start_callback(message)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in stream start callback %s", self._stream_start_callback)
+    def _notify_stream_start(self, message: StreamStartMessage) -> None:
+        for callback in self._stream_start_callbacks:
+            try:
+                callback(message)
+            except Exception:
+                logger.exception("Error in stream start callback %s", callback)
 
-    async def _notify_stream_end(self, roles: list[Roles] | None) -> None:
-        if self._stream_end_callback is None:
-            return
-        try:
-            result = self._stream_end_callback(roles)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in stream end callback %s", self._stream_end_callback)
+    def _notify_stream_end(self, roles: list[Roles] | None) -> None:
+        for callback in self._stream_end_callbacks:
+            try:
+                callback(roles)
+            except Exception:
+                logger.exception("Error in stream end callback %s", callback)
 
-    async def _notify_stream_clear(self, roles: list[Roles] | None) -> None:
-        if self._stream_clear_callback is None:
-            return
-        try:
-            result = self._stream_clear_callback(roles)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in stream clear callback %s", self._stream_clear_callback)
+    def _notify_stream_clear(self, roles: list[Roles] | None) -> None:
+        for callback in self._stream_clear_callbacks:
+            try:
+                callback(roles)
+            except Exception:
+                logger.exception("Error in stream clear callback %s", callback)
 
-    async def _notify_disconnect_callback(self) -> None:
-        if self._disconnect_callback is None:
-            return
-        try:
-            result = self._disconnect_callback()
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in disconnect callback %s", self._disconnect_callback)
+    def _notify_disconnect_callback(self) -> None:
+        for callback in self._disconnect_callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.exception("Error in disconnect callback %s", callback)
 
-    async def _notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
-        if self._server_command_callback is None:
-            return
-        try:
-            result = self._server_command_callback(payload)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            logger.exception("Error in server command callback %s", self._server_command_callback)
+    def _notify_server_command_callback(self, payload: ServerCommandPayload) -> None:
+        for callback in self._server_command_callbacks:
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in server command callback %s", callback)
 
     async def _time_sync_loop(self) -> None:
         try:
