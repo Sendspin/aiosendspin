@@ -1422,7 +1422,7 @@ class SendspinGroup:
         # Send group update to notify client of their new solo group
         new_group._send_group_update_to_clients()
 
-    async def add_client(self, client: SendspinClient) -> None:
+    async def add_client(self, client: SendspinClient) -> None:  # noqa: PLR0915
         """
         Add a client to this group.
 
@@ -1439,6 +1439,23 @@ class SendspinGroup:
             return
         # Remove it from any existing group first
         await client.ungroup()
+
+        # Check for and remove any stale client with the same client_id
+        # This handles the case where a client disconnects and reconnects
+        # while still being listed in _clients (e.g., solo client disconnect)
+        stale_client = next((c for c in self._clients if c.client_id == client.client_id), None)
+        if stale_client is not None:
+            logger.debug(
+                "Removing stale client %s (object %s) before adding new client (object %s)",
+                stale_client.client_id,
+                id(stale_client),
+                id(client),
+            )
+            self._clients.remove(stale_client)
+            self._unregister_client_events(stale_client)
+            # Clean up stale player from streamer if actively streaming
+            if self._streamer is not None:
+                self._streamer.remove_player(stale_client.client_id)
 
         # Add client to this group's client list
         self._clients.append(client)

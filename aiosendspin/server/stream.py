@@ -1482,6 +1482,34 @@ class Streamer:
         """
         return set(self._players.keys())
 
+    def remove_player(self, client_id: str) -> None:
+        """
+        Remove a player from the streamer.
+
+        Cleans up the player's queue and removes it from pipeline subscribers.
+        This is used when a stale client is being replaced by a reconnecting client.
+
+        Args:
+            client_id: The client ID to remove.
+        """
+        player_state = self._players.pop(client_id, None)
+        if player_state is None:
+            return
+
+        player_state.queue.clear()
+
+        # Remove from pipeline subscribers
+        pipeline_key = (player_state.channel_id, player_state.audio_format)
+        if pipeline := self._pipelines.get(pipeline_key):
+            if client_id in pipeline.subscribers:
+                pipeline.subscribers.remove(client_id)
+
+            # Clean up pipeline if no subscribers remain
+            if not pipeline.subscribers:
+                self._pipelines.pop(pipeline_key)
+                pipeline.encoder = None
+                logger.debug("Removed empty pipeline for channel %s", player_state.channel_id)
+
     @property
     def last_chunk_end_time_us(self) -> int | None:
         """Return the end timestamp of the most recently prepared chunk."""
