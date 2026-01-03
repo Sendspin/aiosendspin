@@ -105,7 +105,7 @@ class SendspinClient:
     _to_write: asyncio.Queue[ServerMessage | bytes]
     """Queue for messages to be sent to the client through the WebSocket."""
     _group: SendspinGroup
-    _event_cbs: list[Callable[["SendspinClient", ClientEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[["SendspinClient", ClientEvent], None]]
     _closing: bool = False
     _disconnecting: bool = False
     """Flag to prevent multiple concurrent disconnect tasks."""
@@ -720,7 +720,7 @@ class SendspinClient:
             self._logger.debug("Enqueueing message: %s", type(message).__name__)
 
     def add_event_listener(
-        self, callback: Callable[["SendspinClient", ClientEvent], Coroutine[None, None, None]]
+        self, callback: Callable[["SendspinClient", ClientEvent], None]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this client.
@@ -741,8 +741,10 @@ class SendspinClient:
 
     def _signal_event(self, event: ClientEvent) -> None:
         for cb in self._event_cbs:
-            task = self._server.loop.create_task(cb(self, event))
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            try:
+                cb(self, event)
+            except Exception:
+                logger.exception("Error in event listener")
 
     async def _handle_state_transition(self, new_state: ClientStateType) -> None:
         """

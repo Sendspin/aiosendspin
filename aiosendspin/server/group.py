@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 from asyncio import Task
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from io import BytesIO
@@ -171,7 +171,7 @@ class SendspinGroup:
     """Mapping of audio formats to their base64 encoded headers."""
     _preferred_stream_codec: AudioCodec = AudioCodec.OPUS
     """Preferred codec used by the current stream."""
-    _event_cbs: list[Callable[[SendspinGroup, GroupEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[[SendspinGroup, GroupEvent], None]]
     """List of event callbacks for this group."""
     _current_state: PlaybackStateType = PlaybackStateType.STOPPED
     """Current playback state of the group."""
@@ -1226,7 +1226,7 @@ class SendspinGroup:
         self._signal_event(event)
 
     def add_event_listener(
-        self, callback: Callable[[SendspinGroup, GroupEvent], Coroutine[None, None, None]]
+        self, callback: Callable[[SendspinGroup, GroupEvent], None]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of this group.
@@ -1247,14 +1247,16 @@ class SendspinGroup:
 
     def _signal_event(self, event: GroupEvent) -> None:
         for cb in self._event_cbs:
-            task = self._server.loop.create_task(cb(self, event))
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            try:
+                cb(self, event)
+            except Exception:
+                logger.exception("Error in event listener")
 
     def _register_client_events(self, client: SendspinClient) -> None:
         """Register event listeners for client events like volume changes."""
 
         # Inline function to capture self
-        async def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:
+        def on_client_event(_client: SendspinClient, event: ClientEvent) -> None:
             if isinstance(event, VolumeChangedEvent):
                 # When any player's volume changes, update controller clients
                 self._send_controller_state_to_clients()

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import socket
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -57,7 +57,7 @@ class SendspinServer:
     _clients: set[SendspinClient]
     """All groups managed by this server."""
     _loop: asyncio.AbstractEventLoop
-    _event_cbs: list[Callable[["SendspinServer", SendspinEvent], Coroutine[None, None, None]]]
+    _event_cbs: list[Callable[["SendspinServer", SendspinEvent], None]]
     _connection_tasks: dict[str, asyncio.Task[None]]
     """
     All tasks managing client connections.
@@ -272,7 +272,7 @@ class SendspinServer:
             self._retry_events.pop(url, None)  # Cleanup retry events dict
 
     def add_event_listener(
-        self, callback: Callable[["SendspinServer", SendspinEvent], Coroutine[None, None, None]]
+        self, callback: Callable[["SendspinServer", SendspinEvent], None]
     ) -> Callable[[], None]:
         """
         Register a callback to listen for state changes of the server.
@@ -294,8 +294,10 @@ class SendspinServer:
     def _signal_event(self, event: SendspinEvent) -> None:
         """Signal an event to all registered listeners."""
         for cb in self._event_cbs:
-            task = self._loop.create_task(cb(self, event))
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            try:
+                cb(self, event)
+            except Exception:
+                logger.exception("Error in event listener")
 
     async def _handle_client_connect(self, client: SendspinClient) -> None:
         """
