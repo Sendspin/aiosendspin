@@ -1208,13 +1208,13 @@ class SendspinGroup:
         # If app didn't declare any commands, only protocol commands are supported
         return protocol_commands
 
-    async def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
+    def _handle_group_command(self, cmd: ControllerCommandPayload) -> None:
         # Handle volume and mute commands directly
         if cmd.command == MediaCommand.VOLUME and cmd.volume is not None:
-            await self.set_volume(cmd.volume)
+            self.set_volume(cmd.volume)
             return
         if cmd.command == MediaCommand.MUTE and cmd.mute is not None:
-            await self.set_mute(cmd.mute)
+            self.set_mute(cmd.mute)
             return
 
         # Signal the event for application commands (PLAY, PAUSE, STOP, etc.)
@@ -1301,7 +1301,7 @@ class SendspinGroup:
             return False
         return all(player.muted for player in players)
 
-    async def set_volume(self, volume_level: int) -> None:
+    def set_volume(self, volume_level: int) -> None:
         """Set group volume using redistribution algorithm from spec."""
         volume_level = max(0, min(100, volume_level))
         players = self.players()
@@ -1358,7 +1358,7 @@ class SendspinGroup:
         # Send state update to controller clients
         self._send_controller_state_to_clients()
 
-    async def set_mute(self, muted: bool) -> None:  # noqa: FBT001
+    def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set group mute state and propagate to all players."""
         # Propagate to all player clients
         for player in self.players():

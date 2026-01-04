@@ -41,7 +41,7 @@ class ControllerClient:
             await self._handle_switch()
         else:
             # Forward other commands to the group
-            await self.client.group._handle_group_command(payload)  # noqa: SLF001
+            self.client.group._handle_group_command(payload)  # noqa: SLF001
 
     async def _handle_switch(self) -> None:
         """Handle the switch command to cycle through groups."""
