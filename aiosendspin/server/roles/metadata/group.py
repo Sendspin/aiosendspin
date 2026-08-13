@@ -33,6 +33,8 @@ class MetadataGroupRole(GroupRole):
         """Initialize MetadataGroupRole."""
         super().__init__(group)
         self._current_metadata: Metadata | None = None
+        self._pending_metadata: Metadata | None = None
+        self._pending_update: SessionUpdateMetadata | None = None
         self._track_progress_timestamp_us: int | None = None
 
     @property
@@ -111,6 +113,7 @@ class MetadataGroupRole(GroupRole):
                 metadata,
                 track_progress=current_progress,
                 playback_speed=0,
+                timestamp_us=None,
             )
         )
 
@@ -194,7 +197,7 @@ class MetadataGroupRole(GroupRole):
         new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
         self.set_metadata(new_metadata)
 
-    def clear(self) -> None:
+    def clear(self, *, timestamp_us: int | None = None) -> None:
         """Clear all metadata."""
         self.set_metadata(None)
 

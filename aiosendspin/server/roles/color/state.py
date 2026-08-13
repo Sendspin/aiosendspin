@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aiosendspin.models.color import SessionUpdateColor, _validate_rgb
 
@@ -65,6 +65,8 @@ class Color:
     """Light color for use on dark backgrounds as (R, G, B)."""
     on_light: _RGB | None = None
     """Dark color for use on light backgrounds as (R, G, B)."""
+    timestamp_us: int | None = field(default=None, compare=False)
+    """Server timestamp when this palette takes effect."""
 
     def __post_init__(self) -> None:
         """Validate RGB shape, range, and spec-mandated contrast pairs."""

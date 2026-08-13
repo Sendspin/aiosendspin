@@ -28,6 +28,7 @@ from aiosendspin.models.artwork import (
     StreamStartArtwork,
     unpack_artwork_announce,
 )
+from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -146,6 +147,7 @@ from .management import (
     with_storage,
 )
 from .models import AudioFormat, PCMFormat, ServerInfo
+from .scheduled_state import ScheduledStateUpdate
 from .time_sync import SendspinTimeFilter
 
 if TYPE_CHECKING:
@@ -345,6 +347,13 @@ class SendspinConnection:
     """Latest group state received from server."""
     _server_state: ServerStatePayload | None = None
     """Latest state of each role object received from server."""
+
+    _metadata_state: ScheduledStateUpdate[SessionUpdateMetadata]
+    """Confirmed metadata plus at most one pending update, applied at effective time."""
+    _color_state: ScheduledStateUpdate[SessionUpdateColor]
+    """Confirmed color plus at most one pending update, applied at effective time."""
+    _artwork_channels: dict[int, ScheduledStateUpdate[_ArtworkFrame]]
+    """Per-channel confirmed artwork plus at most one pending update."""
 
     def __init__(self, client: SendspinClient) -> None:
         """Create a connection owned by ``client``, seeding per-connection state."""
@@ -1057,6 +1066,10 @@ class SendspinConnection:
         self._current_visualizer_config = None
         self._activities = []
         self._active_roles = []
+        self._metadata_state.discard_pending()
+        self._color_state.discard_pending()
+        for state in self._artwork_channels.values():
+            state.discard_pending()
 
         self._closed.set()
         self._client.on_connection_closed(self)
@@ -1733,8 +1746,16 @@ class SendspinConnection:
             self._client.notify_controller_callback(payload)
         if not isinstance(payload.metadata, UndefinedField):
             self._client.notify_metadata_callback(payload)
+            if payload.metadata is None:
+                self._metadata_state.clear_immediately()
+            else:
+                self._metadata_state.handle_update(payload.metadata)
         if not isinstance(payload.color, UndefinedField):
             self._client.notify_color_callback(payload)
+            if payload.color is None:
+                self._color_state.clear_immediately()
+            else:
+                self._color_state.handle_update(payload.color)
 
     async def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
@@ -2092,3 +2113,25 @@ class SendspinConnection:
     def now_us(self) -> int:
         """Return current timestamp from the client's clock in microseconds."""
         return self._client.clock.now_us()
+
+    def _map_to_client_time(self, server_timestamp_us: int) -> int:
+        """Map a server-clock timestamp to the client's local clock, for scheduling.
+
+        Unlike `compute_play_time`, this applies no static delay or unsynchronized
+        lead time: it is used to classify server/state and artwork timestamps as
+        future/now/past, not to schedule audio playback.
+        """
+        if self._time_filter.is_synchronized:
+            return self._time_filter.compute_client_time(server_timestamp_us)
+        return self.now_us()
+
+    def _commit_metadata(self, update: SessionUpdateMetadata | None) -> None:
+        self._client.notify_effective_metadata(ServerStatePayload(metadata=update))
+
+    def _commit_color(self, update: SessionUpdateColor | None) -> None:
+        self._client.notify_effective_color(ServerStatePayload(color=update))
+
+    def _commit_artwork(self, channel: int, frame: _ArtworkFrame | None) -> None:
+        payload = b"" if frame is None or frame.image_data is None else frame.image_data
+        timestamp_us = self.now_us() if frame is None else frame.timestamp
+        self._client.notify_effective_artwork(channel, payload, timestamp_us)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _PendingArtwork:
+    image: Image.Image | None
+    timestamp_us: int
+
+
 class ArtworkGroupRole(GroupRole):
     """Coordinate artwork across a group.
 
@@ -37,6 +44,8 @@ class ArtworkGroupRole(GroupRole):
         """Initialize ArtworkGroupRole."""
         super().__init__(group)
         self._current_artwork: dict[ArtworkSource, Image.Image] = {}
+        self._pending_artwork: dict[ArtworkSource, _PendingArtwork] = {}
+        self._send_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     def on_member_join(self, role: Role) -> None:
         """Send current artwork to newly joined member."""
@@ -48,29 +57,78 @@ class ArtworkGroupRole(GroupRole):
         for channel_num, channel_config in role.get_channel_configs().items():
             if channel_config.source == ArtworkSource.NONE:
                 continue
-            artwork = self._current_artwork.get(channel_config.source)
-            if artwork is not None:
-                self._schedule_send_artwork(role, artwork, channel_num, channel_config)
+            if (
+                channel_config.source in self._current_artwork
+                or channel_config.source in self._pending_artwork
+            ):
+                self._schedule_artwork_replay(role, channel_num, channel_config)
 
-    def _schedule_send_artwork(
+    def _schedule_artwork_replay(
         self,
         role: ArtworkRoleProtocol,
-        image: Image.Image,
         channel: int,
         channel_config: ArtworkChannel,
     ) -> None:
-        """Schedule artwork send as a background task."""
-        # Pillow images are not safe to share across concurrent encode tasks.
-        create_task(self._send_artwork_to_role_channel(role, image.copy(), channel, channel_config))
+        create_task(self._send_artwork_replay(role, channel, channel_config))
+
+    async def _send_artwork_replay(
+        self,
+        role: ArtworkRoleProtocol,
+        channel: int,
+        channel_config: ArtworkChannel,
+    ) -> None:
+        async with self._send_lock(role, channel):
+            source = channel_config.source
+            current = self._current_artwork.get(source)
+            pending = self._pending_artwork.get(source)
+            if current is not None:
+                await self._encode_and_send_artwork(
+                    role,
+                    current.copy(),
+                    channel,
+                    channel_config,
+                    self._group._server.clock.now_us(),  # noqa: SLF001
+                )
+            elif pending is not None:
+                await self._encode_and_send_artwork(
+                    role,
+                    None,
+                    channel,
+                    channel_config,
+                    self._group._server.clock.now_us(),  # noqa: SLF001
+                )
+            if pending is not None:
+                await self._encode_and_send_artwork(
+                    role,
+                    pending.image.copy() if pending.image is not None else None,
+                    channel,
+                    channel_config,
+                    pending.timestamp_us,
+                )
 
     async def _send_artwork_to_role_channel(
         self,
         role: ArtworkRoleProtocol,
-        image: Image.Image,
+        image: Image.Image | None,
         channel: int,
         channel_config: ArtworkChannel,
+        timestamp_us: int,
     ) -> None:
         """Send artwork to a specific role channel."""
+        async with self._send_lock(role, channel):
+            await self._encode_and_send_artwork(role, image, channel, channel_config, timestamp_us)
+
+    def _send_lock(self, role: ArtworkRoleProtocol, channel: int) -> asyncio.Lock:
+        return self._send_locks.setdefault((id(role), channel), asyncio.Lock())
+
+    async def _encode_and_send_artwork(
+        self,
+        role: ArtworkRoleProtocol,
+        image: Image.Image | None,
+        channel: int,
+        channel_config: ArtworkChannel,
+        timestamp_us: int,
+    ) -> None:
         try:
             # ArtworkChannel requires these for every source but none, which is never sent.
             assert channel_config.width is not None
@@ -100,26 +158,48 @@ class ArtworkGroupRole(GroupRole):
         """Return current artist artwork, or None if not set."""
         return self._current_artwork.get(ArtworkSource.ARTIST)
 
-    async def set_album_artwork(self, image: Image.Image | None) -> None:
+    async def set_album_artwork(
+        self, image: Image.Image | None, *, timestamp_us: int | None = None
+    ) -> None:
         """Set or clear album artwork.
 
         Args:
             image: The artwork image to set, or None to clear.
+            timestamp_us: Server timestamp when the update takes effect.
         """
-        await self._set_artwork(ArtworkSource.ALBUM, image)
+        await self._set_artwork(ArtworkSource.ALBUM, image, timestamp_us=timestamp_us)
 
-    async def set_artist_artwork(self, image: Image.Image | None) -> None:
+    async def set_artist_artwork(
+        self, image: Image.Image | None, *, timestamp_us: int | None = None
+    ) -> None:
         """Set or clear artist artwork.
 
         Args:
             image: The artwork image to set, or None to clear.
+            timestamp_us: Server timestamp when the update takes effect.
         """
-        await self._set_artwork(ArtworkSource.ARTIST, image)
+        await self._set_artwork(ArtworkSource.ARTIST, image, timestamp_us=timestamp_us)
 
-    async def _set_artwork(self, source: ArtworkSource, image: Image.Image | None) -> None:
+    async def _set_artwork(
+        self,
+        source: ArtworkSource,
+        image: Image.Image | None,
+        *,
+        timestamp_us: int | None = None,
+    ) -> None:
         """Set or clear artwork for a source type."""
-        event_timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
-        if image is None:
+        now_us = self._group._server.clock.now_us()  # noqa: SLF001
+        event_timestamp_us = now_us if timestamp_us is None else timestamp_us
+        pending = self._pending_artwork.pop(source, None)
+        if pending is not None and event_timestamp_us >= pending.timestamp_us:
+            if pending.image is None:
+                self._current_artwork.pop(source, None)
+            else:
+                self._current_artwork[source] = pending.image
+
+        if event_timestamp_us > now_us:
+            self._pending_artwork[source] = _PendingArtwork(image, event_timestamp_us)
+        elif image is None:
             self._current_artwork.pop(source, None)
         else:
             self._current_artwork[source] = image
@@ -133,16 +213,15 @@ class ArtworkGroupRole(GroupRole):
                 continue
             for channel_num, channel_config in channel_configs.items():
                 if channel_config.source == source:
-                    if image is None:
-                        timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
-                        role.send_artwork_cleared(channel_num, timestamp_us)
-                    else:
-                        # Pillow images are not safe to share across concurrent encode tasks.
-                        send_tasks.append(
-                            self._send_artwork_to_role_channel(
-                                role, image.copy(), channel_num, channel_config
-                            )
+                    send_tasks.append(
+                        self._send_artwork_to_role_channel(
+                            role,
+                            image.copy() if image is not None else None,
+                            channel_num,
+                            channel_config,
+                            event_timestamp_us,
                         )
+                    )
 
         if send_tasks:
             await asyncio.gather(*send_tasks)

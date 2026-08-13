@@ -4,8 +4,12 @@ from aiosendspin.models.types import SECRET_LOCATIONS
 from aiosendspin.noise.pairing_code import format_pairing_code
 
 from .client import (
+    ArtworkTimestampCallback,
     AudioChunkCallback,
     DisconnectCallback,
+    EffectiveArtworkCallback,
+    EffectiveColorCallback,
+    EffectiveMetadataCallback,
     GroupUpdateCallback,
     MetadataCallback,
     OutputDelayCallback,
@@ -29,10 +33,14 @@ from .time_sync import SendspinTimeFilter
 
 __all__ = [
     "SECRET_LOCATIONS",
+    "ArtworkTimestampCallback",
     "AudioChunkCallback",
     "AudioFormat",
     "ClientListener",
     "DisconnectCallback",
+    "EffectiveArtworkCallback",
+    "EffectiveColorCallback",
+    "EffectiveMetadataCallback",
     "GroupUpdateCallback",
     "MetadataCallback",
     "OutputDelayCallback",

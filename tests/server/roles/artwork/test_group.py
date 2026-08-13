@@ -11,6 +11,7 @@ from PIL import Image
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.events import ArtworkClearedEvent, ArtworkUpdatedEvent
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
+from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 
 
 def _make_group_stub() -> MagicMock:

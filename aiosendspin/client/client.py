@@ -213,6 +213,10 @@ class SendspinClient:
     """Callbacks invoked on server/state messages."""
     _color_callbacks: list[ColorCallback]
     """Callbacks invoked on server/state messages with color."""
+    _effective_metadata_callbacks: list[EffectiveMetadataCallback]
+    """Callbacks invoked when merged metadata state takes effect."""
+    _effective_color_callbacks: list[EffectiveColorCallback]
+    """Callbacks invoked when merged color state takes effect."""
     _stream_start_callbacks: list[StreamStartCallback]
     """Callbacks invoked when a stream starts."""
     _stream_end_callbacks: list[StreamEndCallback]
@@ -345,6 +349,8 @@ class SendspinClient:
         self._group_callbacks = []
         self._controller_callbacks = []
         self._color_callbacks = []
+        self._effective_metadata_callbacks = []
+        self._effective_color_callbacks = []
         self._stream_start_callbacks = []
         self._stream_end_callbacks = []
         self._stream_clear_callbacks = []
@@ -1169,6 +1175,26 @@ class SendspinClient:
             self._color_callbacks.remove(callback) if callback in self._color_callbacks else None
         )
 
+    def add_effective_metadata_listener(
+        self, callback: EffectiveMetadataCallback
+    ) -> Callable[[], None]:
+        """Add a listener for merged metadata state when it takes effect."""
+        self._effective_metadata_callbacks.append(callback)
+        return lambda: (
+            self._effective_metadata_callbacks.remove(callback)
+            if callback in self._effective_metadata_callbacks
+            else None
+        )
+
+    def add_effective_color_listener(self, callback: EffectiveColorCallback) -> Callable[[], None]:
+        """Add a listener for merged color state when it takes effect."""
+        self._effective_color_callbacks.append(callback)
+        return lambda: (
+            self._effective_color_callbacks.remove(callback)
+            if callback in self._effective_color_callbacks
+            else None
+        )
+
     def add_stream_start_listener(self, callback: StreamStartCallback) -> Callable[[], None]:
         """Add a listener for stream start events.
 
@@ -1378,6 +1404,22 @@ class SendspinClient:
                 callback(payload)
             except Exception:
                 logger.exception("Error in color callback %s", callback)
+
+    def notify_effective_metadata(self, payload: ServerStatePayload) -> None:
+        """Dispatch effective merged metadata state."""
+        for callback in list(self._effective_metadata_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in effective metadata callback %s", callback)
+
+    def notify_effective_color(self, payload: ServerStatePayload) -> None:
+        """Dispatch effective merged color state."""
+        for callback in list(self._effective_color_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in effective color callback %s", callback)
 
     def notify_stream_start(self, message: StreamStartMessage) -> None:
         """Dispatch a stream/start to the registered listeners."""

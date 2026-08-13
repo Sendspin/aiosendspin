@@ -25,7 +25,10 @@ _STATE_ROLES = [Roles.METADATA.value, Roles.COLOR.value, Roles.CONTROLLER.value,
 def _make_connection() -> tuple[SendspinConnection, MagicMock]:
     conn = SendspinConnection.__new__(SendspinConnection)
     client = MagicMock()
+    client.clock = ManualClock(now_us_value=1_000_000)
     conn._client = client  # noqa: SLF001
+    conn._time_filter = SendspinTimeFilter()  # noqa: SLF001
+    conn._init_state_trackers()  # noqa: SLF001
     return conn, client
 
 
@@ -56,6 +59,7 @@ def test_absent_role_does_not_fire_callback() -> None:
         ServerStatePayload(metadata=SessionUpdateMetadata(timestamp=1))
     )
     client.notify_metadata_callback.assert_called_once()
+    client.notify_effective_metadata.assert_called_once()
     client.notify_color_callback.assert_not_called()
     client.notify_controller_callback.assert_not_called()
 

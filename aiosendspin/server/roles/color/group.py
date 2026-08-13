@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.color import SessionUpdateColor
@@ -30,6 +31,8 @@ class ColorGroupRole(GroupRole):
         """Initialize ColorGroupRole."""
         super().__init__(group)
         self._current_color: Color | None = None
+        self._pending_color: Color | None = None
+        self._pending_update: SessionUpdateColor | None = None
 
     @property
     def color(self) -> Color | None:
@@ -61,12 +64,32 @@ class ColorGroupRole(GroupRole):
             return
         role.send_message(ServerStateMessage(ServerStatePayload(color=update)))
 
-    def set_color(self, color: Color | None) -> None:
-        """Set color palette and push updates to all subscribed roles."""
-        if color == self._current_color:
+    def set_color(self, color: Color | None, *, timestamp_us: int | None = None) -> None:
+        """Set or schedule a color palette and push it to subscribed roles."""
+        timestamp = (
+            self._group._server.clock.now_us()  # noqa: SLF001
+            if timestamp_us is None
+            else timestamp_us
+        )
+        if color is not None:
+            if timestamp_us is not None:
+                color = replace(color, timestamp_us=timestamp_us)
+            elif color.timestamp_us is None:
+                color = replace(color, timestamp_us=timestamp)
+            else:
+                timestamp = color.timestamp_us
+
+        had_pending = self._pending_update is not None
+        if self._pending_update is not None:
+            pending_timestamp = self._pending_update.timestamp
+            if timestamp >= pending_timestamp:
+                self._current_color = self._pending_color
+            self._pending_color = None
+            self._pending_update = None
+
+        if not had_pending and color == self._current_color:
             return
 
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
         last_color = self._current_color
         color_update = (
             SessionUpdateColor(timestamp=timestamp)
@@ -74,7 +97,11 @@ class ColorGroupRole(GroupRole):
             else color.snapshot_update(timestamp)
         )
 
-        self._current_color = color
+        if timestamp > self._group._server.clock.now_us():  # noqa: SLF001
+            self._pending_color = color
+            self._pending_update = color_update
+        else:
+            self._current_color = color
 
         for role in self._members:
             self._send_color(role, color_update, cleared=color is None)
@@ -92,6 +119,6 @@ class ColorGroupRole(GroupRole):
             )
         )
 
-    def clear(self) -> None:
+    def clear(self, *, timestamp_us: int | None = None) -> None:
         """Clear the color palette."""
-        self.set_color(None)
+        self.set_color(None, timestamp_us=timestamp_us)
