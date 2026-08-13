@@ -43,7 +43,7 @@ async def test_future_metadata_becomes_pending_then_applies() -> None:
     client.notify_effective_metadata.assert_called_once()
     (delivered,) = client.notify_effective_metadata.call_args[0]
     assert delivered.metadata.title == "Later"
-    assert conn._metadata_state.confirmed is None  # noqa: SLF001, still logically pending
+    assert conn._metadata_state.confirmed is future_update  # noqa: SLF001
 
 
 async def test_past_color_applies_immediately() -> None:
@@ -59,42 +59,41 @@ async def test_past_color_applies_immediately() -> None:
     assert conn._color_state.confirmed is update  # noqa: SLF001
 
 
-async def test_earlier_metadata_before_pending_effective_discards_silently() -> None:
-    """An earlier incoming metadata update discards the pending one unfired."""
+async def test_latest_metadata_arrival_wins_when_timestamp_goes_backwards() -> None:
+    """A future metadata arrival replaces pending without timestamp comparison."""
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
-    pending = SessionUpdateMetadata(timestamp=now + 10_000_000, title="Pending")
+    pending = SessionUpdateMetadata(timestamp=now + 500_000, title="Pending")
     conn._handle_server_state(ServerStatePayload(metadata=pending))  # noqa: SLF001
-    client.notify_effective_metadata.assert_not_called()
-
-    earlier = SessionUpdateMetadata(timestamp=now + 9_000_000, title="Earlier")
+    earlier = SessionUpdateMetadata(timestamp=now + 100_000, title="Earlier")
     conn._handle_server_state(ServerStatePayload(metadata=earlier))  # noqa: SLF001
 
-    # Neither the discarded pending nor the still-future replacement has fired,
-    # since the discarded pending was never displayed in the first place.
-    client.notify_effective_metadata.assert_not_called()
-    assert conn._metadata_state.confirmed is None  # noqa: SLF001
+    await asyncio.sleep(0.3)
+
+    client.notify_effective_metadata.assert_called_once()
+    (delivered,) = client.notify_effective_metadata.call_args[0]
+    assert delivered.metadata.title == "Earlier"
+    assert conn._metadata_state.confirmed is earlier  # noqa: SLF001
 
 
-async def test_equal_or_later_color_commits_pending_before_effective_time() -> None:
-    """A later incoming color update force-commits the pending one immediately."""
+async def test_later_color_arrival_replaces_pending_without_applying_it() -> None:
+    """Replacing pending never applies the displaced color update."""
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
-    pending = SessionUpdateColor(timestamp=now + 10_000_000, primary=(9, 9, 9))
+    pending = SessionUpdateColor(timestamp=now + 100_000, primary=(9, 9, 9))
     conn._handle_server_state(ServerStatePayload(color=pending))  # noqa: SLF001
-    client.notify_effective_color.assert_not_called()
-
-    later = SessionUpdateColor(timestamp=now + 10_000_000, primary=(1, 1, 1))
+    later = SessionUpdateColor(timestamp=now + 500_000, primary=(1, 1, 1))
     conn._handle_server_state(ServerStatePayload(color=later))  # noqa: SLF001
 
-    client.notify_effective_color.assert_called_once()
-    (delivered,) = client.notify_effective_color.call_args[0]
-    assert delivered.color.primary == (9, 9, 9)
-    assert conn._color_state.confirmed is pending  # noqa: SLF001
+    await asyncio.sleep(0.3)
+
+    client.notify_effective_color.assert_not_called()
+    assert conn._color_state.confirmed is None  # noqa: SLF001
+    conn._color_state.discard_pending()  # noqa: SLF001
 
 
-async def test_rollback_after_metadata_pending_applied_reverts_to_confirmed_snapshot() -> None:
-    """An already-displayed pending metadata update rolls back to the confirmed snapshot."""
+async def test_past_metadata_arrival_merges_into_applied_scheduled_state() -> None:
+    """Once due, scheduled metadata is current regardless of later timestamp values."""
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
 
@@ -113,22 +112,15 @@ async def test_rollback_after_metadata_pending_applied_reverts_to_confirmed_snap
     earlier = SessionUpdateMetadata(timestamp=now + 100_000, artist="Artist C")
     conn._handle_server_state(ServerStatePayload(metadata=earlier))  # noqa: SLF001
 
-    # The pending "B" title never gets promoted: the rollback re-emits the
-    # untouched confirmed snapshot (still "A" / "Artist A").
-    (rolled_back,) = client.notify_effective_metadata.call_args_list[2][0]
-    assert rolled_back.metadata.title == "A"
-    assert rolled_back.metadata.artist == "Artist A"
-
-    # "earlier" is itself already past its own effective time by now (it precedes an
-    # already-applied pending), so it applies right after the rollback.
-    (applied,) = client.notify_effective_metadata.call_args_list[3][0]
-    assert applied.metadata.title == "A"  # untouched by "earlier"
+    assert client.notify_effective_metadata.call_count == 3
+    (applied,) = client.notify_effective_metadata.call_args_list[2][0]
+    assert applied.metadata.title == "B"
     assert applied.metadata.artist == "Artist C"
     assert conn._metadata_state.confirmed is not None  # noqa: SLF001
 
 
-async def test_rollback_after_color_pending_applied_reverts_to_confirmed_snapshot() -> None:
-    """An already-displayed pending color update rolls back to the confirmed snapshot."""
+async def test_past_color_arrival_merges_into_applied_scheduled_state() -> None:
+    """A past arrival updates current color without rolling scheduled state back."""
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
 
@@ -147,13 +139,14 @@ async def test_rollback_after_color_pending_applied_reverts_to_confirmed_snapsho
     earlier = SessionUpdateColor(timestamp=now + 100_000, accent=(3, 3, 3))
     conn._handle_server_state(ServerStatePayload(color=earlier))  # noqa: SLF001
 
-    (rolled_back,) = client.notify_effective_color.call_args_list[2][0]
-    assert rolled_back.color.primary == (1, 1, 1)
-    assert rolled_back.color.accent == (2, 2, 2)
+    assert client.notify_effective_color.call_count == 3
+    (applied,) = client.notify_effective_color.call_args_list[2][0]
+    assert applied.color.primary == (9, 9, 9)
+    assert applied.color.accent == (3, 3, 3)
 
 
-async def test_equal_or_later_metadata_after_applied_no_duplicate_callback() -> None:
-    """Promoting an already-displayed pending metadata update fires no extra callback."""
+async def test_future_metadata_after_applied_update_waits_without_extra_callback() -> None:
+    """A new future update waits while the applied scheduled state remains current."""
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
 
@@ -165,8 +158,6 @@ async def test_equal_or_later_metadata_after_applied_no_duplicate_callback() -> 
     later = SessionUpdateMetadata(timestamp=now + 800_000, title="C")
     conn._handle_server_state(ServerStatePayload(metadata=later))  # noqa: SLF001
 
-    # Promoting "B" into confirmed does not change what is displayed (it was already
-    # shown), so no extra callback fires; "C" is itself still in the future.
     assert client.notify_effective_metadata.call_count == 1
     confirmed = conn._metadata_state.confirmed  # noqa: SLF001
     assert confirmed is not None

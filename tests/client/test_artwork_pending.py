@@ -1,8 +1,4 @@
-"""Tests for client-side artwork binary handling.
-
-Covers timestamp retention, per-channel pending/current reconciliation, rollback,
-and stream/end cleanup.
-"""
+"""Tests for client-side artwork binary scheduling and stream cleanup."""
 
 from __future__ import annotations
 
@@ -68,8 +64,7 @@ async def test_future_artwork_becomes_pending_then_applies_as_current() -> None:
     await asyncio.sleep(0.3)
 
     client.notify_effective_artwork.assert_called_once_with(1, b"future-art", timestamp_us)
-    # still logically pending, even though it has been displayed
-    assert conn._artwork_channels[1].confirmed is None  # noqa: SLF001
+    assert conn._artwork_channels[1].confirmed is not None  # noqa: SLF001
     assert conn._artwork_channels[1].display is not None  # noqa: SLF001
 
 
@@ -90,36 +85,34 @@ async def test_scheduled_empty_clear_applies_at_effective_time() -> None:
     client.notify_effective_artwork.assert_called_once_with(0, b"", timestamp_us)
 
 
-async def test_artwork_rollback_after_pending_applied_reverts_to_confirmed_frame() -> None:
-    """An already-displayed pending artwork frame rolls back to the confirmed frame."""
+async def test_latest_artwork_arrival_wins_when_timestamp_goes_backwards() -> None:
+    """The latest future image replaces pending independently of timestamp order."""
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
 
-    base_payload = _artwork_binary(0, now - 1_000_000, b"base-art")
-    conn._handle_binary_message(base_payload)  # noqa: SLF001
-    assert client.notify_effective_artwork.call_count == 1
-    client.notify_effective_artwork.assert_called_with(0, b"base-art", now - 1_000_000)
-
-    pending_payload = _artwork_binary(0, now + 150_000, b"pending-art")
+    pending_payload = _artwork_binary(0, now + 500_000, b"pending-art")
     conn._handle_binary_message(pending_payload)  # noqa: SLF001
-    await asyncio.sleep(0.3)
-    assert client.notify_effective_artwork.call_count == 2
-    client.notify_effective_artwork.assert_called_with(0, b"pending-art", now + 150_000)
-
     earlier_payload = _artwork_binary(0, now + 100_000, b"earlier-art")
     conn._handle_binary_message(earlier_payload)  # noqa: SLF001
 
-    # The rollback re-emits the confirmed frame ("base-art"); "pending-art" is
-    # discarded entirely. "earlier-art" is itself already past its own effective
-    # time by now, so it applies right after the rollback.
-    assert client.notify_effective_artwork.call_args_list[2] == (
-        (0, b"base-art", now - 1_000_000),
-        {},
+    await asyncio.sleep(0.3)
+
+    client.notify_effective_artwork.assert_called_once_with(0, b"earlier-art", now + 100_000)
+
+
+async def test_immediate_artwork_discards_pending() -> None:
+    """A present image applies immediately and cancels the held future image."""
+    conn, client, clock = _make_synced_connection()
+    now = clock.now_us()
+    conn._handle_binary_message(  # noqa: SLF001
+        _artwork_binary(0, now + 5_000_000, b"pending")
     )
-    assert client.notify_effective_artwork.call_args_list[3] == (
-        (0, b"earlier-art", now + 100_000),
-        {},
-    )
+
+    conn._handle_binary_message(_artwork_binary(0, now - 1, b"immediate"))  # noqa: SLF001
+
+    client.notify_effective_artwork.assert_called_once_with(0, b"immediate", now - 1)
+    await asyncio.sleep(0.05)
+    client.notify_effective_artwork.assert_called_once()
 
 
 async def test_artwork_pending_discarded_on_stream_end() -> None:
@@ -141,8 +134,8 @@ async def test_artwork_pending_discarded_on_stream_end() -> None:
     assert conn._artwork_channels[2].display is None  # noqa: SLF001
 
 
-async def test_artwork_stream_end_discards_applied_pending_without_extra_callback() -> None:
-    """Stream end discards an already-displayed pending frame silently."""
+async def test_artwork_stream_end_keeps_applied_current_without_extra_callback() -> None:
+    """Stream end discards only pending images and retains current artwork."""
     conn, client, clock = _make_synced_connection()
     base_timestamp = clock.now_us() - 1_000_000
     conn._handle_binary_message(_artwork_binary(3, base_timestamp, b"base"))  # noqa: SLF001
@@ -158,4 +151,4 @@ async def test_artwork_stream_end_discards_applied_pending_without_extra_callbac
 
     assert client.notify_effective_artwork.call_count == 2
     assert conn._artwork_channels[3].confirmed is not None  # noqa: SLF001
-    assert conn._artwork_channels[3].confirmed.image_data == b"base"  # noqa: SLF001
+    assert conn._artwork_channels[3].confirmed.image_data == b"already-shown"  # noqa: SLF001

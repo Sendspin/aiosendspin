@@ -79,6 +79,7 @@ class ArtworkGroupRole(GroupRole):
     ) -> None:
         async with self._send_lock(role, channel):
             source = channel_config.source
+            self._promote_due_pending(source, self._group._server.clock.now_us())  # noqa: SLF001
             current = self._current_artwork.get(source)
             pending = self._pending_artwork.get(source)
             if current is not None:
@@ -152,10 +153,18 @@ class ArtworkGroupRole(GroupRole):
 
     def get_album_artwork(self) -> Image.Image | None:
         """Return current album artwork, or None if not set."""
+        self._promote_due_pending(
+            ArtworkSource.ALBUM,
+            self._group._server.clock.now_us(),  # noqa: SLF001
+        )
         return self._current_artwork.get(ArtworkSource.ALBUM)
 
     def get_artist_artwork(self) -> Image.Image | None:
         """Return current artist artwork, or None if not set."""
+        self._promote_due_pending(
+            ArtworkSource.ARTIST,
+            self._group._server.clock.now_us(),  # noqa: SLF001
+        )
         return self._current_artwork.get(ArtworkSource.ARTIST)
 
     async def set_album_artwork(
@@ -189,20 +198,17 @@ class ArtworkGroupRole(GroupRole):
     ) -> None:
         """Set or clear artwork for a source type."""
         now_us = self._group._server.clock.now_us()  # noqa: SLF001
+        self._promote_due_pending(source, now_us)
         event_timestamp_us = now_us if timestamp_us is None else timestamp_us
-        pending = self._pending_artwork.pop(source, None)
-        if pending is not None and event_timestamp_us >= pending.timestamp_us:
-            if pending.image is None:
-                self._current_artwork.pop(source, None)
-            else:
-                self._current_artwork[source] = pending.image
 
         if event_timestamp_us > now_us:
             self._pending_artwork[source] = _PendingArtwork(image, event_timestamp_us)
-        elif image is None:
-            self._current_artwork.pop(source, None)
         else:
-            self._current_artwork[source] = image
+            self._pending_artwork.pop(source, None)
+            if image is None:
+                self._current_artwork.pop(source, None)
+            else:
+                self._current_artwork[source] = image
 
         send_tasks = []
         for role in self._members:
@@ -239,6 +245,16 @@ class ArtworkGroupRole(GroupRole):
                 height=image.height,
             )
         )
+
+    def _promote_due_pending(self, source: ArtworkSource, now_us: int) -> None:
+        pending = self._pending_artwork.get(source)
+        if pending is None or pending.timestamp_us > now_us:
+            return
+        self._pending_artwork.pop(source)
+        if pending.image is None:
+            self._current_artwork.pop(source, None)
+        else:
+            self._current_artwork[source] = pending.image
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int
