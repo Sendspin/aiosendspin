@@ -131,7 +131,7 @@ def test_on_member_join_sends_current_color() -> None:
     """on_member_join sends a snapshot to the new member."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
-    cgr._current_color = Color(primary=(100, 150, 200))  # noqa: SLF001
+    cgr._state.apply(Color(primary=(100, 150, 200)), 0)  # noqa: SLF001
 
     member = MagicMock()
     cgr.on_member_join(member)

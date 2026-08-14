@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -16,6 +15,7 @@ from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.events import ArtworkClearedEvent, ArtworkUpdatedEvent
 from aiosendspin.server.roles.artwork.types import ArtworkRoleProtocol
 from aiosendspin.server.roles.base import GroupRole, Role
+from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
@@ -23,12 +23,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class _PendingArtwork:
-    image: Image.Image | None
-    timestamp_us: int
 
 
 class ArtworkGroupRole(GroupRole):
@@ -43,8 +37,7 @@ class ArtworkGroupRole(GroupRole):
     def __init__(self, group: SendspinGroup) -> None:
         """Initialize ArtworkGroupRole."""
         super().__init__(group)
-        self._current_artwork: dict[ArtworkSource, Image.Image] = {}
-        self._pending_artwork: dict[ArtworkSource, _PendingArtwork] = {}
+        self._artwork: dict[ArtworkSource, ScheduledRoleState[Image.Image, None]] = {}
         self._send_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     def on_member_join(self, role: Role) -> None:
@@ -57,10 +50,7 @@ class ArtworkGroupRole(GroupRole):
         for channel_num, channel_config in role.get_channel_configs().items():
             if channel_config.source == ArtworkSource.NONE:
                 continue
-            if (
-                channel_config.source in self._current_artwork
-                or channel_config.source in self._pending_artwork
-            ):
+            if self._has_replayable_artwork(channel_config.source):
                 self._schedule_artwork_replay(role, channel_num, channel_config)
 
     def _schedule_artwork_replay(
@@ -78,33 +68,33 @@ class ArtworkGroupRole(GroupRole):
         channel_config: ArtworkChannel,
     ) -> None:
         async with self._send_lock(role, channel):
-            source = channel_config.source
-            self._promote_due_pending(source, self._group._server.clock.now_us())  # noqa: SLF001
-            current = self._current_artwork.get(source)
-            pending = self._pending_artwork.get(source)
+            state = self._artwork_state(channel_config.source)
+            current = state.current(self._now_us())
+            pending = state.pending
+            pending_effective_us = state.pending_effective_us
             if current is not None:
                 await self._encode_and_send_artwork(
                     role,
                     current.copy(),
                     channel,
                     channel_config,
-                    self._group._server.clock.now_us(),  # noqa: SLF001
+                    self._now_us(),
                 )
-            elif pending is not None:
+            elif pending_effective_us is not None:
                 await self._encode_and_send_artwork(
                     role,
                     None,
                     channel,
                     channel_config,
-                    self._group._server.clock.now_us(),  # noqa: SLF001
+                    self._now_us(),
                 )
-            if pending is not None:
+            if pending_effective_us is not None:
                 await self._encode_and_send_artwork(
                     role,
-                    pending.image.copy() if pending.image is not None else None,
+                    pending.copy() if pending is not None else None,
                     channel,
                     channel_config,
-                    pending.timestamp_us,
+                    pending_effective_us,
                 )
 
     async def _send_artwork_to_role_channel(
@@ -151,44 +141,6 @@ class ArtworkGroupRole(GroupRole):
         except Exception:
             logger.exception("Failed to send artwork update")
 
-    def get_album_artwork(self) -> Image.Image | None:
-        """Return current album artwork, or None if not set."""
-        self._promote_due_pending(
-            ArtworkSource.ALBUM,
-            self._group._server.clock.now_us(),  # noqa: SLF001
-        )
-        return self._current_artwork.get(ArtworkSource.ALBUM)
-
-    def get_artist_artwork(self) -> Image.Image | None:
-        """Return current artist artwork, or None if not set."""
-        self._promote_due_pending(
-            ArtworkSource.ARTIST,
-            self._group._server.clock.now_us(),  # noqa: SLF001
-        )
-        return self._current_artwork.get(ArtworkSource.ARTIST)
-
-    async def set_album_artwork(
-        self, image: Image.Image | None, *, timestamp_us: int | None = None
-    ) -> None:
-        """Set or clear album artwork.
-
-        Args:
-            image: The artwork image to set, or None to clear.
-            timestamp_us: Server timestamp when the update takes effect.
-        """
-        await self._set_artwork(ArtworkSource.ALBUM, image, timestamp_us=timestamp_us)
-
-    async def set_artist_artwork(
-        self, image: Image.Image | None, *, timestamp_us: int | None = None
-    ) -> None:
-        """Set or clear artist artwork.
-
-        Args:
-            image: The artwork image to set, or None to clear.
-            timestamp_us: Server timestamp when the update takes effect.
-        """
-        await self._set_artwork(ArtworkSource.ARTIST, image, timestamp_us=timestamp_us)
-
     async def _set_artwork(
         self,
         source: ArtworkSource,
@@ -197,18 +149,15 @@ class ArtworkGroupRole(GroupRole):
         timestamp_us: int | None = None,
     ) -> None:
         """Set or clear artwork for a source type."""
-        now_us = self._group._server.clock.now_us()  # noqa: SLF001
-        self._promote_due_pending(source, now_us)
+        now_us = self._now_us()
+        state = self._artwork_state(source)
+        state.promote_due(now_us)
         event_timestamp_us = now_us if timestamp_us is None else timestamp_us
 
         if event_timestamp_us > now_us:
-            self._pending_artwork[source] = _PendingArtwork(image, event_timestamp_us)
+            state.schedule(image, None, event_timestamp_us)
         else:
-            self._pending_artwork.pop(source, None)
-            if image is None:
-                self._current_artwork.pop(source, None)
-            else:
-                self._current_artwork[source] = image
+            state.apply(image, event_timestamp_us)
 
         send_tasks = []
         for role in self._members:
@@ -245,16 +194,6 @@ class ArtworkGroupRole(GroupRole):
                 height=image.height,
             )
         )
-
-    def _promote_due_pending(self, source: ArtworkSource, now_us: int) -> None:
-        pending = self._pending_artwork.get(source)
-        if pending is None or pending.timestamp_us > now_us:
-            return
-        self._pending_artwork.pop(source)
-        if pending.image is None:
-            self._current_artwork.pop(source, None)
-        else:
-            self._current_artwork[source] = pending.image
 
     def _letterbox_image(
         self, image: Image.Image, target_width: int, target_height: int

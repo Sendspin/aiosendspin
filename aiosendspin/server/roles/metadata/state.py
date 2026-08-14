@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata

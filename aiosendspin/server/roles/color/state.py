@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
 from aiosendspin.models.color import SessionUpdateColor, _validate_rgb

@@ -139,6 +139,10 @@ class GroupRole(ABC):
         """Emit a GroupRole event on the owning group's event stream."""
         self._group._signal_event(event)  # noqa: SLF001
 
+    def _now_us(self) -> int:
+        """Return the server clock's current time in microseconds."""
+        return self._group._server.clock.now_us()  # noqa: SLF001
+
     def get_group_volume(self) -> int | None:
         """Return group volume (0-100) if supported."""
         return None
