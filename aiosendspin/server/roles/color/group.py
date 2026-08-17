@@ -63,7 +63,10 @@ class ColorGroupRole(GroupRole):
         role.send_message(ServerStateMessage(ServerStatePayload(color=update)))
 
     def set_color(self, color: Color | None, *, timestamp_us: int | None = None) -> None:
-        """Set or schedule a color palette and push it to subscribed roles."""
+        """Set or schedule a color palette and push it to subscribed roles.
+
+        Per spec, a future timestamp_us should be at most 20 seconds ahead.
+        """
         now_us = self._now_us()
         current = self._state.current(now_us)
         timestamp = now_us if timestamp_us is None else timestamp_us
