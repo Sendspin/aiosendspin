@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 from PIL import Image
 
@@ -26,14 +26,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-class _SendLockKey:
-    role_id: int
-    """Identity of the in-memory artwork role."""
-    channel: int
-    """Artwork channel index."""
-
-
 class ArtworkGroupRole(GroupRole):
     """Coordinate artwork across a group.
 
@@ -47,7 +39,10 @@ class ArtworkGroupRole(GroupRole):
         """Initialize ArtworkGroupRole."""
         super().__init__(group)
         self._artwork: dict[ArtworkSource, ScheduledRoleState[Image.Image, None]] = {}
-        self._send_locks: dict[_SendLockKey, asyncio.Lock] = {}
+        # Preserve locks across warm reconnects without retaining discarded role objects.
+        self._send_locks: WeakKeyDictionary[ArtworkRoleProtocol, dict[int, asyncio.Lock]] = (
+            WeakKeyDictionary()
+        )
 
     def on_member_join(self, role: Role) -> None:
         """Send current artwork to newly joined member."""
@@ -119,7 +114,8 @@ class ArtworkGroupRole(GroupRole):
             await self._encode_and_send_artwork(role, image, channel, channel_config, timestamp_us)
 
     def _send_lock(self, role: ArtworkRoleProtocol, channel: int) -> asyncio.Lock:
-        return self._send_locks.setdefault(_SendLockKey(id(role), channel), asyncio.Lock())
+        locks = self._send_locks.setdefault(role, {})
+        return locks.setdefault(channel, asyncio.Lock())
 
     async def _encode_and_send_artwork(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 from dataclasses import dataclass, fields, replace
+from unittest.mock import MagicMock
 
 from PIL import Image
 
@@ -403,8 +404,9 @@ async def _run_artwork_replay_scenario(rng: random.Random, scenario: int) -> Non
         media_width=2,
         media_height=2,
     )
+    artwork_role = MagicMock(spec=ArtworkRoleProtocol)
     await role._send_artwork_replay(  # noqa: SLF001
-        object(),  # type: ignore[arg-type]
+        artwork_role,
         0,
         channel,
     )

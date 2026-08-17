@@ -170,6 +170,16 @@ class MetadataGroupRole(GroupRole):
             )
         return None
 
+    def _rebase_omitted_progress(
+        self,
+        last_metadata: Metadata | None,
+        metadata: Metadata,
+        timestamp_us: int,
+    ) -> Metadata:
+        """Align stored progress with the trajectory clients keep extrapolating."""
+        progress = self._get_track_progress_at(last_metadata, timestamp_us)
+        return metadata if progress is None else replace(metadata, track_progress=progress)
+
     def update(
         self,
         *,
