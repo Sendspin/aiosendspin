@@ -6,11 +6,14 @@ from collections.abc import Callable
 
 
 class ScheduledRoleState[S, U]:
-    """Current state plus at most one future-dated update, promoted lazily.
+    """Internal helper tracking current state plus one future update.
 
     The server keeps no timer. A due pending update is promoted whenever the
     state is next observed or written, so all reads go through :meth:`current`
     rather than a raw attribute.
+
+    ``S`` is the complete role state. ``U`` is the wire update retained for
+    late-join replay.
     """
 
     def __init__(self, on_commit: Callable[[S | None, int], None] | None = None) -> None:
@@ -80,14 +83,24 @@ class ScheduledRoleState[S, U]:
         effective_us: int,
         fields: set[str] | None = None,
     ) -> None:
-        """Hold state as the single pending update, replacing any prior pending."""
+        """Hold state as the single pending update, replacing any prior pending.
+
+        :param state: Complete state that becomes current at the effective time.
+        :param update: Wire update retained for late-join replay.
+        :param effective_us: Server clock time when the update becomes current.
+        :param fields: Wire fields carried by the update that later diffs must restate.
+        """
         self._pending = state
         self._pending_update = update
         self._pending_effective_us = effective_us
         self._scheduled_fields = fields if fields is not None else set()
 
     def apply(self, state: S | None, timestamp_us: int) -> None:
-        """Make state current immediately, dropping any pending update."""
+        """Make state current immediately, dropping any pending update.
+
+        :param state: Complete state to make current, or None to clear it.
+        :param timestamp_us: Server clock time associated with the applied state.
+        """
         self._pending = None
         self._pending_update = None
         self._pending_effective_us = None

@@ -8,6 +8,18 @@ from dataclasses import dataclass
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.types import RepeatMode
 
+_METADATA_FIELDS: tuple[str, ...] = (
+    "title",
+    "artist",
+    "album_artist",
+    "album",
+    "artwork_url",
+    "year",
+    "track",
+    "repeat",
+    "shuffle",
+)
+
 
 @dataclass
 class Metadata:

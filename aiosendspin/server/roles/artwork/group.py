@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _SendLockKey:
+    role_id: int
+    """Identity of the in-memory artwork role."""
+    channel: int
+    """Artwork channel index."""
+
+
 class ArtworkGroupRole(GroupRole):
     """Coordinate artwork across a group.
 
@@ -38,7 +47,7 @@ class ArtworkGroupRole(GroupRole):
         """Initialize ArtworkGroupRole."""
         super().__init__(group)
         self._artwork: dict[ArtworkSource, ScheduledRoleState[Image.Image, None]] = {}
-        self._send_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._send_locks: dict[_SendLockKey, asyncio.Lock] = {}
 
     def on_member_join(self, role: Role) -> None:
         """Send current artwork to newly joined member."""
@@ -110,7 +119,7 @@ class ArtworkGroupRole(GroupRole):
             await self._encode_and_send_artwork(role, image, channel, channel_config, timestamp_us)
 
     def _send_lock(self, role: ArtworkRoleProtocol, channel: int) -> asyncio.Lock:
-        return self._send_locks.setdefault((id(role), channel), asyncio.Lock())
+        return self._send_locks.setdefault(_SendLockKey(id(role), channel), asyncio.Lock())
 
     async def _encode_and_send_artwork(
         self,
@@ -140,6 +149,50 @@ class ArtworkGroupRole(GroupRole):
             role.send_artwork(channel, img_data, timestamp_us)
         except Exception:
             logger.exception("Failed to send artwork update")
+
+    def get_album_artwork(self) -> Image.Image | None:
+        """Return current album artwork, or None if not set."""
+        return self._artwork_state(ArtworkSource.ALBUM).current(self._now_us())
+
+    def get_artist_artwork(self) -> Image.Image | None:
+        """Return current artist artwork, or None if not set."""
+        return self._artwork_state(ArtworkSource.ARTIST).current(self._now_us())
+
+    async def set_album_artwork(
+        self, image: Image.Image | None, *, timestamp_us: int | None = None
+    ) -> None:
+        """Set or clear album artwork.
+
+        A future timestamp schedules one pending album update. Another future call
+        replaces that pending update by arrival order. An omitted, past, or present
+        timestamp applies the image immediately and cancels any pending update.
+        To show one image now and another later, call this method first without a
+        timestamp, then again with the future timestamp.
+
+        Args:
+            image: The artwork image to set, or None to clear.
+            timestamp_us: Server timestamp when the update takes effect.
+                Per spec, schedule at most 20 seconds ahead.
+        """
+        await self._set_artwork(ArtworkSource.ALBUM, image, timestamp_us=timestamp_us)
+
+    async def set_artist_artwork(
+        self, image: Image.Image | None, *, timestamp_us: int | None = None
+    ) -> None:
+        """Set or clear artist artwork.
+
+        A future timestamp schedules one pending artist update. Another future call
+        replaces that pending update by arrival order. An omitted, past, or present
+        timestamp applies the image immediately and cancels any pending update.
+        To show one image now and another later, call this method first without a
+        timestamp, then again with the future timestamp.
+
+        Args:
+            image: The artwork image to set, or None to clear.
+            timestamp_us: Server timestamp when the update takes effect.
+                Per spec, schedule at most 20 seconds ahead.
+        """
+        await self._set_artwork(ArtworkSource.ARTIST, image, timestamp_us=timestamp_us)
 
     async def _set_artwork(
         self,

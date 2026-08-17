@@ -36,7 +36,7 @@ def _artwork_binary(channel: int, timestamp_us: int, image_data: bytes) -> bytes
 
 
 async def test_past_artwork_retains_header_timestamp_and_applies_immediately() -> None:
-    """A past-timestamped artwork chunk applies at once, keeping the header timestamp."""
+    """A past-timestamped artwork chunk applies without becoming pending."""
     conn, client, clock = _make_synced_connection()
     timestamp_us = clock.now_us() - 1_000_000
     payload = _artwork_binary(0, timestamp_us, b"jpeg-bytes")
@@ -44,8 +44,7 @@ async def test_past_artwork_retains_header_timestamp_and_applies_immediately() -
     conn._handle_binary_message(payload)  # noqa: SLF001
 
     client.notify_artwork.assert_called_once_with(0, b"jpeg-bytes")
-    client.notify_artwork_timestamp.assert_called_once_with(0, b"jpeg-bytes", timestamp_us)
-    client.notify_effective_artwork.assert_called_once_with(0, b"jpeg-bytes", timestamp_us)
+    client.notify_scheduled_artwork.assert_not_called()
 
 
 async def test_future_artwork_becomes_pending_then_applies_as_current() -> None:
@@ -56,14 +55,13 @@ async def test_future_artwork_becomes_pending_then_applies_as_current() -> None:
 
     conn._handle_binary_message(payload)  # noqa: SLF001
 
-    client.notify_artwork.assert_called_once_with(1, b"future-art")
-    client.notify_artwork_timestamp.assert_called_once_with(1, b"future-art", timestamp_us)
-    client.notify_effective_artwork.assert_not_called()
+    client.notify_artwork.assert_not_called()
+    client.notify_scheduled_artwork.assert_called_once_with(1, b"future-art", timestamp_us)
     assert conn._artwork_channels[1].confirmed is None  # noqa: SLF001
 
     await asyncio.sleep(0.3)
 
-    client.notify_effective_artwork.assert_called_once_with(1, b"future-art", timestamp_us)
+    client.notify_artwork.assert_called_once_with(1, b"future-art")
     assert conn._artwork_channels[1].confirmed is not None  # noqa: SLF001
     assert conn._artwork_channels[1].display is not None  # noqa: SLF001
 
@@ -76,13 +74,12 @@ async def test_scheduled_empty_clear_applies_at_effective_time() -> None:
 
     conn._handle_binary_message(payload)  # noqa: SLF001
 
-    client.notify_artwork.assert_called_once_with(0, b"")
-    client.notify_artwork_timestamp.assert_called_once_with(0, b"", timestamp_us)
-    client.notify_effective_artwork.assert_not_called()
+    client.notify_artwork.assert_not_called()
+    client.notify_scheduled_artwork.assert_called_once_with(0, b"", timestamp_us)
 
     await asyncio.sleep(0.3)
 
-    client.notify_effective_artwork.assert_called_once_with(0, b"", timestamp_us)
+    client.notify_artwork.assert_called_once_with(0, b"")
 
 
 async def test_latest_artwork_arrival_wins_when_timestamp_goes_backwards() -> None:
@@ -95,9 +92,14 @@ async def test_latest_artwork_arrival_wins_when_timestamp_goes_backwards() -> No
     earlier_payload = _artwork_binary(0, now + 100_000, b"earlier-art")
     conn._handle_binary_message(earlier_payload)  # noqa: SLF001
 
+    assert [item.args for item in client.notify_scheduled_artwork.call_args_list] == [
+        (0, b"pending-art", now + 500_000),
+        (0, b"earlier-art", now + 100_000),
+    ]
+
     await asyncio.sleep(0.3)
 
-    client.notify_effective_artwork.assert_called_once_with(0, b"earlier-art", now + 100_000)
+    client.notify_artwork.assert_called_once_with(0, b"earlier-art")
 
 
 async def test_immediate_artwork_discards_pending() -> None:
@@ -110,9 +112,10 @@ async def test_immediate_artwork_discards_pending() -> None:
 
     conn._handle_binary_message(_artwork_binary(0, now - 1, b"immediate"))  # noqa: SLF001
 
-    client.notify_effective_artwork.assert_called_once_with(0, b"immediate", now - 1)
+    client.notify_scheduled_artwork.assert_called_once_with(0, b"pending", now + 5_000_000)
+    client.notify_artwork.assert_called_once_with(0, b"immediate")
     await asyncio.sleep(0.05)
-    client.notify_effective_artwork.assert_called_once()
+    client.notify_artwork.assert_called_once()
 
 
 async def test_artwork_pending_discarded_on_stream_end() -> None:
@@ -121,15 +124,15 @@ async def test_artwork_pending_discarded_on_stream_end() -> None:
     timestamp_us = clock.now_us() + 10_000_000
     payload = _artwork_binary(2, timestamp_us, b"never-applied")
     conn._handle_binary_message(payload)  # noqa: SLF001
-    client.notify_artwork.assert_called_once_with(2, b"never-applied")
-    client.notify_effective_artwork.assert_not_called()
+    client.notify_scheduled_artwork.assert_called_once_with(2, b"never-applied", timestamp_us)
+    client.notify_artwork.assert_not_called()
 
     conn._handle_stream_end(  # noqa: SLF001
         StreamEndMessage(payload=StreamEndPayload(roles=["artwork"]))
     )
 
     await asyncio.sleep(0.05)
-    client.notify_effective_artwork.assert_not_called()
+    client.notify_artwork.assert_not_called()
     assert conn._artwork_channels[2].confirmed is None  # noqa: SLF001
     assert conn._artwork_channels[2].display is None  # noqa: SLF001
 
@@ -143,12 +146,12 @@ async def test_artwork_stream_end_keeps_applied_current_without_extra_callback()
     payload = _artwork_binary(3, timestamp_us, b"already-shown")
     conn._handle_binary_message(payload)  # noqa: SLF001
     await asyncio.sleep(0.3)
-    assert client.notify_effective_artwork.call_count == 2
+    assert client.notify_artwork.call_count == 2
 
     conn._handle_stream_end(  # noqa: SLF001
         StreamEndMessage(payload=StreamEndPayload(roles=["artwork"]))
     )
 
-    assert client.notify_effective_artwork.call_count == 2
+    assert client.notify_artwork.call_count == 2
     assert conn._artwork_channels[3].confirmed is not None  # noqa: SLF001
     assert conn._artwork_channels[3].confirmed.image_data == b"already-shown"  # noqa: SLF001

@@ -7,9 +7,9 @@ from unittest.mock import MagicMock
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.time_sync import SendspinTimeFilter
-from aiosendspin.clock import RawMonotonicClock
+from aiosendspin.clock import ManualClock, RawMonotonicClock
 from aiosendspin.models.color import SessionUpdateColor
-from aiosendspin.models.core import ServerStatePayload
+from aiosendspin.models.core import ServerStatePayload, ServerTimePayload
 from aiosendspin.models.metadata import SessionUpdateMetadata
 
 
@@ -29,19 +29,49 @@ def _make_synced_connection() -> tuple[SendspinConnection, MagicMock, RawMonoton
     return conn, client, clock
 
 
+async def test_time_update_reschedules_every_pending_state() -> None:
+    """A new clock estimate reschedules metadata, color, and each artwork channel."""
+    conn = SendspinConnection.__new__(SendspinConnection)
+    client = MagicMock()
+    client.clock = ManualClock(now_us_value=1_000_000)
+    conn._client = client  # noqa: SLF001
+    conn._time_filter = SendspinTimeFilter()  # noqa: SLF001
+    conn._metadata_state = MagicMock()  # noqa: SLF001
+    conn._color_state = MagicMock()  # noqa: SLF001
+    artwork_states = [MagicMock(), MagicMock()]
+    conn._artwork_channels = dict(enumerate(artwork_states))  # noqa: SLF001
+    conn._active_roles = []  # noqa: SLF001
+
+    await conn._handle_server_time(  # noqa: SLF001
+        ServerTimePayload(
+            client_transmitted=900_000,
+            server_received=950_000,
+            server_transmitted=975_000,
+        )
+    )
+
+    conn._metadata_state.reschedule_pending.assert_called_once_with()  # noqa: SLF001
+    conn._color_state.reschedule_pending.assert_called_once_with()  # noqa: SLF001
+    for state in artwork_states:
+        state.reschedule_pending.assert_called_once_with()
+
+
 async def test_future_metadata_becomes_pending_then_applies() -> None:
     """A metadata update timestamped in the future is held pending, then delivered."""
     conn, client, clock = _make_synced_connection()
     future_update = SessionUpdateMetadata(timestamp=clock.now_us() + 100_000, title="Later")
+    payload = ServerStatePayload(metadata=future_update)
 
-    conn._handle_server_state(ServerStatePayload(metadata=future_update))  # noqa: SLF001
+    conn._handle_server_state(payload)  # noqa: SLF001
 
-    client.notify_effective_metadata.assert_not_called()
+    client.notify_metadata_callback.assert_not_called()
+    client.notify_scheduled_metadata.assert_called_once_with(payload)
 
     await asyncio.sleep(0.3)
 
-    client.notify_effective_metadata.assert_called_once()
-    (delivered,) = client.notify_effective_metadata.call_args[0]
+    client.notify_metadata_callback.assert_called_once()
+    (delivered,) = client.notify_metadata_callback.call_args[0]
+    assert delivered is payload
     assert delivered.metadata.title == "Later"
     assert conn._metadata_state.confirmed is future_update  # noqa: SLF001
 
@@ -53,8 +83,9 @@ async def test_past_color_applies_immediately() -> None:
 
     conn._handle_server_state(ServerStatePayload(color=update))  # noqa: SLF001
 
-    client.notify_effective_color.assert_called_once()
-    (delivered,) = client.notify_effective_color.call_args[0]
+    client.notify_color_callback.assert_called_once()
+    client.notify_scheduled_color.assert_not_called()
+    (delivered,) = client.notify_color_callback.call_args[0]
     assert delivered.color is update
     assert conn._color_state.confirmed is update  # noqa: SLF001
 
@@ -64,14 +95,21 @@ async def test_latest_metadata_arrival_wins_when_timestamp_goes_backwards() -> N
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
     pending = SessionUpdateMetadata(timestamp=now + 500_000, title="Pending")
-    conn._handle_server_state(ServerStatePayload(metadata=pending))  # noqa: SLF001
+    pending_payload = ServerStatePayload(metadata=pending)
+    conn._handle_server_state(pending_payload)  # noqa: SLF001
     earlier = SessionUpdateMetadata(timestamp=now + 100_000, title="Earlier")
-    conn._handle_server_state(ServerStatePayload(metadata=earlier))  # noqa: SLF001
+    earlier_payload = ServerStatePayload(metadata=earlier)
+    conn._handle_server_state(earlier_payload)  # noqa: SLF001
+
+    assert [item.args[0] for item in client.notify_scheduled_metadata.call_args_list] == [
+        pending_payload,
+        earlier_payload,
+    ]
 
     await asyncio.sleep(0.3)
 
-    client.notify_effective_metadata.assert_called_once()
-    (delivered,) = client.notify_effective_metadata.call_args[0]
+    client.notify_metadata_callback.assert_called_once()
+    (delivered,) = client.notify_metadata_callback.call_args[0]
     assert delivered.metadata.title == "Earlier"
     assert conn._metadata_state.confirmed is earlier  # noqa: SLF001
 
@@ -81,13 +119,20 @@ async def test_later_color_arrival_replaces_pending_without_applying_it() -> Non
     conn, client, clock = _make_synced_connection()
     now = clock.now_us()
     pending = SessionUpdateColor(timestamp=now + 100_000, primary=(9, 9, 9))
-    conn._handle_server_state(ServerStatePayload(color=pending))  # noqa: SLF001
+    pending_payload = ServerStatePayload(color=pending)
+    conn._handle_server_state(pending_payload)  # noqa: SLF001
     later = SessionUpdateColor(timestamp=now + 500_000, primary=(1, 1, 1))
-    conn._handle_server_state(ServerStatePayload(color=later))  # noqa: SLF001
+    later_payload = ServerStatePayload(color=later)
+    conn._handle_server_state(later_payload)  # noqa: SLF001
+
+    assert [item.args[0] for item in client.notify_scheduled_color.call_args_list] == [
+        pending_payload,
+        later_payload,
+    ]
 
     await asyncio.sleep(0.3)
 
-    client.notify_effective_color.assert_not_called()
+    client.notify_color_callback.assert_not_called()
     assert conn._color_state.confirmed is None  # noqa: SLF001
     conn._color_state.discard_pending()  # noqa: SLF001
 
@@ -99,24 +144,25 @@ async def test_past_metadata_arrival_merges_into_applied_scheduled_state() -> No
 
     base = SessionUpdateMetadata(timestamp=now - 1_000_000, title="A", artist="Artist A")
     conn._handle_server_state(ServerStatePayload(metadata=base))  # noqa: SLF001
-    assert client.notify_effective_metadata.call_count == 1
+    assert client.notify_metadata_callback.call_count == 1
 
     pending = SessionUpdateMetadata(timestamp=now + 150_000, title="B")
     conn._handle_server_state(ServerStatePayload(metadata=pending))  # noqa: SLF001
     await asyncio.sleep(0.3)
-    assert client.notify_effective_metadata.call_count == 2
-    (displayed,) = client.notify_effective_metadata.call_args_list[1][0]
+    assert client.notify_metadata_callback.call_count == 2
+    (displayed,) = client.notify_metadata_callback.call_args_list[1][0]
     assert displayed.metadata.title == "B"
-    assert displayed.metadata.artist == "Artist A"  # shallow-merged from confirmed
+    assert conn._metadata_state.confirmed is not None  # noqa: SLF001
+    assert conn._metadata_state.confirmed.artist == "Artist A"  # noqa: SLF001
 
     earlier = SessionUpdateMetadata(timestamp=now + 100_000, artist="Artist C")
     conn._handle_server_state(ServerStatePayload(metadata=earlier))  # noqa: SLF001
 
-    assert client.notify_effective_metadata.call_count == 3
-    (applied,) = client.notify_effective_metadata.call_args_list[2][0]
-    assert applied.metadata.title == "B"
+    assert client.notify_metadata_callback.call_count == 3
+    (applied,) = client.notify_metadata_callback.call_args_list[2][0]
     assert applied.metadata.artist == "Artist C"
     assert conn._metadata_state.confirmed is not None  # noqa: SLF001
+    assert conn._metadata_state.confirmed.title == "B"  # noqa: SLF001
 
 
 async def test_past_color_arrival_merges_into_applied_scheduled_state() -> None:
@@ -126,23 +172,25 @@ async def test_past_color_arrival_merges_into_applied_scheduled_state() -> None:
 
     base = SessionUpdateColor(timestamp=now - 1_000_000, primary=(1, 1, 1), accent=(2, 2, 2))
     conn._handle_server_state(ServerStatePayload(color=base))  # noqa: SLF001
-    assert client.notify_effective_color.call_count == 1
+    assert client.notify_color_callback.call_count == 1
 
     pending = SessionUpdateColor(timestamp=now + 150_000, primary=(9, 9, 9))
     conn._handle_server_state(ServerStatePayload(color=pending))  # noqa: SLF001
     await asyncio.sleep(0.3)
-    assert client.notify_effective_color.call_count == 2
-    (displayed,) = client.notify_effective_color.call_args_list[1][0]
+    assert client.notify_color_callback.call_count == 2
+    (displayed,) = client.notify_color_callback.call_args_list[1][0]
     assert displayed.color.primary == (9, 9, 9)
-    assert displayed.color.accent == (2, 2, 2)  # shallow-merged from confirmed
+    assert conn._color_state.confirmed is not None  # noqa: SLF001
+    assert conn._color_state.confirmed.accent == (2, 2, 2)  # noqa: SLF001
 
     earlier = SessionUpdateColor(timestamp=now + 100_000, accent=(3, 3, 3))
     conn._handle_server_state(ServerStatePayload(color=earlier))  # noqa: SLF001
 
-    assert client.notify_effective_color.call_count == 3
-    (applied,) = client.notify_effective_color.call_args_list[2][0]
-    assert applied.color.primary == (9, 9, 9)
+    assert client.notify_color_callback.call_count == 3
+    (applied,) = client.notify_color_callback.call_args_list[2][0]
     assert applied.color.accent == (3, 3, 3)
+    assert conn._color_state.confirmed is not None  # noqa: SLF001
+    assert conn._color_state.confirmed.primary == (9, 9, 9)  # noqa: SLF001
 
 
 async def test_future_metadata_after_applied_update_waits_without_extra_callback() -> None:
@@ -153,12 +201,12 @@ async def test_future_metadata_after_applied_update_waits_without_extra_callback
     pending = SessionUpdateMetadata(timestamp=now + 150_000, title="B")
     conn._handle_server_state(ServerStatePayload(metadata=pending))  # noqa: SLF001
     await asyncio.sleep(0.3)
-    assert client.notify_effective_metadata.call_count == 1
+    assert client.notify_metadata_callback.call_count == 1
 
     later = SessionUpdateMetadata(timestamp=now + 800_000, title="C")
     conn._handle_server_state(ServerStatePayload(metadata=later))  # noqa: SLF001
 
-    assert client.notify_effective_metadata.call_count == 1
+    assert client.notify_metadata_callback.call_count == 1
     confirmed = conn._metadata_state.confirmed  # noqa: SLF001
     assert confirmed is not None
     assert confirmed.title == "B"
@@ -168,15 +216,17 @@ async def test_whole_role_null_drops_active_pending_metadata() -> None:
     """A whole-role null clears immediately and the previously pending update never fires."""
     conn, client, clock = _make_synced_connection()
     pending = SessionUpdateMetadata(timestamp=clock.now_us() + 10_000_000, title="Pending")
-    conn._handle_server_state(ServerStatePayload(metadata=pending))  # noqa: SLF001
-    client.notify_effective_metadata.assert_not_called()
+    pending_payload = ServerStatePayload(metadata=pending)
+    conn._handle_server_state(pending_payload)  # noqa: SLF001
+    client.notify_metadata_callback.assert_not_called()
+    client.notify_scheduled_metadata.assert_called_once_with(pending_payload)
 
     conn._handle_server_state(ServerStatePayload(metadata=None))  # noqa: SLF001
 
-    client.notify_effective_metadata.assert_called_once()
-    (delivered,) = client.notify_effective_metadata.call_args[0]
+    client.notify_metadata_callback.assert_called_once()
+    (delivered,) = client.notify_metadata_callback.call_args[0]
     assert delivered.metadata is None
     assert conn._metadata_state.confirmed is None  # noqa: SLF001
 
     await asyncio.sleep(0.05)
-    client.notify_effective_metadata.assert_called_once()
+    client.notify_metadata_callback.assert_called_once()

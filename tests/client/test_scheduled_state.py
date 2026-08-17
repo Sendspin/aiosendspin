@@ -26,14 +26,12 @@ def _real_now_us() -> int:
 def _make_state(
     *,
     map_to_client_time: Callable[[int], int] | None = None,
-    poll_interval_s: float = 0.05,
 ) -> tuple[ScheduledStateUpdate[_Update], list[_Update | None]]:
     committed: list[_Update | None] = []
     state = ScheduledStateUpdate[_Update](
         map_to_client_time=map_to_client_time or (lambda ts: ts),
         now_us=_real_now_us,
         commit=committed.append,
-        poll_interval_s=poll_interval_s,
     )
     return state, committed
 
@@ -132,18 +130,13 @@ async def test_clear_immediately_drops_pending_and_commits_none() -> None:
 
 
 async def test_clock_correction_reschedules_pending_sooner() -> None:
-    """Clock correction moves up the effective time instead of a one-time conversion.
-
-    The mapping is re-evaluated on every poll, so an update scheduled far in the
-    future applies immediately once the mapping shifts, rather than waiting out
-    the delay that was computed when the update first became pending.
-    """
+    """Clock correction shortens a still-positive pending delay."""
     offset = {"value": 2_000_000}
 
     def map_to_client_time(ts: int) -> int:
         return ts + offset["value"]
 
-    state, committed = _make_state(map_to_client_time=map_to_client_time, poll_interval_s=0.05)
+    state, committed = _make_state(map_to_client_time=map_to_client_time)
     start = _real_now_us()
     update = _Update(timestamp=start)
 
@@ -153,11 +146,35 @@ async def test_clock_correction_reschedules_pending_sooner() -> None:
     await asyncio.sleep(0.1)
     assert committed == []  # still ~2s out per the original mapping
 
-    # Simulate a clock correction: the update's effective time has now passed.
-    offset["value"] = -1_000_000
+    offset["value"] = 300_000
+    state.reschedule_pending()
 
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.1)
+    assert committed == []
+
+    await asyncio.sleep(0.3)
 
     assert committed == [update]
     elapsed_us = _real_now_us() - start
     assert elapsed_us < 2_000_000  # applied well before the original 2s schedule
+
+
+async def test_clock_correction_reschedules_pending_later() -> None:
+    """Clock correction postpones a pending update instead of firing the stale timer."""
+    offset = {"value": 0}
+
+    def map_to_client_time(ts: int) -> int:
+        return ts + offset["value"]
+
+    state, committed = _make_state(map_to_client_time=map_to_client_time)
+    update = _Update(timestamp=_real_now_us() + 50_000)
+    state.handle_update(update)
+
+    offset["value"] = 200_000
+    state.reschedule_pending()
+
+    await asyncio.sleep(0.1)
+    assert committed == []
+
+    await asyncio.sleep(0.4)
+    assert committed == [update]

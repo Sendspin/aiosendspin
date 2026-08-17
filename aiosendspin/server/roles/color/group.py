@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.color import SessionUpdateColor
@@ -65,18 +64,17 @@ class ColorGroupRole(GroupRole):
     def set_color(self, color: Color | None, *, timestamp_us: int | None = None) -> None:
         """Set or schedule a color palette and push it to subscribed roles.
 
-        Per spec, a future timestamp_us should be at most 20 seconds ahead.
+        A future timestamp schedules one pending update. Another future call replaces
+        that pending update by arrival order. An omitted, past, or present timestamp
+        applies the palette immediately and cancels any pending update.
+
+        To show a palette now and schedule the next one, call this method first with
+        the current palette, then again with the future timestamp. Per spec, schedule
+        at most 20 seconds ahead.
         """
         now_us = self._now_us()
         current = self._state.current(now_us)
         timestamp = now_us if timestamp_us is None else timestamp_us
-        if color is not None:
-            if timestamp_us is not None:
-                color = replace(color, timestamp_us=timestamp_us)
-            elif color.timestamp_us is None:
-                color = replace(color, timestamp_us=timestamp)
-            else:
-                timestamp = color.timestamp_us
 
         if not self._state.has_pending and not self._state.scheduled_fields and color == current:
             return
@@ -113,5 +111,5 @@ class ColorGroupRole(GroupRole):
         )
 
     def clear(self, *, timestamp_us: int | None = None) -> None:
-        """Clear the color palette."""
+        """Clear the color palette immediately or at a future server timestamp."""
         self.set_color(None, timestamp_us=timestamp_us)
