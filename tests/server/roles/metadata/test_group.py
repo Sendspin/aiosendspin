@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +12,9 @@ from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _make_group_stub() -> MagicMock:

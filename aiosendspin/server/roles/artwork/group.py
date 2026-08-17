@@ -155,6 +155,7 @@ class ArtworkGroupRole(GroupRole):
         event_timestamp_us = now_us if timestamp_us is None else timestamp_us
 
         if event_timestamp_us > now_us:
+            self._warn_scheduled_lead(event_timestamp_us, now_us)
             state.schedule(image, None, event_timestamp_us)
         else:
             state.apply(image, event_timestamp_us)

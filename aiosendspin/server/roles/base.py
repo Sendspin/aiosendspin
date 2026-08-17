@@ -9,6 +9,7 @@ This module contains:
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,9 +34,14 @@ if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
 
 
+logger = logging.getLogger(__name__)
+
 # Default startup lead time used when a role does not report its own. Matches the
 # push stream's no-roles fallback so default behavior is unchanged.
 DEFAULT_REQUIRED_LEAD_TIME_US = 250_000
+
+# Spec: servers SHOULD NOT schedule an update more than 20 seconds ahead.
+MAX_SCHEDULED_LEAD_US = 20_000_000
 
 
 @dataclass(frozen=True)
@@ -142,6 +148,15 @@ class GroupRole(ABC):
     def _now_us(self) -> int:
         """Return the server clock's current time in microseconds."""
         return self._group._server.clock.now_us()  # noqa: SLF001
+
+    def _warn_scheduled_lead(self, timestamp_us: int, now_us: int) -> None:
+        """Warn when a scheduled update exceeds the spec's 20-second lead cap."""
+        if timestamp_us - now_us > MAX_SCHEDULED_LEAD_US:
+            logger.warning(
+                "Scheduling a %s update %.1f s ahead; the spec allows at most 20 s",
+                self.role_family,
+                (timestamp_us - now_us) / 1_000_000,
+            )
 
     def get_group_volume(self) -> int | None:
         """Return group volume (0-100) if supported."""

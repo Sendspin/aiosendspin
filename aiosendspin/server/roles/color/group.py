@@ -89,6 +89,7 @@ class ColorGroupRole(GroupRole):
         )
 
         if timestamp > now_us:
+            self._warn_scheduled_lead(timestamp, now_us)
             self._state.schedule(
                 color, color_update, timestamp, set(color_update.to_dict()) - {"timestamp"}
             )
