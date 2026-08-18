@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from aiosendspin.client.scheduled_state import ScheduledStateUpdate
 
@@ -63,6 +64,32 @@ async def test_future_timestamp_becomes_pending_then_applies() -> None:
     assert committed == [update]
     assert state.confirmed is update
     assert state.display is update
+
+
+def test_eager_apply_is_not_reported_as_pending() -> None:
+    """An eagerly completed timer cannot leave a stale scheduled callback."""
+    now = {"value": 1_000_000}
+    committed: list[_Update | None] = []
+    state = ScheduledStateUpdate[_Update](
+        map_to_client_time=lambda timestamp: timestamp,
+        now_us=lambda: now["value"],
+        commit=committed.append,
+    )
+    update = _Update(timestamp=1_000_001)
+
+    def apply_eagerly(coro: Coroutine[None, None, None]) -> object:
+        coro.close()
+        now["value"] = update.timestamp
+        state._pending_task = None  # noqa: SLF001
+        state._apply_confirmed(update)  # noqa: SLF001
+        state._pending = None  # noqa: SLF001
+        return object()
+
+    with patch("aiosendspin.client.scheduled_state.create_task", apply_eagerly):
+        scheduled = state.handle_update(update)
+
+    assert not scheduled
+    assert committed == [update]
 
 
 async def test_later_arrival_replaces_pending_when_timestamp_goes_backwards() -> None:

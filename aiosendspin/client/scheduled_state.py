@@ -68,7 +68,7 @@ class ScheduledStateUpdate[T: _TimestampedUpdate]:
         effective_time = self._map_to_client_time(update.timestamp)
         if effective_time > self._now_us():
             self._schedule_pending(update, on_apply)
-            return True
+            return self._pending is update
         self.discard_pending()
         self._apply_confirmed(update)
         if on_apply is not None:
