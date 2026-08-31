@@ -39,8 +39,8 @@ def _make_client_stub_with_channel() -> MagicMock:
         ArtworkChannel(
             source=ArtworkSource.ALBUM,
             format=PictureFormat.JPEG,
-            media_width=300,
-            media_height=300,
+            width=300,
+            height=300,
         )
     ]
     return client
@@ -59,7 +59,7 @@ def test_artwork_role_flags_nonpositive_request_dimensions() -> None:
     role = ArtworkV1Role(client=client)
     role.on_connect()
     role.on_stream_request_format(
-        StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=0, media_width=-10))
+        StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=0, width=-10))
     )
     client.flag_noncompliance.assert_called_once()
 
@@ -71,7 +71,7 @@ def test_artwork_role_no_flag_for_valid_request_dimensions() -> None:
     role.on_connect()
     role.on_stream_request_format(
         StreamRequestFormatPayload(
-            artwork=StreamRequestFormatArtwork(channel=0, media_width=100, media_height=100)
+            artwork=StreamRequestFormatArtwork(channel=0, width=100, height=100)
         )
     )
     client.flag_noncompliance.assert_not_called()
@@ -171,14 +171,14 @@ def test_artwork_role_init_channel_configs_from_support() -> None:
         ArtworkChannel(
             source=ArtworkSource.ALBUM,
             format=PictureFormat.JPEG,
-            media_width=300,
-            media_height=300,
+            width=300,
+            height=300,
         ),
         ArtworkChannel(
             source=ArtworkSource.ARTIST,
             format=PictureFormat.PNG,
-            media_width=400,
-            media_height=400,
+            width=400,
+            height=400,
         ),
     ]
     client.info.artwork_support = support
@@ -200,8 +200,8 @@ def test_artwork_role_sends_stream_start_on_connect_with_transport() -> None:
         ArtworkChannel(
             source=ArtworkSource.ALBUM,
             format=PictureFormat.JPEG,
-            media_width=300,
-            media_height=300,
+            width=300,
+            height=300,
         ),
     ]
     client.info.artwork_support = support
@@ -273,14 +273,14 @@ def test_artwork_role_on_connect_schedules_artwork_once_per_channel() -> None:
         ArtworkChannel(
             source=ArtworkSource.ALBUM,
             format=PictureFormat.JPEG,
-            media_width=300,
-            media_height=300,
+            width=300,
+            height=300,
         ),
         ArtworkChannel(
             source=ArtworkSource.ARTIST,
             format=PictureFormat.PNG,
-            media_width=400,
-            media_height=400,
+            width=400,
+            height=400,
         ),
     ]
     client.info.artwork_support = support
@@ -312,8 +312,8 @@ def test_artwork_partial_format_request_preserves_unchanged_fields() -> None:
         ArtworkChannel(
             source=ArtworkSource.ALBUM,
             format=PictureFormat.JPEG,
-            media_width=300,
-            media_height=300,
+            width=300,
+            height=300,
         ),
     ]
     client.info.artwork_support = support
@@ -329,5 +329,5 @@ def test_artwork_partial_format_request_preserves_unchanged_fields() -> None:
     configs = role.get_channel_configs()
     assert configs[0].format == PictureFormat.PNG
     assert configs[0].source == ArtworkSource.ALBUM
-    assert configs[0].media_width == 300
-    assert configs[0].media_height == 300
+    assert configs[0].width == 300
+    assert configs[0].height == 300

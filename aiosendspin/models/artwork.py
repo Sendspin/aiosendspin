@@ -22,17 +22,17 @@ class ArtworkChannel(SendspinModel):
     """Artwork source type."""
     format: PictureFormat
     """Image format identifier."""
-    media_width: int
-    """Max width in pixels."""
-    media_height: int
-    """Max height in pixels."""
+    width: int
+    """Width in pixels of the delivered image."""
+    height: int
+    """Height in pixels of the delivered image."""
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        if self.media_width <= 0:
-            raise ValueError(f"media_width must be positive, got {self.media_width}")
-        if self.media_height <= 0:
-            raise ValueError(f"media_height must be positive, got {self.media_height}")
+        if self.width <= 0:
+            raise ValueError(f"width must be positive, got {self.width}")
+        if self.height <= 0:
+            raise ValueError(f"height must be positive, got {self.height}")
 
 
 # Client -> Server: client/hello artwork support object
@@ -87,10 +87,10 @@ class StreamRequestFormatArtwork(SendspinModel):
     """Artwork source type."""
     format: PictureFormat | None = None
     """Requested image format identifier."""
-    media_width: int | None = None
-    """Requested max width in pixels."""
-    media_height: int | None = None
-    """Requested max height in pixels."""
+    width: int | None = None
+    """Requested width in pixels."""
+    height: int | None = None
+    """Requested height in pixels."""
 
     def __post_init__(self) -> None:
         """Validate field values."""

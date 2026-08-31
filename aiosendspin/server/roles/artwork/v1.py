@@ -112,8 +112,8 @@ class ArtworkV1Role(Role):
                 StreamArtworkChannelConfig(
                     source=channel.source,
                     format=channel.format,
-                    width=channel.media_width,
-                    height=channel.media_height,
+                    width=channel.width,
+                    height=channel.height,
                 )
             )
 
@@ -187,8 +187,8 @@ class ArtworkV1Role(Role):
         invalid_dims = [
             name
             for name, value in (
-                ("media_width", artwork_request.media_width),
-                ("media_height", artwork_request.media_height),
+                ("width", artwork_request.width),
+                ("height", artwork_request.height),
             )
             if value is not None and value <= 0
         ]
@@ -210,12 +210,8 @@ class ArtworkV1Role(Role):
         updated = ArtworkChannel(
             source=request.source if request.source is not None else current.source,
             format=request.format if request.format is not None else current.format,
-            media_width=request.media_width
-            if request.media_width is not None
-            else current.media_width,
-            media_height=request.media_height
-            if request.media_height is not None
-            else current.media_height,
+            width=request.width if request.width is not None else current.width,
+            height=request.height if request.height is not None else current.height,
         )
 
         self._channel_configs[request.channel] = updated

@@ -268,8 +268,8 @@ async def test_artwork_listener_receives_binary_frames_after_artwork_stream_star
                 ArtworkChannel(
                     source=ArtworkSource.ALBUM,
                     format=PictureFormat.JPEG,
-                    media_width=256,
-                    media_height=256,
+                    width=256,
+                    height=256,
                 )
             ]
         ),
@@ -309,8 +309,8 @@ def _artwork_support() -> ClientHelloArtworkSupport:
             ArtworkChannel(
                 source=ArtworkSource.ALBUM,
                 format=PictureFormat.JPEG,
-                media_width=256,
-                media_height=256,
+                width=256,
+                height=256,
             )
         ]
     )

@@ -187,7 +187,6 @@ class MediaCommand(Enum):
 class PictureFormat(Enum):
     """Supported image formats for artwork/media art."""
 
-    BMP = "bmp"
     JPEG = "jpeg"
     PNG = "png"
 

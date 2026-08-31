@@ -81,8 +81,8 @@ class ArtworkGroupRole(GroupRole):
             img_data = await asyncio.to_thread(
                 self._process_and_encode_image,
                 image,
-                channel_config.media_width,
-                channel_config.media_height,
+                channel_config.width,
+                channel_config.height,
                 channel_config.format,
             )
             role.send_artwork(channel, img_data, timestamp_us)
@@ -195,8 +195,6 @@ class ArtworkGroupRole(GroupRole):
                 resized_image.save(img_bytes, format="JPEG", quality=85)
             elif art_format == PictureFormat.PNG:
                 resized_image.save(img_bytes, format="PNG", compress_level=6)
-            elif art_format == PictureFormat.BMP:
-                resized_image.save(img_bytes, format="BMP")
             else:
                 raise NotImplementedError(f"Unsupported artwork format: {art_format}")
             img_bytes.seek(0)

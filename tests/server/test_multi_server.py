@@ -682,8 +682,8 @@ class TestCustomRoleSupportParsing:
                         {
                             "source": "album",
                             "format": "jpeg",
-                            "media_width": 300,
-                            "media_height": 300,
+                            "width": 300,
+                            "height": 300,
                         }
                     ]
                 },
