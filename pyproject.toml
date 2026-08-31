@@ -57,7 +57,7 @@ dev = [
   "pytest-cov==7.1.0",
   "pytest-timeout==2.4.0",
   "pytest-xdist==3.8.0",
-  "syrupy==5.5.3",
+  "syrupy==6.0.0",
   "tomli==2.4.1",
   "ruff==0.16.4",
 ]
