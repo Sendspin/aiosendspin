@@ -236,6 +236,35 @@ def test_both_offered_disregards_static_even_when_dynamic_is_unusable() -> None:
     assert methods.pairing_psk is not None
 
 
+def test_structured_descriptor_values_are_ignored_not_rejected() -> None:
+    """A value that is not an identifier at all is ignored, like any unrecognized one.
+
+    Objects and arrays cannot be looked up as identifiers, so a reader that tested
+    membership first would fail the whole hello rather than skipping the value.
+    """
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":{"pairing_psk":{"locations":["device",{"a":1},["b"],7]}}}'
+    )
+    methods = ClientHelloPayload.from_json(raw).supported_pair_methods
+    assert methods is not None
+    assert methods.pairing_psk is not None
+    assert methods.pairing_psk.locations == ["device"]
+
+
+def test_dynamic_with_only_structured_values_is_dropped() -> None:
+    """The same rule leaves a dynamic descriptor with nothing usable, so it is dropped."""
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":{"pairing_psk":{},"dynamic_pairing_code":'
+        '{"formats":[{"a":1}],"out_channels":["display"]}}}'
+    )
+    methods = ClientHelloPayload.from_json(raw).supported_pair_methods
+    assert methods is not None
+    assert methods.dynamic_pairing_code is None
+    assert methods.unusable_methods == ["dynamic_pairing_code"]
+
+
 def test_pair_method_records_cannot_be_spoofed_over_the_wire() -> None:
     """The parser overwrites its own records, so a client cannot plant them."""
     raw = (

@@ -148,9 +148,13 @@ def _filter_descriptor_values(
         if field_name not in filtered:
             continue
         values = filtered[field_name]
-        # A field of the wrong type offers nothing usable, same as one filtered empty.
+        # A field of the wrong type offers nothing usable, same as one filtered empty. Values
+        # are matched as identifiers, so anything that is not one is simply not recognized —
+        # tested before membership, since an unhashable value cannot be looked up at all.
         filtered[field_name] = (
-            [v for v in values if v in allowed] if isinstance(values, list) else []
+            [v for v in values if isinstance(v, str) and v in allowed]
+            if isinstance(values, list)
+            else []
         )
     return filtered
 
