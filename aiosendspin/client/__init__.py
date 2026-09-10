@@ -1,5 +1,7 @@
 """Public interface for the Sendspin client package."""
 
+from aiosendspin.models.types import SECRET_LOCATIONS
+
 from .client import (
     AudioChunkCallback,
     DisconnectCallback,
@@ -12,7 +14,6 @@ from .client import (
 )
 from .listener import ClientListener
 from .models import (
-    SECRET_LOCATIONS,
     AudioFormat,
     PairingCodeDisplay,
     PairingCodeSpeaker,

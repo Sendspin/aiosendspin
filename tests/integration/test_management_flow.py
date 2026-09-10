@@ -19,7 +19,6 @@ from aiosendspin.models.types import (
     AudioCodec,
     GoodbyeReason,
     ManagementResult,
-    PairMethod,
     PlayerCommand,
     Roles,
 )
@@ -404,8 +403,8 @@ async def test_set_pairing_config_disables_offered_method() -> None:
             first = await _await_connected_client(server, identity.peer_id)
             assert first.connection is not None
             info = first.connection._client_info  # noqa: SLF001
-            offered = {d.method for d in info.supported_pair_methods or []}
-            assert PairMethod.PAIRING_PSK in offered
+            assert info.supported_pair_methods is not None
+            assert info.supported_pair_methods.pairing_psk is not None
 
             conn = server.enable_management(identity.peer_id)
             await _await_activity(client, Activity.MANAGEMENT)
@@ -428,8 +427,8 @@ async def test_set_pairing_config_disables_offered_method() -> None:
             again = await _await_connected_client(server, identity.peer_id)
             assert again.connection is not None
             info = again.connection._client_info  # noqa: SLF001
-            offered = {d.method for d in info.supported_pair_methods or []}
-            assert PairMethod.PAIRING_PSK not in offered
+            assert info.supported_pair_methods is not None
+            assert info.supported_pair_methods.pairing_psk is None
         finally:
             await reconnect.disconnect()
 

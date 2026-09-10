@@ -264,6 +264,13 @@ class PairingCodeFormat(Enum):
     QR_CODE = "qr_code"
 
 
+# Values a pair-method descriptor may carry. A peer ignores any other value it finds there,
+# so these gate the parse as plain sets; an enum would reject the descriptor outright.
+PAIRING_CODE_FORMATS: frozenset[str] = frozenset(f.value for f in PairingCodeFormat)
+PAIRING_CODE_OUT_CHANNELS: frozenset[str] = frozenset({"display", "speaker"})
+SECRET_LOCATIONS: frozenset[str] = frozenset({"device", "leaflet", "operator"})
+
+
 class PairAbortReason(Enum):
     """Reason a pairing attempt was aborted."""
 

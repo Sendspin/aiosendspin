@@ -35,6 +35,9 @@ from .source import (
     SourceStatePayload,
 )
 from .types import (
+    PAIRING_CODE_FORMATS,
+    PAIRING_CODE_OUT_CHANNELS,
+    SECRET_LOCATIONS,
     Activity,
     ClientMessage,
     ConnectionReason,
@@ -110,23 +113,148 @@ class DeviceInfo(SendspinModel):
         omit_none = True
 
 
+# Descriptor fields whose values a peer filters down to the identifiers it knows, keyed by
+# the method that carries them. Doubles as the set of method identifiers we recognize.
+_PAIR_METHOD_VALUE_FILTERS: dict[str, dict[str, frozenset[str]]] = {
+    PairMethod.PAIRING_PSK.value: {"locations": SECRET_LOCATIONS},
+    PairMethod.STATIC_PAIRING_CODE.value: {"locations": SECRET_LOCATIONS},
+    PairMethod.DYNAMIC_PAIRING_CODE.value: {
+        "formats": PAIRING_CODE_FORMATS,
+        "out_channels": PAIRING_CODE_OUT_CHANNELS,
+    },
+}
+
+# Records the parser writes onto the container; never read from the wire.
+_PAIR_METHOD_SIDECARS: frozenset[str] = frozenset(
+    {"ignored_methods", "unusable_methods", "offered_both_pairing_code_methods"}
+)
+
+
+def _pair_methods_from_list(entries: Any) -> dict[str, Any]:
+    """Key a superseded list of self-describing descriptors by method identifier."""
+    return {
+        entry["method"]: {k: v for k, v in entry.items() if k != "method"}
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("method"), str)
+    }
+
+
+def _filter_descriptor_values(
+    descriptor: dict[str, Any], value_filters: dict[str, frozenset[str]]
+) -> dict[str, Any]:
+    """Drop descriptor values this implementation does not recognize."""
+    filtered = dict(descriptor)
+    for field_name, allowed in value_filters.items():
+        if field_name not in filtered:
+            continue
+        values = filtered[field_name]
+        # A field of the wrong type offers nothing usable, same as one filtered empty. Values
+        # are matched as identifiers, so anything that is not one is simply not recognized —
+        # tested before membership, since an unhashable value cannot be looked up at all.
+        filtered[field_name] = (
+            [v for v in values if isinstance(v, str) and v in allowed]
+            if isinstance(values, list)
+            else []
+        )
+    return filtered
+
+
 @dataclass
 class PairMethodDescriptor(SendspinModel):
-    """A pairing method a client offers in client/hello."""
+    """A secret-based pairing method a client offers in client/hello."""
 
-    method: PairMethod
-    """The pairing method identifier."""
-    formats: list[str] | None = None
-    """For dynamic_pairing_code only: emission formats offered by the client."""
-    out_channels: list[str] | None = None
-    """For dynamic_pairing_code only: channels through which the code is conveyed."""
     locations: list[str] | None = None
-    """For static_pairing_code and pairing_psk only: where the operator finds the secret."""
+    """Where the operator finds the method's configured secret, from SECRET_LOCATIONS."""
 
     class Config(SendspinConfig):
-        """Omit method-specific fields where they do not apply."""
+        """Omit the hint where the client does not give one."""
 
         omit_none = True
+
+
+@dataclass
+class DynamicPairMethodDescriptor(SendspinModel):
+    """The dynamic pairing code method a client offers in client/hello."""
+
+    out_channels: list[str]
+    """Channels through which the code reaches the operator, from PAIRING_CODE_OUT_CHANNELS."""
+    formats: list[str]
+    """Emission formats the client offers, from PAIRING_CODE_FORMATS. Non-empty."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if not self.formats:
+            raise ValueError("formats must be non-empty")
+        if not self.out_channels:
+            raise ValueError("out_channels must be non-empty")
+
+
+@dataclass
+class SupportedPairMethods(SendspinModel):
+    """Pairing methods a client offers, keyed by method identifier.
+
+    Only recognized methods survive the parse: an identifier this implementation does not
+    know is dropped into ``ignored_methods`` rather than rejected, since it signals a client
+    speaking a newer revision of the spec. Tolerance covers identifiers and values, not
+    shape: a recognized method whose descriptor is not an object fails the parse.
+    """
+
+    pairing_psk: PairMethodDescriptor | None = None
+    """The pairing PSK method, offered by every conformant client."""
+    static_pairing_code: PairMethodDescriptor | None = None
+    """The static pairing code method."""
+    dynamic_pairing_code: DynamicPairMethodDescriptor | None = None
+    """The per-session dynamic pairing code method."""
+    ignored_methods: list[str] | None = None
+    """Method identifiers this implementation does not recognize, recorded for the server
+    to log. Not part of the wire schema (omitted when None)."""
+    unusable_methods: list[str] | None = None
+    """Recognized methods dropped for offering no value this implementation knows, recorded
+    for the server to log. Not part of the wire schema (omitted when None)."""
+    offered_both_pairing_code_methods: bool | None = None
+    """Whether the client offered both pairing-code methods, leaving neither the static one
+    nor an unusable dynamic one. Not part of the wire schema (omitted when None)."""
+
+    class Config(SendspinConfig):
+        """Omit methods the client does not offer."""
+
+        omit_none = True
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop unrecognized methods and values, then degrade an over-broad advertisement."""
+        normalized = {k: v for k, v in d.items() if k in _PAIR_METHOD_VALUE_FILTERS}
+        ignored = sorted(set(d) - set(normalized) - _PAIR_METHOD_SIDECARS)
+        for key, value_filters in _PAIR_METHOD_VALUE_FILTERS.items():
+            descriptor = normalized.get(key)
+            if not isinstance(descriptor, dict):
+                continue
+            normalized[key] = _filter_descriptor_values(descriptor, value_filters)
+        # Offering both code methods is judged on the identifiers received, before any are
+        # dropped: the static descriptor is disregarded whether or not the dynamic one
+        # survives, so an over-broad advertisement degrades toward no code method at all.
+        both = (
+            PairMethod.STATIC_PAIRING_CODE.value in normalized
+            and PairMethod.DYNAMIC_PAIRING_CODE.value in normalized
+        )
+        if both:
+            del normalized[PairMethod.STATIC_PAIRING_CODE.value]
+        dynamic = normalized.get(PairMethod.DYNAMIC_PAIRING_CODE.value)
+        unusable = isinstance(dynamic, dict) and not (
+            dynamic.get("formats") and dynamic.get("out_channels")
+        )
+        if unusable:
+            del normalized[PairMethod.DYNAMIC_PAIRING_CODE.value]
+        # Always overwrite so a client cannot spoof the records via the wire.
+        normalized["ignored_methods"] = ignored or None
+        normalized["unusable_methods"] = (
+            [PairMethod.DYNAMIC_PAIRING_CODE.value] if unusable else None
+        )
+        normalized["offered_both_pairing_code_methods"] = both or None
+        return normalized
+
+
+assert set(_PAIR_METHOD_VALUE_FILTERS) <= {f.name for f in fields(SupportedPairMethods)}
 
 
 @dataclass
@@ -166,8 +294,11 @@ class ClientHelloPayload(SendspinModel):
         ClientHelloVisualizerSupportDraftR1 | None, Alias("visualizer@_draft_r1_support")
     ] = None
     """Visualizer support for clients on the legacy `visualizer@_draft_r1` wire."""
-    supported_pair_methods: list[PairMethodDescriptor] | None = None
+    supported_pair_methods: SupportedPairMethods | None = None
     """Pairing methods this client offers."""
+    legacy_pair_methods_list_used: bool | None = None
+    """Whether supported_pair_methods arrived as the superseded list, recorded for the
+    server to flag. Not part of the wire schema (omitted when None)."""
     unpaired_access: UnpairedAccess = field(default_factory=UnpairedAccess)
     """Whether this client currently admits unpaired access."""
     legacy_support_keys_used: list[str] | None = None
@@ -201,8 +332,15 @@ class ClientHelloPayload(SendspinModel):
             # Rewrite to the versioned alias only when the client didn't also send it.
             if versioned_key not in normalized:
                 normalized[versioned_key] = value
-        # Always overwrite so a client cannot spoof the record via the wire.
+        # Clients on the superseded wire send supported_pair_methods as a list whose
+        # entries each name their own method; rewrite it onto the keyed object.
+        pair_methods = normalized.get("supported_pair_methods")
+        legacy_pair_methods_list = isinstance(pair_methods, list)
+        if legacy_pair_methods_list:
+            normalized["supported_pair_methods"] = _pair_methods_from_list(pair_methods)
+        # Always overwrite so a client cannot spoof the records via the wire.
         normalized["legacy_support_keys_used"] = legacy_keys or None
+        normalized["legacy_pair_methods_list_used"] = legacy_pair_methods_list or None
         return normalized
 
     def __post_init__(self) -> None:

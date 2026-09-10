@@ -29,7 +29,7 @@ from aiosendspin.noise.models import (
     ServerPairAuthMessage,
     ServerPairAuthPayload,
 )
-from aiosendspin.noise.pairing import PairingError
+from aiosendspin.noise.pairing import LocalPairingAbortError, PairingError
 from aiosendspin.noise.trust_store import (
     PAIRING_CODE_ESCALATION_THRESHOLD,
     PskCategory,
@@ -177,16 +177,12 @@ async def test_pairing_window_tolerates_bare_leave_activate() -> None:
     assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 1
 
 
-def _dynamic_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
-    """Build a Sentinel-keyed connection whose client offers dynamic pairing code."""
-
-    async def display(pairing_code: str | None) -> None:
-        pass
-
+def _pairing_connection(pairing_support: PairingSupport) -> tuple[SendspinConnection, _FakeWS]:
+    """Build a Sentinel-keyed connection whose client offers ``pairing_support``."""
     client = make_sdk_client(
         client_name="C",
         roles=[Roles.CONTROLLER],
-        pairing_support=PairingSupport(pairing_code_display=display),
+        pairing_support=pairing_support,
     )
     connection = SendspinConnection(client)
     ws = _FakeWS()
@@ -197,6 +193,20 @@ def _dynamic_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
         "psk-id", b"\x00" * 32, PskCategory.SENTINEL
     )
     return connection, ws
+
+
+def _dynamic_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
+    """Build a connection whose client offers the dynamic pairing code."""
+
+    async def display(pairing_code: str | None) -> None:
+        pass
+
+    return _pairing_connection(PairingSupport(pairing_code_display=display))
+
+
+def _static_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
+    """Build a connection whose client offers the static pairing code and no dynamic one."""
+    return _pairing_connection(PairingSupport())
 
 
 async def test_escalated_dynamic_attempt_is_gesture_gated() -> None:
@@ -283,7 +293,7 @@ async def test_static_pairing_code_attempt_consumes_a_pre_open_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A static-pairing-code attempt spends a window that is already open."""
-    connection, ws = _dynamic_pairing_code_connection()
+    connection, ws = _static_pairing_code_connection()
     client = connection._client  # noqa: SLF001
     await client.pairing_store.set_static_pairing_code("12345678")
     config = await client.pairing_store.get_pairing_config()
@@ -421,11 +431,12 @@ async def test_hello_descriptors_carry_the_wired_channels_and_locations() -> Non
         "psk-id", b"\x00" * 32, PskCategory.SENTINEL
     )
     hello = await connection._build_client_hello()  # noqa: SLF001
-    descriptors = {d.method: d for d in hello.payload.supported_pair_methods or []}
-    assert descriptors[PairMethod.DYNAMIC_PAIRING_CODE].out_channels == ["display", "speaker"]
-    assert descriptors[PairMethod.DYNAMIC_PAIRING_CODE].locations is None
-    assert descriptors[PairMethod.PAIRING_PSK].locations == ["device", "leaflet"]
-    assert descriptors[PairMethod.PAIRING_PSK].out_channels is None
+    methods = hello.payload.supported_pair_methods
+    assert methods is not None
+    assert methods.dynamic_pairing_code is not None
+    assert methods.dynamic_pairing_code.out_channels == ["display", "speaker"]
+    assert methods.pairing_psk is not None
+    assert methods.pairing_psk.locations == ["device", "leaflet"]
 
 
 async def test_pairing_code_speaker_receives_the_activation_languages() -> None:
@@ -576,3 +587,50 @@ async def test_leave_activate_resumes_time_sync() -> None:
         assert not connection._time_task.done()  # noqa: SLF001
     finally:
         await _cancel_time_task(connection)
+
+
+async def _connection_offering_both_code_methods() -> SendspinConnection:
+    """Build a connection whose config enables both pairing-code methods."""
+
+    async def display(pairing_code: str | None) -> None:
+        pass
+
+    client = make_sdk_client(
+        client_name="C",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(pairing_code_display=display),
+    )
+    await client.pairing_store.set_static_pairing_code("12345678")
+    config = await client.pairing_store.get_pairing_config()
+    await client.pairing_store.store_pairing_config(
+        replace(config, static_pairing_code_enabled=True, dynamic_pairing_code_enabled=True)
+    )
+    connection = SendspinConnection(client)
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
+    )
+    return connection
+
+
+async def test_both_code_methods_wired_advertises_dynamic_only() -> None:
+    """A client may offer only one pairing-code method, and the per-session one wins."""
+    connection = await _connection_offering_both_code_methods()
+
+    hello = await connection._build_client_hello()  # noqa: SLF001
+
+    methods = hello.payload.supported_pair_methods
+    assert methods is not None
+    assert methods.dynamic_pairing_code is not None
+    assert methods.static_pairing_code is None
+    assert methods.pairing_psk is not None
+
+
+async def test_static_pairing_is_refused_once_it_is_no_longer_offered() -> None:
+    """Dropping static from the advertisement also refuses a server that selects it."""
+    connection = await _connection_offering_both_code_methods()
+    connection._ws = _FakeWS()  # type: ignore[assignment]  # noqa: SLF001
+
+    with pytest.raises(LocalPairingAbortError, match="method_not_supported"):
+        await connection._validate_pairing(  # noqa: SLF001
+            ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE)
+        )

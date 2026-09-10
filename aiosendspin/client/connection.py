@@ -32,6 +32,7 @@ from aiosendspin.models.core import (
     ClientStatePayload,
     ClientTimeMessage,
     ClientTimePayload,
+    DynamicPairMethodDescriptor,
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
     PairMethodDescriptor,
@@ -48,6 +49,7 @@ from aiosendspin.models.core import (
     StreamClearMessage,
     StreamEndMessage,
     StreamStartMessage,
+    SupportedPairMethods,
     UnpairedAccess,
 )
 from aiosendspin.models.management import (
@@ -267,6 +269,7 @@ class SendspinConnection:
         self._selected_pairing: ActivatePairing | None = None
         self._pairing_index = 0
         self._pairing_attempt_in_progress = False
+        self._logged_static_pairing_code_dropped = False
         self._exchange_in_progress = False
         self._send_lock = asyncio.Lock()
         self._time_filter = SendspinTimeFilter()
@@ -685,7 +688,20 @@ class SendspinConnection:
             methods.append(PairMethod.STATIC_PAIRING_CODE)
         if PairMethod.DYNAMIC_PAIRING_CODE in implemented and config.dynamic_pairing_code_enabled:
             methods.append(PairMethod.DYNAMIC_PAIRING_CODE)
+            methods = self._without_static_pairing_code(methods)
         return tuple(methods)
+
+    def _without_static_pairing_code(self, methods: list[PairMethod]) -> list[PairMethod]:
+        """Drop ``static_pairing_code``, which may not be offered alongside the dynamic one."""
+        if PairMethod.STATIC_PAIRING_CODE not in methods:
+            return methods
+        if not self._logged_static_pairing_code_dropped:
+            self._logged_static_pairing_code_dropped = True
+            logger.info(
+                "Offering dynamic_pairing_code only: a client may not offer both pairing-code "
+                "methods, so the configured static pairing code goes unused"
+            )
+        return [m for m in methods if m is not PairMethod.STATIC_PAIRING_CODE]
 
     async def _unpaired_access_enabled(self) -> bool:
         """Whether the client currently admits unpaired access (from pairing config)."""
@@ -1012,26 +1028,30 @@ class SendspinConnection:
             visualizer_support=self._client.visualizer_support,
             source_support=self._client.source_support,
             trust_level=self._compute_trust(),
-            supported_pair_methods=[
-                await self._pair_method_descriptor(m) for m in await self._supported_pair_methods()
-            ],
+            supported_pair_methods=await self._build_supported_pair_methods(),
             unpaired_access=UnpairedAccess(enabled=await self._unpaired_access_enabled()),
         )
         return ClientHelloMessage(payload=payload)
 
-    async def _pair_method_descriptor(self, method: PairMethod) -> PairMethodDescriptor:
-        """Build the ``client/hello`` descriptor for ``method``."""
-        if method is not PairMethod.DYNAMIC_PAIRING_CODE:
-            locations = self._client.secret_locations
-            return PairMethodDescriptor(
-                method=method, locations=list(locations) if locations else None
+    async def _build_supported_pair_methods(self) -> SupportedPairMethods:
+        """Build the ``client/hello`` advertisement of the methods this client offers."""
+        methods = await self._supported_pair_methods()
+        offered = SupportedPairMethods()
+        if PairMethod.PAIRING_PSK in methods:
+            offered.pairing_psk = self._secret_method_descriptor()
+        if PairMethod.STATIC_PAIRING_CODE in methods:
+            offered.static_pairing_code = self._secret_method_descriptor()
+        if PairMethod.DYNAMIC_PAIRING_CODE in methods:
+            offered.dynamic_pairing_code = DynamicPairMethodDescriptor(
+                out_channels=list(self._client.pairing_code_out_channels),
+                formats=[f.value for f in await self._dynamic_pairing_formats()],
             )
-        out_channels = self._client.pairing_code_out_channels
-        return PairMethodDescriptor(
-            method=method,
-            formats=[f.value for f in await self._dynamic_pairing_formats()],
-            out_channels=list(out_channels) if out_channels else None,
-        )
+        return offered
+
+    def _secret_method_descriptor(self) -> PairMethodDescriptor:
+        """Build the descriptor for a method whose secret the operator looks up."""
+        locations = self._client.secret_locations
+        return PairMethodDescriptor(locations=list(locations) if locations else None)
 
     def _compute_trust(self) -> TrustLevel:
         """Trust extended to the reached server: ``user`` when paired, else ``none``."""
