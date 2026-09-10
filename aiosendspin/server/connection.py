@@ -907,8 +907,10 @@ class SendspinConnection:
             self._handshake_hash = result.handshake_hash
             self._pairing_index = 0
             self._logger = logger.getChild(result.peer_id)
-            self._credential_mismatch = result.credential_mismatch
-            if result.credential_mismatch:
+            self._credential_mismatch = result.credential_mismatch and await self._holds_record(
+                result.peer_id
+            )
+            if self._credential_mismatch:
                 self._logger.warning(
                     "Client could not use its pairing record and was admitted on the "
                     "Sentinel PSK; it needs re-pairing before it can play again"
@@ -1636,6 +1638,10 @@ class SendspinConnection:
     def unpair(self) -> None:
         """Tell the client to drop this server's pairing record (it then closes)."""
         self.send_priority_message(ServerUnpairMessage())
+
+    async def _holds_record(self, client_id: str) -> bool:
+        """Whether this server still holds a long-term pairing record for ``client_id``."""
+        return await self._server.pairing_store.record_by_client_id(client_id) is not None
 
     def forget_credential_mismatch(self) -> None:
         """Release the hold a credential mismatch placed on playback.

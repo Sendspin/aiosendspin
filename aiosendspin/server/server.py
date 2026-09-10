@@ -598,6 +598,9 @@ class SendspinServer:
         connection = self._connection_for(client_id)
         await self.pairing_store.remove_record(client_id)
         connection.forget_credential_mismatch()
+        # A Sentinel session ignores server/unpair and stays up, so re-announce what it may
+        # now do; a long-term one closes on the message and never sees the activation.
+        await connection.refresh_trusted_unpaired()
         connection.unpair()
 
     async def trust_unpaired(self, client_id: str) -> None:

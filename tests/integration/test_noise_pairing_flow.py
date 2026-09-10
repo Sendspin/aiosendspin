@@ -2447,3 +2447,46 @@ async def test_re_pairing_restores_service_after_a_credential_mismatch() -> None
             assert conn._roles_to_activate == ["controller@v1"]  # noqa: SLF001
         finally:
             await client.disconnect()
+
+
+async def test_forgetting_a_mismatched_client_reactivates_it_in_place() -> None:
+    """Forgetting the client is the other remedy, and it must not leave the session idle.
+
+    A Sentinel session ignores ``server/unpair`` and stays connected, so the roles it may
+    now carry have to be announced to it rather than waiting for a reconnect.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+
+    psk = generate_psk()
+    await server_store.store_record(
+        ServerPairingRecord(
+            psk_id=psk_id_for(psk), psk=psk, client_id=identity.peer_id, pair_methods=[]
+        )
+    )
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=await _unpaired_enabled_store(),  # the record is gone
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            await server.trust_unpaired(identity.peer_id)
+
+            # Trusted-unpaired alone cannot lift the hold while the record stands.
+            assert conn._credential_mismatch is True  # noqa: SLF001
+            assert conn._roles_to_activate == []  # noqa: SLF001
+
+            await server.unpair(identity.peer_id)
+
+            assert conn._credential_mismatch is False  # noqa: SLF001
+            assert conn._roles_to_activate == ["controller@v1"]  # noqa: SLF001
+            # Announced, not merely permitted: unpair awaits the re-activation.
+            assert _server_active_role_count(server, identity.peer_id) == 1
+        finally:
+            await client.disconnect()
