@@ -756,8 +756,8 @@ async def test_live_pairing_method_enabled_after_hello_still_pairs() -> None:
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
             assert conn._client_info is not None  # noqa: SLF001
             info = conn._client_info  # noqa: SLF001
-            offered = {d.method for d in (info.supported_pair_methods or [])}
-            assert PairMethod.DYNAMIC_PAIRING_CODE not in offered
+            assert info.supported_pair_methods is not None
+            assert info.supported_pair_methods.dynamic_pairing_code is None
 
             config = await client_store.get_pairing_config()
             await client_store.store_pairing_config(
@@ -815,11 +815,10 @@ async def test_live_pairing_qr_code() -> None:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
             assert conn._client_info is not None  # noqa: SLF001
-            descriptor = next(
-                d
-                for d in (conn._client_info.supported_pair_methods or [])  # noqa: SLF001
-                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
-            )
+            methods = conn._client_info.supported_pair_methods  # noqa: SLF001
+            assert methods is not None
+            descriptor = methods.dynamic_pairing_code
+            assert descriptor is not None
             assert descriptor.formats == ["digits", "qr_code"]
             await conn.initiate_pairing(
                 PairingAttempt(
@@ -837,7 +836,11 @@ async def test_live_pairing_qr_code() -> None:
 
 
 async def test_live_pairing_ignores_unrecognized_advertised_formats() -> None:
-    """A descriptor format from a newer spec revision is ignored; the known ones still pair."""
+    """A descriptor format from a newer spec revision is ignored; the known ones still pair.
+
+    The parse filters unknown formats out, so the descriptor is mutated afterwards to reach
+    the server's own selection check directly.
+    """
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -864,11 +867,10 @@ async def test_live_pairing_ignores_unrecognized_advertised_formats() -> None:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
             assert conn._client_info is not None  # noqa: SLF001
-            descriptor = next(
-                d
-                for d in (conn._client_info.supported_pair_methods or [])  # noqa: SLF001
-                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
-            )
+            methods = conn._client_info.supported_pair_methods  # noqa: SLF001
+            assert methods is not None
+            descriptor = methods.dynamic_pairing_code
+            assert descriptor is not None
             descriptor.formats = ["holographic", "digits"]
 
             await conn.initiate_pairing(
@@ -883,17 +885,11 @@ async def test_live_pairing_ignores_unrecognized_advertised_formats() -> None:
             await client.disconnect()
 
 
-@pytest.mark.parametrize(
-    ("formats", "match"),
-    [
-        (["holographic"], "does not offer the digits"),
-        (None, "missing formats"),
-    ],
-)
-async def test_live_pairing_unusable_advertised_formats(
-    formats: list[str] | None, match: str
-) -> None:
-    """Only unknown formats offer nothing to select; a missing field is nonconformant."""
+async def test_live_pairing_unusable_advertised_formats() -> None:
+    """A format the client does not offer is refused before the attempt starts.
+
+    As above, the descriptor is mutated past the parse to exercise the selection check itself.
+    """
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -911,14 +907,13 @@ async def test_live_pairing_unusable_advertised_formats(
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
             assert conn._client_info is not None  # noqa: SLF001
-            descriptor = next(
-                d
-                for d in (conn._client_info.supported_pair_methods or [])  # noqa: SLF001
-                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
-            )
-            descriptor.formats = formats
+            methods = conn._client_info.supported_pair_methods  # noqa: SLF001
+            assert methods is not None
+            descriptor = methods.dynamic_pairing_code
+            assert descriptor is not None
+            descriptor.formats = ["holographic"]
 
-            with pytest.raises(PairingError, match=match):
+            with pytest.raises(PairingError, match="does not offer the digits"):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.DYNAMIC_PAIRING_CODE,

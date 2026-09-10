@@ -5,14 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from aiosendspin.models.types import AudioCodec
+from aiosendspin.models.types import SECRET_LOCATIONS, AudioCodec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-
-# Places a static pairing secret may be found, per the spec's pair-method descriptor.
-SECRET_LOCATIONS: frozenset[str] = frozenset({"device", "leaflet", "operator"})
 
 # Visual out-channel for a derived dynamic pairing code, cleared by a ``None`` call.
 type PairingCodeDisplay = Callable[[str | None], Awaitable[None]]
@@ -39,8 +36,9 @@ class PairingSupport:
 
     The gesture itself is reported by calling ``SendspinClient.open_pairing_window``.
     Its presence enables offering ``static_pairing_code``, unless
-    ``offer_static_pairing_code`` declines it. Any pairing-code out-channel
-    additionally enables ``dynamic_pairing_code``.
+    ``offer_static_pairing_code`` declines it. Any pairing-code out-channel enables
+    ``dynamic_pairing_code``, which supersedes ``static_pairing_code``: a client may
+    offer only one pairing-code method.
     """
 
     gesture_prompt: Callable[[bool], Awaitable[None]] | None = None
