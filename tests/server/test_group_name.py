@@ -202,3 +202,34 @@ async def test_losing_the_founder_republishes_the_derived_name() -> None:
     updates = _group_updates(joiner)
     assert len(updates) > before
     assert updates[-1].payload.group_name == "Living Room"
+
+
+@pytest.mark.asyncio
+async def test_a_member_learning_its_own_name_tells_the_group() -> None:
+    """A device is known by its client_id until its hello lands, and the group with it.
+
+    A group founded before that hello reports the id, so the members it has gained since
+    have to be told when the real name arrives.
+    """
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    founder = SendspinClient(server, client_id="c1")
+    server.register(founder)
+    SendspinGroup(server, founder)
+    joiner = _connected_member(server, "c2", "Living Room")
+    group = founder.group
+    await group.add_client(joiner)
+    assert group.group_name == "c1"
+    before = len(_group_updates(joiner))
+
+    founder.attach_connection(
+        _RecordingConnection(),
+        client_info=ClientHelloPayload(client_id="c1", name="Kitchen Speaker", supported_roles=[]),
+        negotiated_roles=[],
+        active_roles=[],
+    )
+
+    assert group.group_name == "Kitchen Speaker"
+    updates = _group_updates(joiner)
+    assert len(updates) > before
+    assert updates[-1].payload.group_name == "Kitchen Speaker"
