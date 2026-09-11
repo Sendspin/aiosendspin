@@ -22,7 +22,7 @@ from aiosendspin.models.types import (
     PairMethod,
     Roles,
 )
-from aiosendspin.noise.keys import b64url_encode
+from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
     ClientPairPendingMessage,
     PairAbortMessage,
@@ -32,6 +32,9 @@ from aiosendspin.noise.models import (
 from aiosendspin.noise.pairing import PairingError
 from aiosendspin.noise.trust_store import (
     PAIRING_CODE_ESCALATION_THRESHOLD,
+    ClientPairingRecord,
+    InMemoryClientPairingStore,
+    PairingPsk,
     PskCategory,
     ResolvedPsk,
 )
@@ -576,3 +579,33 @@ async def test_leave_activate_resumes_time_sync() -> None:
         assert not connection._time_task.done()  # noqa: SLF001
     finally:
         await _cancel_time_task(connection)
+
+
+async def test_resolution_answers_within_the_declared_category() -> None:
+    """One psk_id held under two categories resolves to the one the server declared.
+
+    The store defines a record as taking precedence over a same-id Pairing PSK, so a
+    reader that resolved first and checked the category afterwards would call a pairing
+    handshake a lookup miss while holding the very credential it named.
+    """
+    psk = generate_psk()
+    shared_id = psk_id_for(psk)
+    store = InMemoryClientPairingStore()
+    await store.set_pairing_psk(PairingPsk(psk_id=shared_id, psk=psk))
+    await store.store_record(ClientPairingRecord(psk_id=shared_id, psk=psk, server_id="server-X"))
+
+    client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER], pairing_store=store)
+    connection = SendspinConnection(client)
+
+    pairing = await connection._resolve_psk(shared_id, PskCategory.PAIRING)  # noqa: SLF001
+    assert pairing is not None
+    assert pairing.category is PskCategory.PAIRING
+
+    long_term = await connection._resolve_psk(shared_id, PskCategory.LONG_TERM)  # noqa: SLF001
+    assert long_term is not None
+    assert long_term.category is PskCategory.LONG_TERM
+
+    # A server that declares nothing predates the field, and the record still wins.
+    unscoped = await connection._resolve_psk(shared_id, None)  # noqa: SLF001
+    assert unscoped is not None
+    assert unscoped.category is PskCategory.LONG_TERM
