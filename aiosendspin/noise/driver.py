@@ -41,7 +41,7 @@ from .wire import EncryptedWebSocket, RawWebSocket
 DEFAULT_HANDSHAKE_TIMEOUT_S: Final[float] = 30.0
 
 # Client callback: given a psk_id, return the matching PSK record, or None.
-PskResolver = Callable[[str, "PskCategory | None"], Awaitable[ResolvedPsk | None]]
+PskResolver = Callable[[str, "PskCategory"], Awaitable[ResolvedPsk | None]]
 
 # Server callback: given a client_id, return a PSK to admit it, or None.
 PskProvider = Callable[[str], Awaitable[ResolvedPsk | None]]
@@ -436,17 +436,8 @@ def _sentinel_psk() -> ResolvedPsk:
 _UNKNOWN_CATEGORY: Final[PskCategory] = cast("PskCategory", object())
 
 
-def _declared_category(code: str | None) -> PskCategory | None:
-    """Return the category message 1 declared, ``None`` for a server that declared none.
-
-    A server predating the field declares nothing, and the lookup then spans every
-    category. That leniency is not reachable by an attacker: message 1's payload is
-    encrypted under keys mixing the server's static key, and referencing a psk_id at all
-    means holding the PSK it hashes from. The spec lists the field as required, so this
-    tolerance is transitional: drop it once no supported server predates the field.
-    """
-    if code is None:
-        return None
+def _declared_category(code: str) -> PskCategory:
+    """Return the category message 1 declared; a code naming none we know matches nothing."""
     return PskCategory.from_code(code) or _UNKNOWN_CATEGORY
 
 

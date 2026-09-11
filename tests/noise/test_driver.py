@@ -48,9 +48,9 @@ if TYPE_CHECKING:
 def _resolver(known: dict[str, ResolvedPsk]) -> PskResolver:
     """Build a store that answers only within the category message 1 declared."""
 
-    async def resolve(psk_id: str, category: PskCategory | None) -> ResolvedPsk | None:
+    async def resolve(psk_id: str, category: PskCategory) -> ResolvedPsk | None:
         found = known.get(psk_id)
-        if found is None or (category is not None and found.category is not category):
+        if found is None or found.category is not category:
             return None
         return found
 
@@ -778,8 +778,8 @@ async def test_psk_held_under_another_category_falls_back_to_the_sentinel() -> N
     assert server_result.psk.category is PskCategory.SENTINEL
 
 
-async def test_message_1_without_a_category_admits_any_category() -> None:
-    """A server predating the field declares no category, and the client still matches."""
+async def test_message_1_without_a_category_is_rejected() -> None:
+    """The category is required: a server that omits it does not get a handshake."""
     server_id = Identity.generate()
     client_id = Identity.generate()
     psk = generate_psk()
@@ -791,8 +791,8 @@ async def test_message_1_without_a_category_admits_any_category() -> None:
     )
     server_ws, client_ws = make_ws_pair()
 
-    async def legacy_server() -> None:
-        """Drive the server side, writing the pre-spec message 1 payload verbatim."""
+    async def server_without_a_category() -> None:
+        """Drive the server side, writing a message 1 payload that names no category."""
         client_init = (await server_ws.receive()).data
         server_init = ServerInitMessage(
             payload=ServerInitPayload(server_id=server_id.peer_id, version=PROTOCOL_VERSION),
@@ -810,19 +810,16 @@ async def test_message_1_without_a_category_admits_any_category() -> None:
         await server_ws.send_str(
             NoiseHandshakeMessage(payload=NoiseHandshakePayload(data=b64url_encode(msg1))).to_json()
         )
-        hs2 = NoiseHandshakeMessage.from_json((await server_ws.receive()).data)
-        session.read_message(b64url_decode(hs2.payload.data))
 
-    server_task = asyncio.create_task(legacy_server())
-    client_result = await run_handshake_client(
-        client_ws,
-        local_identity=client_id,
-        suite=NoiseCipherSuite.CHACHAPOLY,
-        psk_resolver=_resolver({resolved.psk_id: resolved}),
-    )
-    await server_task
-
-    assert client_result.psk.category is PskCategory.LONG_TERM
+    server_task = asyncio.create_task(server_without_a_category())
+    with pytest.raises(HandshakeAbortedError, match="malformed Noise message 1 payload"):
+        await run_handshake_client(
+            client_ws,
+            local_identity=client_id,
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=_resolver({resolved.psk_id: resolved}),
+        )
+    await asyncio.gather(server_task, return_exceptions=True)
 
 
 async def test_rehandshake_category_mismatch_aborts() -> None:
