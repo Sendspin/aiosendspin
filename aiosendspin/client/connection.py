@@ -246,7 +246,7 @@ class SendspinConnection:
     _artwork_stream_active: bool = False
     """True if artwork stream is active."""
     _source_stream_active: bool = False
-    """True between client_stream/start and client_stream/end for the source role."""
+    """True between client-stream/start and client-stream/end for the source role."""
     _current_visualizer_config: StreamStartVisualizer | None = None
     """Current visualizer config from stream/start."""
 

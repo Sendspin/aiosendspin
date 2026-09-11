@@ -11,19 +11,19 @@ from mashumaro.types import Discriminator
 from .base import SendspinConfig, SendspinModel
 
 # Wire names the spec has replaced, kept readable so an existing client still parses.
-SUPERSEDED_CLIENT_MESSAGE_TYPES: Final[dict[str, str]] = {
+SUPERSEDED_NAME_BY_CURRENT: Final[dict[str, str]] = {
     "client-stream/start": "client_stream/start",
     "client-stream/end": "client_stream/end",
 }
 
 
 _CURRENT_BY_SUPERSEDED: Final[dict[str, str]] = {
-    superseded: current for current, superseded in SUPERSEDED_CLIENT_MESSAGE_TYPES.items()
+    superseded: current for current, superseded in SUPERSEDED_NAME_BY_CURRENT.items()
 }
 
 
-def current_message_type(message_type: str) -> str | None:
-    """Return the name that replaced ``message_type``, or None if it is already current."""
+def replacement_for(message_type: str) -> str | None:
+    """Return the name that replaced ``message_type``, or None if nothing did."""
     return _CURRENT_BY_SUPERSEDED.get(message_type)
 
 
@@ -34,7 +34,7 @@ def _client_message_tags(variant: type) -> list[str]:
     current = variant.__dict__.get("type")
     if not isinstance(current, str):
         return []
-    superseded = SUPERSEDED_CLIENT_MESSAGE_TYPES.get(current)
+    superseded = SUPERSEDED_NAME_BY_CURRENT.get(current)
     return [current] if superseded is None else [current, superseded]
 
 

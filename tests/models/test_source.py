@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import orjson
 import pytest
+from mashumaro.exceptions import SuitableVariantNotFoundError
 
 from aiosendspin.models.core import (
     ClientHelloPayload,
@@ -25,6 +26,7 @@ from aiosendspin.models.types import (
     PairMethod,
     SignalState,
     TrustLevel,
+    _client_message_tags,
 )
 
 
@@ -172,5 +174,11 @@ def test_a_client_message_without_a_type_does_not_break_dispatch() -> None:
     class _UntaggedClientMessage(ClientMessage):
         """A subclass that declares no wire name, as a mixin or base might."""
 
+    assert _client_message_tags(_UntaggedClientMessage) == []
+
+    # Force the variant map to be rebuilt, so every subclass is put to the tagger rather
+    # than answered from what an earlier parse cached.
+    with pytest.raises(SuitableVariantNotFoundError):
+        ClientMessage.from_json('{"type":"nope/not-a-message"}')
     parsed = ClientMessage.from_json('{"type":"client-stream/end"}')
     assert isinstance(parsed, ClientStreamEndMessage)

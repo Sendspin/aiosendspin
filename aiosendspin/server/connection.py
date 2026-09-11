@@ -102,7 +102,7 @@ from aiosendspin.models.types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
-    current_message_type,
+    replacement_for,
     role_family,
 )
 from aiosendspin.noise.constants import SENTINEL_PSK
@@ -1136,7 +1136,7 @@ class SendspinConnection:
 
     def _flag_superseded_message_type(self, message_type: str) -> None:
         """Flag a message that arrived under the name the spec replaced."""
-        current = current_message_type(message_type)
+        current = replacement_for(message_type)
         if current is not None:
             self._flag_noncompliance(f"client sent {message_type}, superseded by {current}")
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import pytest
+
 from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
@@ -13,6 +15,7 @@ from aiosendspin.models.source import (
     ClientStreamStartSource,
 )
 from aiosendspin.models.types import AudioCodec, BinaryMessageType, ClientMessage
+from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 
 
@@ -39,21 +42,24 @@ class _RecordingRole:
 
 
 class _FakeClient:
-    def __init__(self, roles: list[Any]) -> None:
+    def __init__(self, roles: list[Any], *, strict: bool = False) -> None:
         self._roles = roles
+        self._strict = strict
         self.noncompliance: list[str] = []
 
     def flag_noncompliance(self, reason: str) -> None:
         self.noncompliance.append(reason)
+        if self._strict:
+            raise ClientComplianceError(reason)
 
     @property
     def active_roles(self) -> list[Any]:
         return self._roles
 
 
-def _bare_connection(roles: list[Any]) -> SendspinConnection:
+def _bare_connection(roles: list[Any], *, strict: bool = False) -> SendspinConnection:
     conn = SendspinConnection.__new__(SendspinConnection)
-    conn._client = _FakeClient(roles)  # noqa: SLF001
+    conn._client = _FakeClient(roles, strict=strict)  # noqa: SLF001
     conn._logger = logging.getLogger("test.source.dispatch")  # noqa: SLF001
     return conn
 
@@ -145,3 +151,13 @@ async def test_current_stream_message_names_are_not_flagged() -> None:
 
     assert role.ends == 1
     assert conn._client.noncompliance == []  # noqa: SLF001
+
+
+async def test_superseded_stream_message_name_is_rejected_by_a_strict_server() -> None:
+    """The flag is not cosmetic: a strict server drops a source on the old spelling."""
+    conn = _bare_connection([_RecordingRole()], strict=True)
+
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_message(  # noqa: SLF001
+            ClientMessage.from_json('{"type":"client_stream/end"}'), timestamp_us=0
+        )

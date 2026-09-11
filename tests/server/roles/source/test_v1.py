@@ -75,7 +75,7 @@ def _make_role() -> tuple[SourceV1Role, _FakeClient]:
 
 
 def test_client_stream_start_emits_event_with_native_format() -> None:
-    """on_client-stream/start announces the decoded handle and its PCM format."""
+    """on_client_stream_start announces the decoded handle and its PCM format."""
     role, client = _make_role()
     role.on_client_stream_start(_pcm_start_payload())
     started = [e for e in client.events if isinstance(e, SourceStreamStartedEvent)]

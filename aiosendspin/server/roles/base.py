@@ -468,7 +468,7 @@ class Role(ABC):
         """
 
     def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:  # noqa: B027
-        """Handle client_stream/start."""
+        """Handle client-stream/start."""
 
     def on_client_stream_end(self) -> None:  # noqa: B027
-        """Handle client_stream/end."""
+        """Handle client-stream/end."""
