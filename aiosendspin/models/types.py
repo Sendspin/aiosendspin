@@ -4,10 +4,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Final
 
 from mashumaro.types import Discriminator
 
 from .base import SendspinConfig, SendspinModel
+
+# Wire names the spec has replaced, kept readable so an existing client still parses.
+SUPERSEDED_NAME_BY_CURRENT: Final[dict[str, str]] = {
+    "client-stream/start": "client_stream/start",
+    "client-stream/end": "client_stream/end",
+}
+
+
+_CURRENT_BY_SUPERSEDED: Final[dict[str, str]] = {
+    superseded: current for current, superseded in SUPERSEDED_NAME_BY_CURRENT.items()
+}
+
+
+def replacement_for(message_type: str) -> str | None:
+    """Return the name that replaced ``message_type``, or None if nothing did."""
+    return _CURRENT_BY_SUPERSEDED.get(message_type)
+
+
+def _client_message_tags(variant: type) -> list[str]:
+    """Return every ``type`` value that names ``variant``, current spelling first."""
+    # Read off the class itself: a base or mixin without its own ``type`` names nothing,
+    # and raising here would take down parsing for every client message.
+    current = variant.__dict__.get("type")
+    if not isinstance(current, str):
+        return []
+    superseded = SUPERSEDED_NAME_BY_CURRENT.get(current)
+    return [current] if superseded is None else [current, superseded]
 
 
 # Base message classes
@@ -18,7 +46,9 @@ class ClientMessage(SendspinModel):
     class Config(SendspinConfig):
         """Config for parsing json messages."""
 
-        discriminator = Discriminator(field="type", include_subtypes=True)
+        discriminator = Discriminator(
+            field="type", include_subtypes=True, variant_tagger_fn=_client_message_tags
+        )
 
 
 @dataclass
