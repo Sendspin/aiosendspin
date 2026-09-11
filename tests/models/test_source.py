@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+import orjson
 import pytest
 
 from aiosendspin.models.core import (
@@ -13,6 +16,7 @@ from aiosendspin.models.core import (
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
+    ClientStreamStartPayload,
     ClientStreamStartSource,
 )
 from aiosendspin.models.types import (
@@ -115,13 +119,13 @@ def test_server_command_source_requires_command() -> None:
 def test_client_stream_messages_dispatch_by_discriminator() -> None:
     """client_stream messages resolve to their concrete classes via the type field."""
     start = ClientMessage.from_json(
-        '{"type":"client_stream/start","payload":{"source":'
+        '{"type":"client-stream/start","payload":{"source":'
         '{"codec":"flac","channels":2,"sample_rate":48000,"bit_depth":16,"codec_header":"AAA="}}}'
     )
     assert isinstance(start, ClientStreamStartMessage)
     assert start.payload.source.codec is AudioCodec.FLAC
 
-    end = ClientMessage.from_json('{"type":"client_stream/end"}')
+    end = ClientMessage.from_json('{"type":"client-stream/end"}')
     assert isinstance(end, ClientStreamEndMessage)
 
 
@@ -130,3 +134,43 @@ def test_client_stream_start_header_optional_for_all_codecs() -> None:
     for codec in (AudioCodec.OPUS, AudioCodec.FLAC, AudioCodec.PCM):
         src = ClientStreamStartSource(codec=codec, channels=2, sample_rate=48000, bit_depth=16)
         assert src.codec_header is None
+
+
+def test_superseded_stream_message_names_still_parse() -> None:
+    """A source on the pre-rename wire is understood, and says which name it used."""
+    start = ClientMessage.from_json(
+        '{"type":"client_stream/start","payload":{"source":'
+        '{"codec":"pcm","sample_rate":48000,"bit_depth":16,"channels":2}}}'
+    )
+    end = ClientMessage.from_json('{"type":"client_stream/end"}')
+
+    assert isinstance(start, ClientStreamStartMessage)
+    assert isinstance(end, ClientStreamEndMessage)
+    assert start.type == "client_stream/start"
+    assert end.type == "client_stream/end"
+
+
+def test_stream_messages_are_emitted_under_the_current_names() -> None:
+    """What this client sends is the spelling the spec now uses."""
+    assert orjson.loads(ClientStreamEndMessage().to_json())["type"] == "client-stream/end"
+    payload = ClientStreamStartPayload(
+        source=ClientStreamStartSource(
+            codec=AudioCodec.PCM, sample_rate=48000, bit_depth=16, channels=2
+        )
+    )
+    raw = orjson.loads(ClientStreamStartMessage(payload=payload).to_json())
+    assert raw["type"] == "client-stream/start"
+
+
+def test_a_client_message_without_a_type_does_not_break_dispatch() -> None:
+    """The tagger must tolerate a variant carrying no ``type`` of its own.
+
+    Raising there would take down parsing for every client message, not just source ones.
+    """
+
+    @dataclass
+    class _UntaggedClientMessage(ClientMessage):
+        """A subclass that declares no wire name, as a mixin or base might."""
+
+    parsed = ClientMessage.from_json('{"type":"client-stream/end"}')
+    assert isinstance(parsed, ClientStreamEndMessage)

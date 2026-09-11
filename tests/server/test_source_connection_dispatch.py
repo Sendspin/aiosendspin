@@ -12,7 +12,7 @@ from aiosendspin.models.source import (
     ClientStreamStartPayload,
     ClientStreamStartSource,
 )
-from aiosendspin.models.types import AudioCodec, BinaryMessageType
+from aiosendspin.models.types import AudioCodec, BinaryMessageType, ClientMessage
 from aiosendspin.server.connection import SendspinConnection
 
 
@@ -41,6 +41,10 @@ class _RecordingRole:
 class _FakeClient:
     def __init__(self, roles: list[Any]) -> None:
         self._roles = roles
+        self.noncompliance: list[str] = []
+
+    def flag_noncompliance(self, reason: str) -> None:
+        self.noncompliance.append(reason)
 
     @property
     def active_roles(self) -> list[Any]:
@@ -95,7 +99,7 @@ def test_short_binary_payload_is_dropped_safely(caplog: Any) -> None:
 
 
 async def test_client_stream_start_and_end_dispatched_to_roles() -> None:
-    """client_stream/start and client_stream/end reach role hooks via _handle_message."""
+    """client-stream/start and client-stream/end reach role hooks via _handle_message."""
     role = _RecordingRole()
     conn = _bare_connection([role])
     start = ClientStreamStartMessage(
@@ -109,3 +113,35 @@ async def test_client_stream_start_and_end_dispatched_to_roles() -> None:
     await conn._handle_message(ClientStreamEndMessage(), timestamp_us=0)  # noqa: SLF001
     assert len(role.starts) == 1
     assert role.ends == 1
+
+
+async def test_superseded_stream_message_names_are_dispatched_and_flagged() -> None:
+    """A source on the pre-rename wire is still served, and the deviation recorded."""
+    role = _RecordingRole()
+    conn = _bare_connection([role])
+    start = ClientMessage.from_json(
+        '{"type":"client_stream/start","payload":{"source":'
+        '{"codec":"pcm","sample_rate":48000,"bit_depth":16,"channels":2}}}'
+    )
+    end = ClientMessage.from_json('{"type":"client_stream/end"}')
+
+    await conn._handle_message(start, timestamp_us=0)  # noqa: SLF001
+    await conn._handle_message(end, timestamp_us=0)  # noqa: SLF001
+
+    assert len(role.starts) == 1
+    assert role.ends == 1
+    assert conn._client.noncompliance == [  # noqa: SLF001
+        "client sent client_stream/start, superseded by client-stream/start",
+        "client sent client_stream/end, superseded by client-stream/end",
+    ]
+
+
+async def test_current_stream_message_names_are_not_flagged() -> None:
+    """The current spelling raises nothing with the server."""
+    role = _RecordingRole()
+    conn = _bare_connection([role])
+
+    await conn._handle_message(ClientStreamEndMessage(), timestamp_us=0)  # noqa: SLF001
+
+    assert role.ends == 1
+    assert conn._client.noncompliance == []  # noqa: SLF001

@@ -102,6 +102,7 @@ from aiosendspin.models.types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
+    current_message_type,
     role_family,
 )
 from aiosendspin.noise.constants import SENTINEL_PSK
@@ -1133,6 +1134,12 @@ class SendspinConnection:
             )
         return True
 
+    def _flag_superseded_message_type(self, message_type: str) -> None:
+        """Flag a message that arrived under the name the spec replaced."""
+        current = current_message_type(message_type)
+        if current is not None:
+            self._flag_noncompliance(f"client sent {message_type}, superseded by {current}")
+
     def _flag_legacy_artwork_wire(self, support: ClientHelloArtworkSupport) -> None:
         """Flag artwork channels declared on the wire the spec superseded."""
         legacy_keys = sorted(
@@ -1842,6 +1849,7 @@ class SendspinConnection:
         if isinstance(message, ClientStreamStartMessage):
             if self._client is None:
                 return
+            self._flag_superseded_message_type(message.type)
             for role in self._client.active_roles:
                 role.on_client_stream_start(message.payload)
             return
@@ -1849,6 +1857,7 @@ class SendspinConnection:
         if isinstance(message, ClientStreamEndMessage):
             if self._client is None:
                 return
+            self._flag_superseded_message_type(message.type)
             for role in self._client.active_roles:
                 role.on_client_stream_end()
             return
