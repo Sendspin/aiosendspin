@@ -40,7 +40,7 @@ from .wire import EncryptedWebSocket, RawWebSocket
 DEFAULT_HANDSHAKE_TIMEOUT_S: Final[float] = 30.0
 
 # Client callback: given a psk_id, return the matching PSK record, or None.
-PskResolver = Callable[[str], Awaitable[ResolvedPsk | None]]
+PskResolver = Callable[[str, "PskCategory | None"], Awaitable[ResolvedPsk | None]]
 
 # Server callback: given a client_id, return a PSK to admit it, or None.
 PskProvider = Callable[[str], Awaitable[ResolvedPsk | None]]
@@ -308,10 +308,12 @@ async def _exchange_as_responder(
     msg1_pt = _read_handshake_message(session, hs1_text, "Noise message 1")
     msg1_obj = _parse_msg1_payload(msg1_pt)
 
-    resolved = await psk_resolver(msg1_obj.psk_id)
-    if resolved is not None and not _category_admits(msg1_obj.psk_category, resolved.category):
-        # Holding the referenced PSK under another category is a lookup miss, not a match.
+    declared = _declared_category(msg1_obj.psk_category)
+    if declared is _UNKNOWN_CATEGORY:
+        # A category from a newer revision names nothing this client holds.
         resolved = None
+    else:
+        resolved = await psk_resolver(msg1_obj.psk_id, declared)
     if resolved is None:
         raise HandshakeAbortedError(f"no PSK matches psk_id={msg1_obj.psk_id!r}")
     # Stored-pubkey post-match check: the record's bound server_id must be the
@@ -369,18 +371,22 @@ def _read_handshake_message(session: NoiseSession, text: str, what: str) -> byte
         raise HandshakeAbortedError(f"{what} failed Noise authentication") from exc
 
 
-def _category_admits(declared: str | None, actual: PskCategory) -> bool:
-    """Whether a PSK of ``actual`` category answers a message 1 declaring ``declared``.
+# Stands for a declared category this implementation does not know, which no PSK answers.
+_UNKNOWN_CATEGORY: Final[PskCategory] = cast("PskCategory", object())
 
-    A server predating the field declares nothing, and every category answers it. That
-    leniency is not reachable by an attacker: message 1's payload is encrypted under keys
-    mixing the server's static key, and referencing a psk_id at all means holding the PSK
-    it hashes from. A code naming no category we know matches nothing, as a miss.
 
-    The spec lists the field as required, so this tolerance is transitional: drop it once
-    no supported server predates the field.
+def _declared_category(code: str | None) -> PskCategory | None:
+    """Return the category message 1 declared, ``None`` for a server that declared none.
+
+    A server predating the field declares nothing, and the lookup then spans every
+    category. That leniency is not reachable by an attacker: message 1's payload is
+    encrypted under keys mixing the server's static key, and referencing a psk_id at all
+    means holding the PSK it hashes from. The spec lists the field as required, so this
+    tolerance is transitional: drop it once no supported server predates the field.
     """
-    return declared is None or PskCategory.from_code(declared) is actual
+    if code is None:
+        return None
+    return PskCategory.from_code(code) or _UNKNOWN_CATEGORY
 
 
 def _parse_msg1_payload(plaintext: bytes) -> NoiseMsg1Payload:

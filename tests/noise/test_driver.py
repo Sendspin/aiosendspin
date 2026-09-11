@@ -44,8 +44,13 @@ if TYPE_CHECKING:
 
 
 def _resolver(known: dict[str, ResolvedPsk]) -> PskResolver:
-    async def resolve(psk_id: str) -> ResolvedPsk | None:
-        return known.get(psk_id)
+    """Build a store that answers only within the category message 1 declared."""
+
+    async def resolve(psk_id: str, category: PskCategory | None) -> ResolvedPsk | None:
+        found = known.get(psk_id)
+        if found is None or (category is not None and found.category is not category):
+            return None
+        return found
 
     return resolve
 

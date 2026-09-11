@@ -378,11 +378,29 @@ class SendspinConnection:
         if result.psk.category is PskCategory.LONG_TERM:
             await self._client.pairing_store.mark_record_used(result.psk.psk_id)
 
-    async def _resolve_psk(self, psk_id: str) -> ResolvedPsk | None:
-        """Resolve a ``psk_id`` to its PSK, matching the Sentinel PSK or a stored credential."""
-        if psk_id == _SENTINEL_PSK_ID:
-            return ResolvedPsk(psk_id, SENTINEL_PSK, PskCategory.SENTINEL)
-        return await self._client.pairing_store.resolve_by_psk_id(psk_id)
+    async def _resolve_psk(self, psk_id: str, category: PskCategory | None) -> ResolvedPsk | None:
+        """Resolve a ``psk_id`` to a PSK this client holds under ``category``.
+
+        A server that declared no category predates the field; the lookup then spans every
+        credential, as it did before the category existed.
+        """
+        store = self._client.pairing_store
+        sentinel = (
+            ResolvedPsk(psk_id, SENTINEL_PSK, PskCategory.SENTINEL)
+            if psk_id == _SENTINEL_PSK_ID
+            else None
+        )
+        if category is PskCategory.SENTINEL:
+            return sentinel
+        if category is PskCategory.LONG_TERM:
+            record = await store.record_by_psk_id(psk_id)
+            return record.as_resolved() if record is not None else None
+        if category is PskCategory.PAIRING:
+            pairing = await store.pairing_psk()
+            if pairing is None or pairing.psk_id != psk_id:
+                return None
+            return pairing.as_resolved()
+        return sentinel or await store.resolve_by_psk_id(psk_id)
 
     async def _run_inner_handshake(self) -> None:
         """Bring the connection up to its first server/activate, without pairing or I/O.
