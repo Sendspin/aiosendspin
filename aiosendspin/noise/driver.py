@@ -33,14 +33,14 @@ from .models import (
     ServerInitPayload,
 )
 from .session import NoiseCipherSuite, NoiseSession
-from .trust_store import ResolvedPsk
+from .trust_store import PskCategory, ResolvedPsk
 from .wire import EncryptedWebSocket, RawWebSocket
 
 # Per-message timeout during cleartext init and Noise handshake.
 DEFAULT_HANDSHAKE_TIMEOUT_S: Final[float] = 30.0
 
 # Client callback: given a psk_id, return the matching PSK record, or None.
-PskResolver = Callable[[str], Awaitable[ResolvedPsk | None]]
+PskResolver = Callable[[str, "PskCategory"], Awaitable[ResolvedPsk | None]]
 
 # Server callback: given a client_id, return a PSK to admit it, or None.
 PskProvider = Callable[[str], Awaitable[ResolvedPsk | None]]
@@ -122,7 +122,7 @@ async def run_handshake_server(
     # server/init immediately followed by Noise message 1 (spec: no client
     # message is awaited in between).
     await ws.send_str(server_init_text)
-    await _exchange_as_initiator(ws, session=session, psk_id=resolved.psk_id, timeout_s=timeout_s)
+    await _exchange_as_initiator(ws, session=session, psk=resolved, timeout_s=timeout_s)
 
     return HandshakeResult(
         encrypted_ws=EncryptedWebSocket(ws, session),
@@ -205,7 +205,7 @@ async def run_rehandshake_server(
         prologue=prologue,
         psk=psk.psk,
     )
-    await _exchange_as_initiator(enc_ws, session=session, psk_id=psk.psk_id, timeout_s=timeout_s)
+    await _exchange_as_initiator(enc_ws, session=session, psk=psk, timeout_s=timeout_s)
     enc_ws.swap_session(session)
     return HandshakeResult(
         encrypted_ws=enc_ws,
@@ -277,11 +277,12 @@ async def _exchange_as_initiator(
     transport: HandshakeWebSocket,
     *,
     session: NoiseSession,
-    psk_id: str,
+    psk: ResolvedPsk,
     timeout_s: float,
 ) -> None:
     """Exchange the two ``noise/handshake`` messages as the initiator (server)."""
-    msg1_pt = NoiseMsg1Payload(psk_id=psk_id).to_json().encode("utf-8")
+    msg1 = NoiseMsg1Payload(psk_id=psk.psk_id, psk_category=psk.category.code)
+    msg1_pt = msg1.to_json().encode("utf-8")
     msg1_ct = session.write_message(msg1_pt)
     await transport.send_str(_pack_handshake(msg1_ct))
     hs2_text = await receive_text_frame(transport, what="Noise message 2", timeout_s=timeout_s)
@@ -307,7 +308,12 @@ async def _exchange_as_responder(
     msg1_pt = _read_handshake_message(session, hs1_text, "Noise message 1")
     msg1_obj = _parse_msg1_payload(msg1_pt)
 
-    resolved = await psk_resolver(msg1_obj.psk_id)
+    declared = _declared_category(msg1_obj.psk_category)
+    if declared is _UNKNOWN_CATEGORY:
+        # A category from a newer revision names nothing this client holds.
+        resolved = None
+    else:
+        resolved = await psk_resolver(msg1_obj.psk_id, declared)
     if resolved is None:
         raise HandshakeAbortedError(f"no PSK matches psk_id={msg1_obj.psk_id!r}")
     # Stored-pubkey post-match check: the record's bound server_id must be the
@@ -363,6 +369,15 @@ def _read_handshake_message(session: NoiseSession, text: str, what: str) -> byte
         return session.read_message(ciphertext)
     except (NoiseInvalidMessage, NoiseHandshakeError, NoiseValueError) as exc:
         raise HandshakeAbortedError(f"{what} failed Noise authentication") from exc
+
+
+# Stands for a declared category this implementation does not know, which no PSK answers.
+_UNKNOWN_CATEGORY: Final[PskCategory] = cast("PskCategory", object())
+
+
+def _declared_category(code: str) -> PskCategory:
+    """Return the category message 1 declared; a code naming none we know matches nothing."""
+    return PskCategory.from_code(code) or _UNKNOWN_CATEGORY
 
 
 def _parse_msg1_payload(plaintext: bytes) -> NoiseMsg1Payload:

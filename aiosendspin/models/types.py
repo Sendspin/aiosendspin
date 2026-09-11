@@ -53,7 +53,7 @@ def undefined_field() -> UndefinedField:
 
 
 class TrustLevel(Enum):
-    """Trust a client extends to a server, governing allowed management operations."""
+    """Trust a connection carries, derived from the PSK category that admitted it."""
 
     NONE = "none"
     USER = "user"

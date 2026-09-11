@@ -43,7 +43,6 @@ from .types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
-    TrustLevel,
     UndefinedField,
     undefined_field,
 )
@@ -145,8 +144,6 @@ class ClientHelloPayload(SendspinModel):
     """Friendly name of the client."""
     supported_roles: list[str]
     """List of versioned role IDs the client supports (e.g., 'player@v1')."""
-    trust_level: TrustLevel = TrustLevel.NONE
-    """Trust the client extends to this server ('none' during pairing/unpaired playback)."""
     device_info: DeviceInfo | None = None
     """Optional information about the device."""
     client_id: str | None = None

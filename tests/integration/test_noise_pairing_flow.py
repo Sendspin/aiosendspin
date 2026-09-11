@@ -556,7 +556,7 @@ async def test_live_pairing_dynamic_pairing_code_language_hint(
 
 
 async def test_live_pairing_updates_connection_security_trust() -> None:
-    """The post-pairing re-hello propagates the client's re-asserted trust_level."""
+    """Pairing promotes the connection to the long-term PSK, and trust follows the category."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()

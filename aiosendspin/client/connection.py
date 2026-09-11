@@ -83,7 +83,6 @@ from aiosendspin.models.types import (
     Roles,
     ServerMessage,
     SignalState,
-    TrustLevel,
     UndefinedField,
     role_family,
 )
@@ -379,11 +378,20 @@ class SendspinConnection:
         if result.psk.category is PskCategory.LONG_TERM:
             await self._client.pairing_store.mark_record_used(result.psk.psk_id)
 
-    async def _resolve_psk(self, psk_id: str) -> ResolvedPsk | None:
-        """Resolve a ``psk_id`` to its PSK, matching the Sentinel PSK or a stored credential."""
-        if psk_id == _SENTINEL_PSK_ID:
+    async def _resolve_psk(self, psk_id: str, category: PskCategory) -> ResolvedPsk | None:
+        """Resolve a ``psk_id`` to a PSK this client holds under ``category``."""
+        store = self._client.pairing_store
+        if category is PskCategory.SENTINEL:
+            if psk_id != _SENTINEL_PSK_ID:
+                return None
             return ResolvedPsk(psk_id, SENTINEL_PSK, PskCategory.SENTINEL)
-        return await self._client.pairing_store.resolve_by_psk_id(psk_id)
+        if category is PskCategory.LONG_TERM:
+            record = await store.record_by_psk_id(psk_id)
+            return record.as_resolved() if record is not None else None
+        pairing = await store.pairing_psk()
+        if pairing is None or pairing.psk_id != psk_id:
+            return None
+        return pairing.as_resolved()
 
     async def _run_inner_handshake(self) -> None:
         """Bring the connection up to its first server/activate, without pairing or I/O.
@@ -1011,7 +1019,6 @@ class SendspinConnection:
             artwork_support=self._client.artwork_support,
             visualizer_support=self._client.visualizer_support,
             source_support=self._client.source_support,
-            trust_level=self._compute_trust(),
             supported_pair_methods=[
                 await self._pair_method_descriptor(m) for m in await self._supported_pair_methods()
             ],
@@ -1032,12 +1039,6 @@ class SendspinConnection:
             formats=[f.value for f in await self._dynamic_pairing_formats()],
             out_channels=list(out_channels) if out_channels else None,
         )
-
-    def _compute_trust(self) -> TrustLevel:
-        """Trust extended to the reached server: ``user`` when paired, else ``none``."""
-        if self._noise_psk is not None and self._noise_psk.category is PskCategory.LONG_TERM:
-            return TrustLevel.USER
-        return TrustLevel.NONE
 
     async def _send_client_hello(self) -> None:
         assert self._ws is not None
@@ -1373,7 +1374,7 @@ class SendspinConnection:
     async def _handle_unpair(self) -> None:
         """Handle server/unpair: drop the matched record (unless shared) and close."""
         if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
-            return  # trust_level 'none' (pairing / unpaired handshake): ignore and continue.
+            return  # Not a long-term session (pairing / unpaired): ignore and continue.
         await handle_unpair(self._client.pairing_store, matched_psk_id=self._noise_psk.psk_id)
         await self._goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
 
