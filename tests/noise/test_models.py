@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from aiosendspin.noise.models import (
     ClientInitMessage,
     ClientInitPayload,
@@ -78,10 +80,10 @@ def test_noise_msg1_payload_carries_psk_id_and_category() -> None:
     assert raw == ('{"psk_id":"GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo","psk_category":"sn"}')
 
 
-def test_noise_msg1_payload_omits_an_absent_category() -> None:
-    """A payload without the category omits the key rather than sending null."""
-    payload = NoiseMsg1Payload(psk_id="GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo")
-    assert payload.to_json() == '{"psk_id":"GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo"}'
+def test_noise_msg1_payload_requires_a_category() -> None:
+    """The category is not optional: a payload without it does not parse."""
+    with pytest.raises(Exception, match="psk_category"):
+        NoiseMsg1Payload.from_json('{"psk_id":"GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo"}')
 
 
 def test_noise_msg1_category_codes_share_one_length() -> None:

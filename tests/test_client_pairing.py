@@ -604,8 +604,3 @@ async def test_resolution_answers_within_the_declared_category() -> None:
     long_term = await connection._resolve_psk(shared_id, PskCategory.LONG_TERM)  # noqa: SLF001
     assert long_term is not None
     assert long_term.category is PskCategory.LONG_TERM
-
-    # A server that declares nothing predates the field, and the record still wins.
-    unscoped = await connection._resolve_psk(shared_id, None)  # noqa: SLF001
-    assert unscoped is not None
-    assert unscoped.category is PskCategory.LONG_TERM

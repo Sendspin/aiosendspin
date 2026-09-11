@@ -71,16 +71,8 @@ class NoiseMsg1Payload(SendspinModel):
 
     psk_id: str
     """43-char base64url SHA-256 of the PSK (see ``psk_id_for``)."""
-    psk_category: str | None = None
-    """Category the server is using the referenced PSK as, as a ``PskCategory`` code.
-
-    Absent from servers predating the field, which the client reads as any category.
-    """
-
-    class Config(SendspinConfig):
-        """Omit the category rather than sending it as null."""
-
-        omit_none = True
+    psk_category: str
+    """Category the server is using the referenced PSK as, as a ``PskCategory`` code."""
 
 
 @dataclass
