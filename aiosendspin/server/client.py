@@ -744,7 +744,13 @@ class SendspinClient:
     ) -> None:
         """Store hello identity/capabilities with optional explicit negotiated roles."""
         self._info = client_info
+        # A group with no name of its own reports its founding member's, so this device
+        # learning its own name can change what its whole group is called.
+        group = self._group
+        previous_group_name = group.group_name if group is not None else None
         self._name = client_info.name
+        if group is not None and previous_group_name is not None:
+            group._publish_if_name_changed(previous_group_name)  # noqa: SLF001
         if negotiated_roles is None:
             self._negotiated_role_ids = negotiate_roles(
                 client_info.supported_roles, strict=not self._server.allow_noncompliant_clients
