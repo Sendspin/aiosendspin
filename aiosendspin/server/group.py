@@ -188,31 +188,31 @@ class SendspinGroup:
         if self._push_stream is not None and not self._push_stream.is_stopped:
             self._push_stream.on_role_leave(role)
 
-    def _send_group_update_to_clients(self) -> None:
-        """Send group/update messages to all clients."""
-        group_message = GroupUpdateServerMessage(
+    def _group_update_message(self) -> GroupUpdateServerMessage:
+        """Build a group/update carrying this group's current state."""
+        return GroupUpdateServerMessage(
             GroupUpdateServerPayload(
                 playback_state=self._current_state,
                 group_id=self.group_id,
                 group_name=self.group_name,
             )
         )
+
+    def _send_group_update_to_clients(self) -> None:
+        """Send group/update to every member already past its first server/activate."""
+        group_message = self._group_update_message()
         for client in self._clients:
-            client.send_message(group_message)
+            # A client mid-handshake is sent its own update once activated, and must not
+            # receive one before the server/activate that opens the connection.
+            if client.is_connected:
+                client.send_message(group_message)
 
     def on_client_connected(self, client: SendspinClient) -> None:
         """Send current group state to a client that just finished handshaking."""
         if client not in self._clients:
             return
 
-        group_message = GroupUpdateServerMessage(
-            GroupUpdateServerPayload(
-                playback_state=self._current_state,
-                group_id=self.group_id,
-                group_name=self.group_name,
-            )
-        )
-        client.send_message(group_message)
+        client.send_message(self._group_update_message())
 
         if self._push_stream is not None and not self._push_stream.is_stopped:
             for role in client.active_roles:
@@ -341,9 +341,19 @@ class SendspinGroup:
         return self._group_id
 
     @property
-    def group_name(self) -> str | None:
-        """Friendly name for this group."""
-        return self._group_name
+    def group_name(self) -> str:
+        """Friendly name for this group, its first member's device name by default."""
+        if self._group_name is not None:
+            return self._group_name
+        return self._clients[0].name if self._clients else ""
+
+    def set_group_name(self, name: str | None) -> None:
+        """Name this group, publishing the change; ``None`` restores the default."""
+        if name == self._group_name:
+            return
+
+        self._group_name = name
+        self._send_group_update_to_clients()
 
     @property
     def state(self) -> PlaybackStateType:
@@ -475,12 +485,5 @@ class SendspinGroup:
                         self._push_stream.on_role_join(role)
 
         # Send current state to the new client
-        group_message = GroupUpdateServerMessage(
-            GroupUpdateServerPayload(
-                playback_state=self._current_state,
-                group_id=self.group_id,
-                group_name=self.group_name,
-            )
-        )
         logger.debug("Sending group update to new client %s", client.client_id)
-        client.send_message(group_message)
+        client.send_message(self._group_update_message())
