@@ -311,6 +311,7 @@ class SendspinConnection:
         self._negotiated_roles: list[str] = []
         self._client: SendspinClient | None = None
         self._trusted_unpaired = False
+        self._credential_mismatch = False
 
         self._declared_activities: list[Activity] | None = None
         self._client_event_unsub: Callable[[], None] | None = None
@@ -906,6 +907,14 @@ class SendspinConnection:
             self._handshake_hash = result.handshake_hash
             self._pairing_index = 0
             self._logger = logger.getChild(result.peer_id)
+            self._credential_mismatch = result.credential_mismatch and await self._holds_record(
+                result.peer_id
+            )
+            if self._credential_mismatch:
+                self._logger.warning(
+                    "Client could not use its pairing record and was admitted on the "
+                    "Sentinel PSK; it needs re-pairing before it can play again"
+                )
             return result.encrypted_ws
         if msg_type == "client/hello" and self._server.allow_unencrypted:
             if self._pairing_attempt is not None:
@@ -1109,29 +1118,37 @@ class SendspinConnection:
             )
 
         if self._client is None:
-            client = self._server.get_or_create_client(client_id)
-            if not self.is_encrypted:
-                # Legacy unencrypted is never paired, so drop pairing-required roles.
-                initial_active = self._filter_pairing_roles(self._negotiated_roles)
-            elif self._is_pairing():
-                initial_active = []
-            else:
-                initial_active = self._roles_to_activate
-            client.attach_connection(
-                self,
-                client_info=client_info,
-                negotiated_roles=self._negotiated_roles,
-                active_roles=initial_active,
-            )
-            self._client = client
-            if self._url is not None:
-                self._server.register_client_url(client_id, self._url)
+            self._attach_new_client(client_id, client_info)
         else:
             # Hello re-sent over the same connection after an in-band re-handshake.
             self._client.refresh_identity_from_hello(
                 client_info, negotiated_roles=self._negotiated_roles
             )
         return True
+
+    def _attach_new_client(self, client_id: str, client_info: ClientHelloPayload) -> None:
+        """Bind this connection to its persistent client and announce what it arrived as."""
+        client = self._server.get_or_create_client(client_id)
+        if not self.is_encrypted:
+            # Legacy unencrypted is never paired, so drop pairing-required roles.
+            initial_active = self._filter_pairing_roles(self._negotiated_roles)
+        elif self._is_pairing():
+            initial_active = []
+        else:
+            initial_active = self._roles_to_activate
+        client.attach_connection(
+            self,
+            client_info=client_info,
+            negotiated_roles=self._negotiated_roles,
+            active_roles=initial_active,
+        )
+        self._client = client
+        if self._url is not None:
+            self._server.register_client_url(client_id, self._url)
+        if self._credential_mismatch:
+            # Raised here rather than at the handshake, so a listener handed the client_id
+            # can resolve the client it names.
+            self._server._signal_credential_mismatch(client_id)  # noqa: SLF001
 
     def _flag_legacy_artwork_wire(self, support: ClientHelloArtworkSupport) -> None:
         """Flag artwork channels declared on the wire the spec superseded."""
@@ -1174,6 +1191,10 @@ class SendspinConnection:
         """Whether this connection may ever carry playback."""
         assert self._noise_psk is not None
         assert self._client_info is not None
+        if self._credential_mismatch:
+            # The client could not use the record this server still holds. Until the two
+            # agree again the session carries pairing or nothing, whatever else admits it.
+            return False
         if self._noise_psk.category is PskCategory.LONG_TERM:
             return True
         if self._noise_psk.category is PskCategory.SENTINEL:
@@ -1522,6 +1543,7 @@ class SendspinConnection:
             psk=psk,
         )
         self._noise_psk = result.psk
+        self._credential_mismatch = result.credential_mismatch
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         return await self._send_server_hello_and_recv(transport)
@@ -1616,6 +1638,18 @@ class SendspinConnection:
     def unpair(self) -> None:
         """Tell the client to drop this server's pairing record (it then closes)."""
         self.send_priority_message(ServerUnpairMessage())
+
+    async def _holds_record(self, client_id: str) -> bool:
+        """Whether this server still holds a long-term pairing record for ``client_id``."""
+        return await self._server.pairing_store.record_by_client_id(client_id) is not None
+
+    def forget_credential_mismatch(self) -> None:
+        """Release the hold a credential mismatch placed on playback.
+
+        Called once this server's pairing record is gone: the mismatch says the client
+        cannot use that record, so without it what remains is an ordinary unpaired client.
+        """
+        self._credential_mismatch = False
 
     async def list_records(
         self,

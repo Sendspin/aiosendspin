@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from aiohttp import WSMsgType
@@ -14,6 +15,7 @@ from aiosendspin.noise.driver import (
     HandshakeAbortedError,
     PskProvider,
     PskResolver,
+    _exchange_as_responder,
     run_handshake_client,
     run_handshake_server,
     run_rehandshake_client,
@@ -241,32 +243,37 @@ async def test_server_psk_provider_returning_none_aborts() -> None:
     client_task.cancel()
 
 
-async def test_client_psk_resolver_returning_none_aborts() -> None:
-    """run_client raises HandshakeAbortedError if psk_resolver returns None for the psk_id."""
+async def test_psk_lookup_miss_completes_under_the_sentinel() -> None:
+    """A client that cannot resolve the referenced psk_id answers under the Sentinel.
+
+    Both sides end up on the Sentinel and report the mismatch, so the session survives
+    to carry a re-pairing instead of failing at the handshake.
+    """
     server_id = Identity.generate()
     client_id = Identity.generate()
     psk = generate_psk()
     resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.LONG_TERM)
 
     server_ws, client_ws = make_ws_pair()
-
-    async def server_side() -> None:
-        with contextlib.suppress(HandshakeAbortedError):
-            await run_handshake_server(
-                server_ws,
-                local_identity=server_id,
-                psk_provider=_provider(resolved),
-            )
-
-    server_task = asyncio.create_task(server_side())
-    with pytest.raises(HandshakeAbortedError, match="no PSK matches psk_id"):
-        await run_handshake_client(
+    server_result, client_result = await asyncio.gather(
+        run_handshake_server(
+            server_ws,
+            local_identity=server_id,
+            psk_provider=_provider(resolved),
+        ),
+        run_handshake_client(
             client_ws,
             local_identity=client_id,
             suite=NoiseCipherSuite.CHACHAPOLY,
-            psk_resolver=_resolver({}),  # nothing known
-        )
-    server_task.cancel()
+            psk_resolver=_resolver({}),  # the record is gone
+        ),
+    )
+
+    assert server_result.credential_mismatch is True
+    assert client_result.credential_mismatch is True
+    assert server_result.psk.category is PskCategory.SENTINEL
+    assert client_result.psk.category is PskCategory.SENTINEL
+    assert server_result.handshake_hash == client_result.handshake_hash
 
 
 async def test_server_rejects_unknown_suite() -> None:
@@ -742,8 +749,8 @@ async def test_server_rejects_msg2_with_malformed_payload() -> None:
     await client_task
 
 
-async def test_psk_held_under_another_category_is_a_lookup_miss() -> None:
-    """The declared category binds: the same psk_id under another category does not match."""
+async def test_psk_held_under_another_category_falls_back_to_the_sentinel() -> None:
+    """The declared category binds: the same psk_id under another category is a miss."""
     server_id = Identity.generate()
     client_id = Identity.generate()
     psk = generate_psk()
@@ -752,22 +759,23 @@ async def test_psk_held_under_another_category_is_a_lookup_miss() -> None:
     client_resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.PAIRING)
 
     server_ws, client_ws = make_ws_pair()
-    server_task = asyncio.create_task(
+    server_result, client_result = await asyncio.gather(
         run_handshake_server(
             server_ws,
             local_identity=server_id,
             psk_provider=_provider(server_resolved),
-            timeout_s=1.0,
-        )
-    )
-    with pytest.raises(HandshakeAbortedError, match="no PSK matches psk_id"):
-        await run_handshake_client(
+        ),
+        run_handshake_client(
             client_ws,
             local_identity=client_id,
             suite=NoiseCipherSuite.CHACHAPOLY,
             psk_resolver=_resolver({client_resolved.psk_id: client_resolved}),
-        )
-    await asyncio.gather(server_task, return_exceptions=True)
+        ),
+    )
+
+    assert client_result.credential_mismatch is True
+    assert server_result.credential_mismatch is True
+    assert server_result.psk.category is PskCategory.SENTINEL
 
 
 async def test_message_1_without_a_category_is_rejected() -> None:
@@ -868,3 +876,108 @@ async def test_rehandshake_category_mismatch_aborts() -> None:
             psk_resolver=_resolver({client_psk2.psk_id: client_psk2}),
         )
     await asyncio.gather(server_task, return_exceptions=True)
+
+
+async def test_rehandshake_referencing_an_unusable_psk_aborts_the_server() -> None:
+    """The initiator half of the re-handshake rule: no Sentinel rescue there either.
+
+    The client is driven with the fallback deliberately enabled, so it really does answer
+    message 2 under the Sentinel. The server must refuse that rather than accept it, which
+    is what keeps a live session from being demoted mid-connection.
+    """
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+
+    psk1 = generate_psk()
+    psk1_resolved = ResolvedPsk(psk_id=psk_id_for(psk1), psk=psk1, category=PskCategory.SENTINEL)
+
+    server_ws, client_ws = make_ws_pair()
+    server_init, client_init = await asyncio.gather(
+        run_handshake_server(
+            server_ws, local_identity=server_id, psk_provider=_provider(psk1_resolved)
+        ),
+        run_handshake_client(
+            client_ws,
+            local_identity=client_id,
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=_resolver({psk1_resolved.psk_id: psk1_resolved}),
+        ),
+    )
+
+    # The server re-handshakes on a record the client does not hold at all.
+    psk2 = generate_psk()
+    server_psk2 = ResolvedPsk(
+        psk_id=psk_id_for(psk2),
+        psk=psk2,
+        category=PskCategory.LONG_TERM,
+        counterparty_id=client_id.peer_id,
+    )
+
+    async def falling_back_client() -> None:
+        """Answer the re-handshake under the Sentinel, as a conformant client never would."""
+        session = NoiseSession.as_responder(
+            suite=client_init.suite,
+            local_static_priv=client_id.private_bytes,
+            remote_static_pub=server_id.public_bytes,
+            prologue=client_init.handshake_hash,
+        )
+        await _exchange_as_responder(
+            client_init.encrypted_ws,
+            session=session,
+            psk_resolver=_resolver({}),
+            expected_peer_id=server_id.peer_id,
+            timeout_s=1.0,
+            allow_sentinel_fallback=True,
+        )
+
+    client_task = asyncio.create_task(falling_back_client())
+    with pytest.raises(HandshakeAbortedError):
+        await run_rehandshake_server(
+            server_init.encrypted_ws,
+            local_identity=server_id,
+            client_id=client_id.peer_id,
+            suite=server_init.suite,
+            prologue=server_init.handshake_hash,
+            psk=server_psk2,
+            timeout_s=1.0,
+        )
+    await asyncio.gather(client_task, return_exceptions=True)
+
+
+async def test_fork_requires_a_written_message_1() -> None:
+    """The fork is only meaningful mid-handshake, and says so rather than misbehaving."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+    session = NoiseSession.as_initiator(
+        suite=NoiseCipherSuite.CHACHAPOLY,
+        local_static_priv=server_id.private_bytes,
+        remote_static_pub=client_id.public_bytes,
+        prologue=b"prologue",
+        psk=generate_psk(),
+    )
+
+    with pytest.raises(RuntimeError, match="written message 1"):
+        session.fork_at_message_2(generate_psk())
+
+
+async def test_fork_refuses_a_message_1_it_cannot_reproduce() -> None:
+    """A replay that differs from what the peer answered is drift, and must be loud."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+    session = NoiseSession.as_initiator(
+        suite=NoiseCipherSuite.CHACHAPOLY,
+        local_static_priv=server_id.private_bytes,
+        remote_static_pub=client_id.public_bytes,
+        prologue=b"prologue",
+        psk=generate_psk(),
+    )
+    session.write_message(b'{"psk_id":"x"}')
+    # Stand in for a library whose ephemeral handling has drifted under us.
+    with (
+        patch(
+            "aiosendspin.noise.session._ephemeral_private_bytes",
+            return_value=Identity.generate().private_bytes,
+        ),
+        pytest.raises(RuntimeError, match="differs from the one sent"),
+    ):
+        session.fork_at_message_2(generate_psk())

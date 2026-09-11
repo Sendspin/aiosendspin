@@ -375,6 +375,12 @@ class SendspinConnection:
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         self._connected = True
+        if result.credential_mismatch:
+            logger.warning(
+                "Server %s referenced a credential this client cannot use; continuing "
+                "unpaired on the Sentinel PSK until re-paired",
+                self._server_id,
+            )
         if result.psk.category is PskCategory.LONG_TERM:
             await self._client.pairing_store.mark_record_used(result.psk.psk_id)
 
