@@ -198,14 +198,25 @@ class SendspinGroup:
             )
         )
 
+    def _send_group_update(self, client: SendspinClient, message: GroupUpdateServerMessage) -> None:
+        """Send one group/update to a client that has finished coming up.
+
+        A client still mid-bring-up is told the group's state by ``on_client_connected``
+        once its first client/state lands, so anything sent before then is superseded.
+        """
+        if client.is_connected:
+            client.send_message(message)
+
     def _send_group_update_to_clients(self) -> None:
-        """Send group/update to every member already past its first server/activate."""
+        """Send group/update to every member that has finished coming up."""
         group_message = self._group_update_message()
         for client in self._clients:
-            # A client mid-handshake is sent its own update once activated, and must not
-            # receive one before the server/activate that opens the connection.
-            if client.is_connected:
-                client.send_message(group_message)
+            self._send_group_update(client, group_message)
+
+    def _publish_if_name_changed(self, previous: str) -> None:
+        """Publish group/update when the name the group reports is no longer ``previous``."""
+        if self.group_name != previous:
+            self._send_group_update_to_clients()
 
     def on_client_connected(self, client: SendspinClient) -> None:
         """Send current group state to a client that just finished handshaking."""
@@ -342,18 +353,16 @@ class SendspinGroup:
 
     @property
     def group_name(self) -> str:
-        """Friendly name for this group, its first member's device name by default."""
+        """Friendly name for this group, its founding member's device name by default."""
         if self._group_name is not None:
             return self._group_name
         return self._clients[0].name if self._clients else ""
 
     def set_group_name(self, name: str | None) -> None:
         """Name this group, publishing the change; ``None`` restores the default."""
-        if name == self._group_name:
-            return
-
+        previous = self.group_name
         self._group_name = name
-        self._send_group_update_to_clients()
+        self._publish_if_name_changed(previous)
 
     @property
     def state(self) -> PlaybackStateType:
@@ -377,6 +386,7 @@ class SendspinGroup:
 
         # Cancel any pending delayed join for this client
         logger.debug("removing %s from group with members: %s", client.client_id, self._clients)
+        previous_name = self.group_name
         if len(self._clients) == 1:
             # Delete this group if that was the last client
             await self._stop_and_invalidate_stale_binary([client])
@@ -396,6 +406,8 @@ class SendspinGroup:
                 await self._stop_and_invalidate_stale_binary(self._clients)
             # Emit event for client removal
             self._signal_event(GroupMemberRemovedEvent(client.client_id))
+            # Losing the founding member changes the name the survivors report.
+            self._publish_if_name_changed(previous_name)
         # Each client needs to be in a group, add it to a new one
         new_group = SendspinGroup(self._server, client)
         # Send group update to notify client of their new solo group
@@ -486,4 +498,4 @@ class SendspinGroup:
 
         # Send current state to the new client
         logger.debug("Sending group update to new client %s", client.client_id)
-        client.send_message(self._group_update_message())
+        self._send_group_update(client, self._group_update_message())

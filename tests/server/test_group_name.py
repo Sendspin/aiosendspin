@@ -12,6 +12,7 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     GroupUpdateServerMessage,
 )
+from aiosendspin.models.types import PlaybackStateType
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
@@ -112,8 +113,8 @@ async def test_the_first_update_carries_the_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_group_name_reaches_the_wire() -> None:
-    """The field is carried, rather than omitted as an absent optional."""
+async def test_an_overridden_name_reaches_the_wire() -> None:
+    """A name the embedder chose is what members are told, not the derived one."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = _connected_member(server, "c1", "Kitchen Speaker")
@@ -152,3 +153,52 @@ async def test_clearing_the_name_restores_the_derived_default() -> None:
 
     assert client.group.group_name == "Kitchen Speaker"
     assert _group_updates(client)[-1].payload.group_name == "Kitchen Speaker"
+
+
+@pytest.mark.asyncio
+async def test_no_update_reaches_a_client_still_coming_up() -> None:
+    """A member mid-bring-up is not told anything before its own connect update.
+
+    It is attached to its group during the hello exchange, so a group change in that
+    window would otherwise reach it ahead of the state it is brought up with.
+    """
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="c1")
+    server.register(client)
+    SendspinGroup(server, client)
+    client.attach_connection(
+        _RecordingConnection(),
+        client_info=ClientHelloPayload(client_id="c1", name="Kitchen Speaker", supported_roles=[]),
+        negotiated_roles=[],
+        active_roles=[],
+    )
+
+    client.group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
+    assert _group_updates(client) == []
+
+    client.mark_connected()
+
+    updates = _group_updates(client)
+    assert len(updates) == 1
+    assert updates[0].payload.playback_state is PlaybackStateType.PLAYING
+
+
+@pytest.mark.asyncio
+async def test_losing_the_founder_republishes_the_derived_name() -> None:
+    """The survivors were reporting the departed device's name, so they must be told."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    founder = _connected_member(server, "c1", "Kitchen Speaker")
+    joiner = _connected_member(server, "c2", "Living Room")
+    group = founder.group
+    await group.add_client(joiner)
+    assert group.group_name == "Kitchen Speaker"
+    before = len(_group_updates(joiner))
+
+    await group.remove_client(founder)
+
+    assert group.group_name == "Living Room"
+    updates = _group_updates(joiner)
+    assert len(updates) > before
+    assert updates[-1].payload.group_name == "Living Room"
