@@ -509,8 +509,8 @@ async def test_send_group_command_seek_forwards_position_ms() -> None:
     assert msg["payload"]["controller"]["position_ms"] == 12_000
 
 
-async def test_server_command_set_static_delay_applies_and_notifies() -> None:
-    """A server/command SET_STATIC_DELAY updates the offset and fires the callback."""
+async def test_server_command_set_output_delay_applies_and_notifies() -> None:
+    """A server/command SET_OUTPUT_DELAY updates the offset and fires the callback."""
     client = make_sdk_client(
         client_name="Test Client", roles=[Roles.PLAYER], player_support=_player_support()
     )
@@ -520,11 +520,30 @@ async def test_server_command_set_static_delay_applies_and_notifies() -> None:
     client.add_server_command_listener(received.append)
 
     payload = ServerCommandPayload(
-        player=PlayerCommandPayload(command=PlayerCommand.SET_STATIC_DELAY, static_delay_ms=250)
+        player=PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY, output_delay_ms=250)
     )
     connection._handle_server_command(payload)  # noqa: SLF001
 
-    assert connection.static_delay_ms == 250.0
+    assert connection.output_delay_ms == 250.0
+    assert received == [payload]
+
+
+async def test_server_command_pre_rename_delay_applies_and_notifies() -> None:
+    """A pre-rename server/command set_static_delay updates the offset and fires the callback."""
+    client = make_sdk_client(
+        client_name="Test Client", roles=[Roles.PLAYER], player_support=_player_support()
+    )
+    connection = SendspinConnection(client)
+
+    received: list[ServerCommandPayload] = []
+    client.add_server_command_listener(received.append)
+
+    payload = ServerCommandPayload.from_dict(
+        {"player": {"command": "set_static_delay", "static_delay_ms": 250}}
+    )
+    connection._handle_server_command(payload)  # noqa: SLF001
+
+    assert connection.output_delay_ms == 250.0
     assert received == [payload]
 
 
@@ -541,5 +560,5 @@ async def test_server_command_without_player_only_notifies() -> None:
     payload = ServerCommandPayload()
     connection._handle_server_command(payload)  # noqa: SLF001
 
-    assert connection.static_delay_ms == 0.0
+    assert connection.output_delay_ms == 0.0
     assert received == [payload]

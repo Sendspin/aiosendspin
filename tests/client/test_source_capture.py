@@ -166,10 +166,10 @@ async def test_stop_discards_buffer_after_connection_ends_stream() -> None:
     assert [timestamp for timestamp, _ in conn.chunks] == [2_000_000]
 
 
-def test_compute_source_timestamp_excludes_static_delay() -> None:
-    """Capture timestamps skip the static delay that playback conversion applies."""
+def test_compute_source_timestamp_excludes_output_delay() -> None:
+    """Capture timestamps skip the output delay that playback conversion applies."""
     conn = SendspinConnection.__new__(SendspinConnection)
-    conn._static_delay_us = 250_000  # noqa: SLF001
+    conn._output_delay_us = 250_000  # noqa: SLF001
 
     class _IdentityFilter:
         def compute_server_time(self, client_time: int) -> int:
