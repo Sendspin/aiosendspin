@@ -11,6 +11,7 @@ __all__ = [
     "AudioFormat",
     "ClientAddedEvent",
     "ClientConnectedEvent",
+    "ClientCredentialMismatchEvent",
     "ClientDisconnectedEvent",
     "ClientEvent",
     "ClientGroupChangedEvent",
@@ -75,6 +76,7 @@ from .roles.source import (
 from .server import (
     ClientAddedEvent,
     ClientConnectedEvent,
+    ClientCredentialMismatchEvent,
     ClientDisconnectedEvent,
     ClientRemovedEvent,
     ClientUpdatedEvent,

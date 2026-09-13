@@ -54,7 +54,11 @@ from aiosendspin.noise.trust_store import (
 )
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.connection import SendspinConnection
-from aiosendspin.server.server import SendspinServer
+from aiosendspin.server.server import (
+    ClientCredentialMismatchEvent,
+    SendspinEvent,
+    SendspinServer,
+)
 from tests.conftest import make_sdk_client
 
 
@@ -2343,3 +2347,146 @@ async def test_poisoned_transport_frame_drops_connection_cleanly() -> None:
             assert survivor_client.is_connected
         finally:
             await other.disconnect()
+
+
+async def test_lost_client_record_connects_on_the_sentinel_and_is_surfaced() -> None:
+    """A client whose record is gone still connects, is reported, and gets no roles.
+
+    The server keeps the record it holds — the mismatch says the client cannot use the
+    credential, not that the record is wrong — but withholds playback until re-pairing.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+
+    # The server holds a record the client no longer has: an eviction, a factory reset,
+    # or a pairing finalize the client never persisted.
+    psk = generate_psk()
+    psk_id = psk_id_for(psk)
+    await server_store.store_record(
+        ServerPairingRecord(psk_id=psk_id, psk=psk, client_id=identity.peer_id, pair_methods=[])
+    )
+
+    seen: list[SendspinEvent] = []
+    server.add_event_listener(lambda _server, event: seen.append(event))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=InMemoryClientPairingStore(),  # empty: the record is gone
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+
+            assert client.connected
+            assert conn._credential_mismatch is True  # noqa: SLF001
+            assert conn._roles_to_activate == []  # noqa: SLF001
+            assert [e.client_id for e in seen if isinstance(e, ClientCredentialMismatchEvent)] == [
+                identity.peer_id
+            ]
+            # The record the server holds is untouched by the signal.
+            assert await server_store.record_by_client_id(identity.peer_id) is not None
+        finally:
+            await client.disconnect()
+
+
+async def test_re_pairing_restores_service_after_a_credential_mismatch() -> None:
+    """The remedy the spec offers must actually work on the same connection.
+
+    Pairing replaces the record, so the mismatch no longer stands and the session
+    regains its roles without the client having to reconnect.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+
+    psk = generate_psk()
+    await server_store.store_record(
+        ServerPairingRecord(
+            psk_id=psk_id_for(psk), psk=psk, client_id=identity.peer_id, pair_methods=[]
+        )
+    )
+
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pairing_code: str | None) -> None:
+        if pairing_code is not None and not shown.done():
+            shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=InMemoryClientPairingStore(),  # the record is gone
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            assert conn._credential_mismatch is True  # noqa: SLF001
+            assert conn._roles_to_activate == []  # noqa: SLF001
+
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
+                )
+            )
+
+            assert conn._credential_mismatch is False  # noqa: SLF001
+            assert conn._noise_psk is not None  # noqa: SLF001
+            assert conn._noise_psk.category is PskCategory.LONG_TERM  # noqa: SLF001
+            assert conn._roles_to_activate == ["controller@v1"]  # noqa: SLF001
+        finally:
+            await client.disconnect()
+
+
+async def test_forgetting_a_mismatched_client_reactivates_it_in_place() -> None:
+    """Forgetting the client is the other remedy, and it must not leave the session idle.
+
+    A Sentinel session ignores ``server/unpair`` and stays connected, so the roles it may
+    now carry have to be announced to it rather than waiting for a reconnect.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+
+    psk = generate_psk()
+    await server_store.store_record(
+        ServerPairingRecord(
+            psk_id=psk_id_for(psk), psk=psk, client_id=identity.peer_id, pair_methods=[]
+        )
+    )
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=await _unpaired_enabled_store(),  # the record is gone
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            await server.trust_unpaired(identity.peer_id)
+
+            # Trusted-unpaired alone cannot lift the hold while the record stands.
+            assert conn._credential_mismatch is True  # noqa: SLF001
+            assert conn._roles_to_activate == []  # noqa: SLF001
+
+            await server.unpair(identity.peer_id)
+
+            assert conn._credential_mismatch is False  # noqa: SLF001
+            assert conn._roles_to_activate == ["controller@v1"]  # noqa: SLF001
+            # Announced, not merely permitted: unpair awaits the re-activation.
+            assert _server_active_role_count(server, identity.peer_id) == 1
+        finally:
+            await client.disconnect()
