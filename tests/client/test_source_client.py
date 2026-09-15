@@ -50,8 +50,9 @@ async def test_send_available_uses_admitted_connection() -> None:
     connection.send_available.assert_awaited_once_with(available=False)
 
 
-def test_source_capture_keeps_codec_the_server_accepts() -> None:
-    """A listed codec is streamed as requested."""
+def test_source_capture_keeps_codec_the_server_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A listed codec this client can encode is streamed as requested."""
+    monkeypatch.setattr("aiosendspin.client.client.opus_available", lambda: True)
     client = _source_client(frozenset({AudioCodec.FLAC, AudioCodec.PCM, AudioCodec.OPUS}))
 
     capture = client.create_source_capture(_opus_format())
