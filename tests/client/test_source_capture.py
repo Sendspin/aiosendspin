@@ -72,7 +72,7 @@ async def test_opus_timestamps_lead_capture_by_the_encoder_pre_skip() -> None:
 
 
 async def test_start_announces_client_stream_only() -> None:
-    """start() sends client_stream/start and nothing else (framing is the lifecycle)."""
+    """start() sends client-stream/start and nothing else (framing is the lifecycle)."""
     conn = _FakeConnection()
     capture = SourceCapture(_FakeClient(), conn, _pcm_format())  # type: ignore[arg-type]
     await capture.start()

@@ -75,7 +75,7 @@ def _make_role() -> tuple[SourceV1Role, _FakeClient]:
 
 
 def test_client_stream_start_emits_event_with_native_format() -> None:
-    """on_client_stream/start announces the decoded handle and its PCM format."""
+    """on_client_stream_start announces the decoded handle and its PCM format."""
     role, client = _make_role()
     role.on_client_stream_start(_pcm_start_payload())
     started = [e for e in client.events if isinstance(e, SourceStreamStartedEvent)]
@@ -194,7 +194,7 @@ def test_flac_start_requires_streaminfo_header() -> None:
     )
 
     assert not role.stream_active
-    assert client.noncompliance == ["client_stream/start FLAC codec_header must contain STREAMINFO"]
+    assert client.noncompliance == ["client-stream/start FLAC codec_header must contain STREAMINFO"]
 
 
 async def test_stream_replacement_announces_the_end_of_the_old_handle() -> None:
@@ -276,12 +276,12 @@ def test_becoming_unavailable_implicitly_stops_stream() -> None:
     assert not role.stream_active
     assert len([e for e in client.events if isinstance(e, SourceStreamEndedEvent)]) == 1
     assert client.noncompliance == [
-        "client_stream/start sent without a preceding source start command"
+        "client-stream/start sent without a preceding source start command"
     ]
 
 
 async def test_second_start_restarts_stream() -> None:
-    """A second client_stream/start ends the prior handle and announces a new one."""
+    """A second client-stream/start ends the prior handle and announces a new one."""
     role, client = _make_role()
     role.on_client_stream_start(_pcm_start_payload())
     first = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
@@ -295,7 +295,7 @@ async def test_second_start_restarts_stream() -> None:
 
 
 async def test_client_stream_end_emits_event_and_closes_handle() -> None:
-    """client_stream/end surfaces SourceStreamEndedEvent AND terminates the handle."""
+    """client-stream/end surfaces SourceStreamEndedEvent AND terminates the handle."""
     role, client = _make_role()
     role.on_client_stream_start(_pcm_start_payload())
     handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
