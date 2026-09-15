@@ -227,8 +227,8 @@ class SendspinConnection:
     _time_task: asyncio.Task[None] | None = None
     """Background task for time synchronization."""
 
-    _static_delay_us: int = 0
-    """Static playback delay in microseconds."""
+    _output_delay_us: int = 0
+    """Output delay in microseconds."""
     _send_lock: asyncio.Lock
     """Lock for serializing WebSocket message sends."""
     _time_filter: SendspinTimeFilter
@@ -269,7 +269,7 @@ class SendspinConnection:
         self._exchange_in_progress = False
         self._send_lock = asyncio.Lock()
         self._time_filter = SendspinTimeFilter()
-        self._static_delay_us = client.static_delay_us
+        self._output_delay_us = client.output_delay_us
         self._closed = asyncio.Event()
 
     @property
@@ -302,18 +302,18 @@ class SendspinConnection:
         return list(self._activities)
 
     @property
-    def static_delay_ms(self) -> float:
-        """Return the currently configured static playback delay in milliseconds."""
-        return self._static_delay_us / 1_000.0
+    def output_delay_ms(self) -> float:
+        """Return the currently configured output delay in milliseconds."""
+        return self._output_delay_us / 1_000.0
 
-    def set_static_delay_ms(self, delay_ms: float) -> None:
-        """Update the static playback delay applied after clock synchronisation."""
+    def set_output_delay_ms(self, delay_ms: float) -> None:
+        """Update the output delay applied after clock synchronisation."""
         delay_ms = max(0.0, min(5000.0, delay_ms))
         delay_us = round(delay_ms * 1_000.0)
-        if delay_us == self._static_delay_us:
+        if delay_us == self._output_delay_us:
             return
-        self._static_delay_us = delay_us
-        logger.info("Set static playback delay to %.1f ms", self.static_delay_ms)
+        self._output_delay_us = delay_us
+        logger.info("Set output delay to %.1f ms", self.output_delay_ms)
 
     async def connect(
         self, raw_ws: ClientWebSocketResponse, *, expected_server_id: str | None
@@ -879,7 +879,7 @@ class SendspinConnection:
                 player=PlayerStatePayload(
                     volume=volume,
                     muted=muted,
-                    static_delay_ms=round(self._static_delay_us / 1_000),
+                    output_delay_ms=round(self._output_delay_us / 1_000),
                     required_lead_time_ms=round(self._client.required_lead_time_ms),
                     min_buffer_ms=round(self._client.min_buffer_ms),
                     supported_commands=self._client.state_supported_commands or None,
@@ -1365,10 +1365,11 @@ class SendspinConnection:
         if payload.player is not None:
             player_cmd = payload.player
             if (
-                player_cmd.command == PlayerCommand.SET_STATIC_DELAY
-                and player_cmd.static_delay_ms is not None
+                player_cmd.command
+                in (PlayerCommand.SET_OUTPUT_DELAY, PlayerCommand.SET_STATIC_DELAY)
+                and player_cmd.output_delay_ms is not None
             ):
-                self.set_static_delay_ms(float(player_cmd.static_delay_ms))
+                self.set_output_delay_ms(float(player_cmd.output_delay_ms))
         self._client.notify_server_command_callback(payload)
 
     async def _handle_unpair(self) -> None:
@@ -1517,15 +1518,15 @@ class SendspinConnection:
         )
 
     def compute_play_time(self, server_timestamp_us: int) -> int:
-        """Convert a server timestamp to client play time, with static delay applied."""
+        """Convert a server timestamp to client play time, with output delay applied."""
         if self._time_filter.is_synchronized:
             client_time = self._time_filter.compute_client_time(server_timestamp_us)
-            return client_time - self._static_delay_us
-        return self.now_us() + UNSYNCED_PLAY_LEAD_US - self._static_delay_us
+            return client_time - self._output_delay_us
+        return self.now_us() + UNSYNCED_PLAY_LEAD_US - self._output_delay_us
 
     def compute_server_time(self, client_timestamp_us: int) -> int:
-        """Convert a client timestamp to a server timestamp, with static delay removed."""
-        adjusted_client_time = client_timestamp_us + self._static_delay_us
+        """Convert a client timestamp to a server timestamp, with output delay removed."""
+        adjusted_client_time = client_timestamp_us + self._output_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
     def compute_source_timestamp(self, capture_timestamp_us: int) -> int:

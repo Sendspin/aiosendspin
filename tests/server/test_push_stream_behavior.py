@@ -128,13 +128,13 @@ class _DummyRole:
         self,
         requirements: AudioRequirements,
         *,
-        static_delay_us: int = 0,
+        output_delay_us: int = 0,
         replay_from_pcm_cache: bool = False,
         required_lead_time_us: int = DEFAULT_INITIAL_DELAY_US,
         min_buffer_us: int = 0,
     ) -> None:
         self._requirements = requirements
-        self._static_delay_us = static_delay_us
+        self._output_delay_us = output_delay_us
         self._replay_from_pcm_cache = replay_from_pcm_cache
         self._required_lead_time_us = required_lead_time_us
         self._min_buffer_us = min_buffer_us
@@ -147,8 +147,8 @@ class _DummyRole:
     def replay_from_pcm_cache(self) -> bool:
         return self._replay_from_pcm_cache
 
-    def get_static_delay_us(self) -> int:
-        return self._static_delay_us
+    def get_output_delay_us(self) -> int:
+        return self._output_delay_us
 
     def get_required_lead_time_us(self) -> int:
         return self._required_lead_time_us
@@ -264,7 +264,7 @@ def _make_connected_player(
 
 
 @pytest.mark.asyncio
-async def test_late_join_target_includes_player_static_delay() -> None:
+async def test_late_join_target_includes_player_output_delay() -> None:
     """Late-join target should use raw timestamps far enough ahead for delayed players."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
@@ -272,11 +272,11 @@ async def test_late_join_target_includes_player_static_delay() -> None:
     client, _ = _make_connected_player(loop, group, "p1", clock=clock)
     role = client.role("player@v1")
     assert role is not None
-    role.static_delay_ms = 5_000
+    role.output_delay_ms = 5_000
 
     stream = PushStream(loop=loop, clock=clock, group=group)
 
-    # now + max(min_buffer=1000ms, required_lead=250ms) + static_delay=5s
+    # now + max(min_buffer=1000ms, required_lead=250ms) + output_delay=5s
     assert stream.get_late_join_target_timestamp_us(role=role) == 7_000_000
 
 
@@ -289,7 +289,7 @@ async def test_live_send_ahead_uses_min_buffer_not_required_lead() -> None:
     client, _ = _make_connected_player(loop, group, "p1", clock=clock)
     role = client.role("player@v1")
     assert role is not None
-    role.static_delay_ms = 0
+    role.output_delay_ms = 0
     role.min_buffer_ms = 200
     role.required_lead_time_ms = 400  # must be ignored for live
 
@@ -308,13 +308,13 @@ async def test_late_join_target_uses_required_lead_time() -> None:
     client, _ = _make_connected_player(loop, group, "p1", clock=clock)
     role = client.role("player@v1")
     assert role is not None
-    role.static_delay_ms = 5_000
+    role.output_delay_ms = 5_000
     role.required_lead_time_ms = 400
     role.min_buffer_ms = 100  # below required_lead, so required_lead is the binding floor
 
     stream = PushStream(loop=loop, clock=clock, group=group)
 
-    # now + max(100ms min_buffer, 400ms required_lead) + 5s static_delay
+    # now + max(100ms min_buffer, 400ms required_lead) + 5s output_delay
     assert stream.get_late_join_target_timestamp_us(role=role) == 6_400_000
 
 
@@ -332,7 +332,7 @@ async def test_late_join_target_matches_fresh_start_floor() -> None:
     client, _ = _make_connected_player(loop, group, "p1", clock=clock)
     role = client.role("player@v1")
     assert role is not None
-    role.static_delay_ms = 0
+    role.output_delay_ms = 0
     role.required_lead_time_ms = 250
     role.min_buffer_ms = 1_000
 
@@ -343,15 +343,15 @@ async def test_late_join_target_matches_fresh_start_floor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_main_join_rebase_includes_player_static_delay() -> None:
-    """Solo-channel rejoin should clamp raw timing high enough for static delay."""
+async def test_non_main_join_rebase_includes_player_output_delay() -> None:
+    """Solo-channel rejoin should clamp raw timing high enough for output delay."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
     client, _ = _make_connected_player(loop, group, "p1", clock=clock)
     role = client.role("player@v1")
     assert role is not None
-    role.static_delay_ms = 5_000
+    role.output_delay_ms = 5_000
 
     channel_id = UUID("77777777-7777-7777-7777-777777777777")
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3629,15 +3629,15 @@ def test_soxr_fallback_caches_failure_per_format(
 
 
 # ---------------------------------------------------------------------------
-# Static delay send-ahead budget tests
+# Output delay send-ahead budget tests
 # ---------------------------------------------------------------------------
 
-_STATIC_DELAY_US = 5_000_000  # 5 s
+_OUTPUT_DELAY_US = 5_000_000  # 5 s
 
 
 def _make_role(
     *,
-    static_delay_us: int = 0,
+    output_delay_us: int = 0,
     required_lead_time_us: int = DEFAULT_INITIAL_DELAY_US,
     min_buffer_us: int = 0,
     channel_id: UUID = MAIN_CHANNEL,
@@ -3651,19 +3651,19 @@ def _make_role(
             channel_id=channel_id,
             frame_duration_us=25_000,
         ),
-        static_delay_us=static_delay_us,
+        output_delay_us=output_delay_us,
         required_lead_time_us=required_lead_time_us,
         min_buffer_us=min_buffer_us,
     )
 
 
 @pytest.mark.asyncio
-async def test_commit_audio_bootstrap_includes_static_delay() -> None:
+async def test_commit_audio_bootstrap_includes_output_delay() -> None:
     """First commit with a large-delay player pushes timeline forward."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role = _make_role(static_delay_us=_STATIC_DELAY_US)
+    role = _make_role(output_delay_us=_OUTPUT_DELAY_US)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3671,17 +3671,17 @@ async def test_commit_audio_bootstrap_includes_static_delay() -> None:
     stream.prepare_audio(bytes(4800), fmt)
     play_start = await stream.commit_audio()
 
-    assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _STATIC_DELAY_US
+    assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _OUTPUT_DELAY_US
 
 
 @pytest.mark.asyncio
-async def test_mixed_delay_timeline_uses_largest_static_delay() -> None:
+async def test_mixed_delay_timeline_uses_largest_output_delay() -> None:
     """With 0 ms and 5 s delay players, timeline anchored for the largest."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role_fast = _make_role(static_delay_us=0)
-    role_slow = _make_role(static_delay_us=_STATIC_DELAY_US)
+    role_fast = _make_role(output_delay_us=0)
+    role_slow = _make_role(output_delay_us=_OUTPUT_DELAY_US)
     group.clients.extend([_DummyClient([role_fast]), _DummyClient([role_slow])])
 
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3689,7 +3689,7 @@ async def test_mixed_delay_timeline_uses_largest_static_delay() -> None:
     stream.prepare_audio(bytes(4800), fmt)
     play_start = await stream.commit_audio()
 
-    assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _STATIC_DELAY_US
+    assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _OUTPUT_DELAY_US
 
 
 @pytest.mark.asyncio
@@ -3698,7 +3698,7 @@ async def test_commit_audio_uses_reported_lead_time() -> None:
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role = _make_role(required_lead_time_us=50_000, min_buffer_us=0, static_delay_us=0)
+    role = _make_role(required_lead_time_us=50_000, min_buffer_us=0, output_delay_us=0)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3715,7 +3715,7 @@ async def test_commit_audio_min_buffer_floors_send_ahead() -> None:
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role = _make_role(required_lead_time_us=50_000, min_buffer_us=2_000_000, static_delay_us=0)
+    role = _make_role(required_lead_time_us=50_000, min_buffer_us=2_000_000, output_delay_us=0)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3733,7 +3733,7 @@ async def test_buffered_source_floors_at_min_buffer_at_startup() -> None:
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role = _make_role(required_lead_time_us=0, min_buffer_us=15_000_000, static_delay_us=0)
+    role = _make_role(required_lead_time_us=0, min_buffer_us=15_000_000, output_delay_us=0)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3752,7 +3752,7 @@ async def test_explicit_play_start_us_overrides_stale_channel_timing() -> None:
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role = _make_role(required_lead_time_us=0, min_buffer_us=0, static_delay_us=0)
+    role = _make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=0)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3783,9 +3783,9 @@ async def test_send_ahead_uses_largest_member_budget() -> None:
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role_low = _make_role(required_lead_time_us=100_000, min_buffer_us=0, static_delay_us=0)
+    role_low = _make_role(required_lead_time_us=100_000, min_buffer_us=0, output_delay_us=0)
     role_high = _make_role(
-        required_lead_time_us=0, min_buffer_us=1_500_000, static_delay_us=200_000
+        required_lead_time_us=0, min_buffer_us=1_500_000, output_delay_us=200_000
     )
     group.clients.extend([_DummyClient([role_low]), _DummyClient([role_high])])
 
@@ -3800,18 +3800,18 @@ async def test_send_ahead_uses_largest_member_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sleep_to_limit_buffer_accounts_for_static_delay() -> None:
-    """Buffer throttle allows extra lead equal to the largest static delay."""
+async def test_sleep_to_limit_buffer_accounts_for_output_delay() -> None:
+    """Buffer throttle allows extra lead equal to the largest output delay."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role = _make_role(static_delay_us=_STATIC_DELAY_US)
+    role = _make_role(output_delay_us=_OUTPUT_DELAY_US)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
-    # Timeline 5.25 s ahead — exactly DEFAULT + static_delay
+    # Timeline 5.25 s ahead — exactly DEFAULT + output_delay
     stream._channel_timing[MAIN_CHANNEL] = (  # noqa: SLF001
-        clock.now_us() + DEFAULT_INITIAL_DELAY_US + _STATIC_DELAY_US
+        clock.now_us() + DEFAULT_INITIAL_DELAY_US + _OUTPUT_DELAY_US
     )
 
     # With a 500 ms base buffer, effective limit = 500 ms + 5 s = 5.5 s.
@@ -3821,13 +3821,13 @@ async def test_sleep_to_limit_buffer_accounts_for_static_delay() -> None:
 
 
 @pytest.mark.asyncio
-async def test_historical_stale_filter_includes_static_delay() -> None:
-    """Historical chunk between DEFAULT and DEFAULT+static_delay is filtered."""
+async def test_historical_stale_filter_includes_output_delay() -> None:
+    """Historical chunk between DEFAULT and DEFAULT+output_delay is filtered."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     channel = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
     group = _DummyGroup(clients=[])
-    role = _make_role(static_delay_us=_STATIC_DELAY_US, channel_id=channel)
+    role = _make_role(output_delay_us=_OUTPUT_DELAY_US, channel_id=channel)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)
@@ -3850,7 +3850,7 @@ async def test_zero_delay_regression_commit_audio_unchanged() -> None:
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=1_000_000)
     group = _DummyGroup(clients=[])
-    role = _make_role(static_delay_us=0)
+    role = _make_role(output_delay_us=0)
     group.clients.append(_DummyClient([role]))
 
     stream = PushStream(loop=loop, clock=clock, group=group)

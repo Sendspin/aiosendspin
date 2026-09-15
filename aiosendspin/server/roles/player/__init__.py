@@ -4,11 +4,11 @@ from aiosendspin.models.player import ClientHelloPlayerSupport
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 from aiosendspin.server.roles.player.events import (
     MinBufferChangedEvent,
+    OutputDelayChangedEvent,
     PlayerGroupEvent,
     PlayerGroupMuteChangedEvent,
     PlayerGroupVolumeChangedEvent,
     RequiredLeadTimeChangedEvent,
-    StaticDelayChangedEvent,
     VolumeChangedEvent,
 )
 from aiosendspin.server.roles.player.group import PlayerGroupRole
@@ -33,6 +33,7 @@ register_role_support_spec(
 __all__ = [
     "FlacEncoder",
     "MinBufferChangedEvent",
+    "OutputDelayChangedEvent",
     "PcmPassthrough",
     "PlayerGroupEvent",
     "PlayerGroupMuteChangedEvent",
@@ -41,6 +42,5 @@ __all__ = [
     "PlayerRoleProtocol",
     "PlayerV1Role",
     "RequiredLeadTimeChangedEvent",
-    "StaticDelayChangedEvent",
     "VolumeChangedEvent",
 ]

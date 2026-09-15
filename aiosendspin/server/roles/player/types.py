@@ -39,12 +39,12 @@ class PlayerRoleProtocol(Protocol):
         """Set the player mute state if supported."""
         ...
 
-    def get_static_delay_ms(self) -> int:
-        """Return the player's static delay in milliseconds."""
+    def get_output_delay_ms(self) -> int:
+        """Return the player's output delay in milliseconds."""
         ...
 
-    def set_static_delay(self, delay_ms: int) -> None:
-        """Set the player's static delay via server command."""
+    def set_output_delay(self, delay_ms: int) -> None:
+        """Set the player's output delay via server command."""
         ...
 
     @property

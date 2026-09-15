@@ -161,6 +161,8 @@ class PlayerCommand(Enum):
 
     VOLUME = "volume"
     MUTE = "mute"
+    SET_OUTPUT_DELAY = "set_output_delay"
+    # Removed from the spec, still served to clients that declare it.
     SET_STATIC_DELAY = "set_static_delay"
 
 

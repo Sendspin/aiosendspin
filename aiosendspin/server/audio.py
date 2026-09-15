@@ -171,7 +171,7 @@ class BufferTracker:
 
         This preserves effective playback headroom based on the furthest buffered end time,
         which is more accurate than summing durations when chunks are intentionally shifted
-        on the timeline (for example, player static delay).
+        on the timeline (for example, player output delay).
         """
         if self.max_duration_us == 0:
             return 0
