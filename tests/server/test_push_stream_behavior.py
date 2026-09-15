@@ -66,6 +66,11 @@ class _DummyGroup:
         self._push_stream: PushStream | None = None
         self.has_active_stream = False
 
+    group_name = "dummy group"
+
+    def _publish_if_name_changed(self, previous: str) -> None:  # noqa: ARG002
+        return
+
     def on_client_connected(self, client: SendspinClient) -> None:  # noqa: ARG002
         return
 
