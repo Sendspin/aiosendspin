@@ -223,7 +223,7 @@ class SendspinGroup:
         if client not in self._clients:
             return
 
-        client.send_message(self._group_update_message())
+        self._send_group_update(client, self._group_update_message())
 
         if self._push_stream is not None and not self._push_stream.is_stopped:
             for role in client.active_roles:

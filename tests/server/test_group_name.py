@@ -185,6 +185,37 @@ async def test_no_update_reaches_a_client_still_coming_up() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_client_regrouped_while_coming_up_waits_for_its_connect_update() -> None:
+    """Leaving a group mid-bring-up does not tell the client about its new solo group early.
+
+    It learns that group from its own connect update, once its first client/state lands.
+    """
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    founder = SendspinClient(server, client_id="c1")
+    client = SendspinClient(server, client_id="c2")
+    server.register(founder)
+    server.register(client)
+    group = SendspinGroup(server, founder, client)
+    client.attach_connection(
+        _RecordingConnection(),
+        client_info=ClientHelloPayload(client_id="c2", name="Living Room", supported_roles=[]),
+        negotiated_roles=[],
+        active_roles=[],
+    )
+
+    await group.remove_client(client)
+    assert client.group is not group
+    assert _group_updates(client) == []
+
+    client.mark_connected()
+
+    updates = _group_updates(client)
+    assert len(updates) == 1
+    assert updates[0].payload.group_id == client.group.group_id
+
+
+@pytest.mark.asyncio
 async def test_losing_the_founder_republishes_the_derived_name() -> None:
     """The survivors were reporting the departed device's name, so they must be told."""
     loop = asyncio.get_running_loop()
