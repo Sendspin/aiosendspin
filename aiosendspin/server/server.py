@@ -972,8 +972,10 @@ class SendspinServer:
             logger.error("Failed to start server on %s:%d: %s", host, port, e)
             await self._stop_mdns()
             if self._app_runner:
+                # cleanup() already stops/unregisters any site added to this runner.
                 await self._app_runner.cleanup()
                 self._app_runner = None
+            self._tcp_site = None
             if self._app:
                 await self._app.shutdown()
                 self._app = None
@@ -1041,20 +1043,28 @@ class SendspinServer:
             properties["name"] = self._name
         properties["path"] = path
 
-        info = AsyncServiceInfo(
-            type_=service_type,
-            name=f"{self._id}.{service_type}",
-            server=f"{self._id}.local.",
-            parsed_addresses=addresses,
-            port=port,
-            properties=properties,
-        )
         try:
+            info = AsyncServiceInfo(
+                type_=service_type,
+                name=f"{self._id}.{service_type}",
+                server=f"{self._id}.local.",
+                parsed_addresses=addresses,
+                port=port,
+                properties=properties,
+            )
             await self._zc.async_register_service(info)
             self._mdns_service = info
             logger.debug("mDNS advertising server on port %d with path %s", port, path)
         except NonUniqueNameException:
             logger.error("Sendspin server with identical name present in the local network!")
+        except OSError as e:
+            # e.g. an advertise address that is not an IP literal; the HTTP listener
+            # and client discovery are unaffected, the server just isn't announced
+            logger.error(
+                "Server is running but not advertised over mDNS (addresses %s): %s",
+                addresses,
+                e,
+            )
 
     async def _start_mdns_discovery(self) -> None:
         assert self._zc is not None

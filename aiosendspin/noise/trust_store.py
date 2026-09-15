@@ -60,6 +60,26 @@ class PskCategory(StrEnum):
     SENTINEL = "sentinel"
     """The published Sentinel PSK — used for pairing-code pairing and unpaired playback."""
 
+    @property
+    def code(self) -> str:
+        """The two-letter identifier this category travels under in Noise message 1."""
+        return _PSK_CATEGORY_CODES[self]
+
+    @classmethod
+    def from_code(cls, code: str) -> PskCategory | None:
+        """Return the category a Noise message 1 code names, or None if it names none."""
+        return _PSK_CATEGORIES_BY_CODE.get(code)
+
+
+# The wire codes are deliberately equal-length, so the encrypted payload's length does not
+# reveal which category the server referenced.
+_PSK_CATEGORY_CODES: dict[PskCategory, str] = {
+    PskCategory.LONG_TERM: "lt",
+    PskCategory.PAIRING: "pr",
+    PskCategory.SENTINEL: "sn",
+}
+_PSK_CATEGORIES_BY_CODE: dict[str, PskCategory] = {c: k for k, c in _PSK_CATEGORY_CODES.items()}
+
 
 class StorageExhaustedError(Exception):
     """A pairing cannot persist its record and has no shared-PSK fallback."""

@@ -25,7 +25,6 @@ from aiosendspin.models.types import (
     ClientMessage,
     PairMethod,
     SignalState,
-    TrustLevel,
     _client_message_tags,
 )
 
@@ -67,12 +66,11 @@ def test_hello_drops_source_support_without_role() -> None:
 
 
 def test_hello_preserves_supported_pair_methods_positional_argument() -> None:
-    """Source support does not displace existing client/hello positional arguments."""
+    """Source support is appended, so it does not displace supported_pair_methods."""
     pair_methods = [PairMethodDescriptor(method=PairMethod.PAIRING_PSK)]
     payload = ClientHelloPayload(
         "Client",
         [],
-        TrustLevel.NONE,
         None,
         None,
         None,
