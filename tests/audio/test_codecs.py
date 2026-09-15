@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import types
 from collections.abc import Iterator
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -92,8 +93,12 @@ def test_flac_decoder_preserves_multichannel_frame_width() -> None:
     assert len(pcm) <= len(decoded) <= len(pcm) + 4608 * channels * 2
 
 
-def test_opus_available_reports_installed_pyav() -> None:
-    """The installed PyAV carries libopus, so the probe reports Opus as usable."""
+@pytest.mark.usefixtures("_uncached_opus_probe")
+def test_opus_available_with_libopus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opus is available when PyAV resolves the libopus encoder and decoder."""
+    stub = types.SimpleNamespace(codec=types.SimpleNamespace(Codec=MagicMock()))
+    monkeypatch.setattr("aiosendspin.audio.codecs._get_av", lambda: stub)
+
     assert opus_available() is True
 
 
