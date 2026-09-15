@@ -684,6 +684,48 @@ class TestEncryptedActivities:
         assert activate["active_roles"] == []
 
 
+class TestServerHelloSourceSupport:
+    """Tests that server/hello advertises the codecs a source may stream up."""
+
+    @pytest.mark.asyncio
+    async def test_hello_lists_opus_when_available(
+        self, mock_server: _MockServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Opus joins the mandatory codecs when PyAV can decode it."""
+        monkeypatch.setattr("aiosendspin.server.roles.source.v1.opus_available", lambda: True)
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+
+        fake = await _exchange_hellos_encrypted(conn, category=PskCategory.LONG_TERM)
+
+        hello = fake.sent_payloads()[0]["payload"]
+        assert hello["source@v1_support"]["supported_codecs"] == ["flac", "pcm", "opus"]
+
+    @pytest.mark.asyncio
+    async def test_hello_lists_mandatory_codecs_without_opus(
+        self, mock_server: _MockServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without libopus the server still guarantees flac and pcm."""
+        monkeypatch.setattr("aiosendspin.server.roles.source.v1.opus_available", lambda: False)
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+
+        fake = await _exchange_hellos_encrypted(conn, category=PskCategory.LONG_TERM)
+
+        hello = fake.sent_payloads()[0]["payload"]
+        assert hello["source@v1_support"]["supported_codecs"] == ["flac", "pcm"]
+
+    @pytest.mark.asyncio
+    async def test_hello_omits_support_without_source_role(
+        self, mock_server: _MockServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A server that does not offer source@v1 sends no support object."""
+        monkeypatch.delitem(ROLE_FACTORIES, Roles.SOURCE.value)
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+
+        fake = await _exchange_hellos_encrypted(conn, category=PskCategory.LONG_TERM)
+
+        assert "source@v1_support" not in fake.sent_payloads()[0]["payload"]
+
+
 class TestLegacyServerHello:
     """Tests for the legacy (transition-mode) server/hello path."""
 

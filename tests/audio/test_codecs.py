@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import types
+from collections.abc import Iterator
+
 import pytest
 
-from aiosendspin.audio.codecs import create_decoder, create_encoder
+from aiosendspin.audio.codecs import create_decoder, create_encoder, opus_available
 from tests.conftest import sine_pcm_16bit
+
+
+@pytest.fixture
+def _uncached_opus_probe() -> Iterator[None]:
+    """Run one opus_available() probe without reusing or leaving a cached result."""
+    opus_available.cache_clear()
+    yield
+    opus_available.cache_clear()
 
 
 def _roundtrip(codec: str, pcm: bytes) -> bytes:
@@ -79,3 +90,34 @@ def test_flac_decoder_preserves_multichannel_frame_width() -> None:
     decoded = b"".join(decoder.decode(frame) for frame, _ in frames) + decoder.flush()
 
     assert len(pcm) <= len(decoded) <= len(pcm) + 4608 * channels * 2
+
+
+def test_opus_available_reports_installed_pyav() -> None:
+    """The installed PyAV carries libopus, so the probe reports Opus as usable."""
+    assert opus_available() is True
+
+
+@pytest.mark.usefixtures("_uncached_opus_probe")
+def test_opus_unavailable_without_pyav(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opus is unavailable when PyAV itself cannot be imported."""
+
+    def _no_av() -> types.ModuleType:
+        raise ImportError("no av")
+
+    monkeypatch.setattr("aiosendspin.audio.codecs._get_av", _no_av)
+
+    assert opus_available() is False
+
+
+@pytest.mark.usefixtures("_uncached_opus_probe")
+def test_opus_unavailable_without_libopus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opus is unavailable when PyAV's FFmpeg was built without libopus."""
+
+    class _Codec:
+        def __init__(self, name: str, mode: str) -> None:
+            raise ValueError(f"unknown codec {name!r} for mode {mode!r}")
+
+    stub = types.SimpleNamespace(codec=types.SimpleNamespace(Codec=_Codec))
+    monkeypatch.setattr("aiosendspin.audio.codecs._get_av", lambda: stub)
+
+    assert opus_available() is False

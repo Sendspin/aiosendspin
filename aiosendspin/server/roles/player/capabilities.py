@@ -6,6 +6,7 @@ based on codec-specific constraints (sample rates, bit depths, channels).
 
 from __future__ import annotations
 
+from aiosendspin.audio.codecs import opus_available
 from aiosendspin.models import AudioCodec
 from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, OpusEncoder
@@ -24,7 +25,8 @@ def can_encode_format(fmt: SupportedAudioFormat) -> bool:
     Validates against server encoding constraints:
     - PCM bit depth: 16, 24, or 32; channels: 1-8 or 10 (up to 9.1)
     - FLAC bit depth: 16 or 24; channels: 1-8 or 10 (up to 9.1)
-    - Opus bit depth: 16 only; channels: 1 or 2 only, as multichannel not yet implemented
+    - Opus bit depth: 16 only; channels: 1 or 2 only, as multichannel not yet implemented;
+      also requires PyAV built with libopus
     - Opus: sample rate must be one of 8k, 12k, 16k, 24k, 48k
     - FLAC/PCM: any sample rate
 
@@ -40,6 +42,8 @@ def can_encode_format(fmt: SupportedAudioFormat) -> bool:
         return False
     codec = fmt.codec.value
     if codec == AudioCodec.OPUS.value:
+        if not opus_available():
+            return False
         if fmt.channels not in {1, 2}:
             return False
         if fmt.bit_depth not in OPUS_BIT_DEPTHS:

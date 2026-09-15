@@ -92,6 +92,7 @@ from aiosendspin.models.player import (
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
+    ServerHelloSourceSupport,
 )
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
@@ -139,6 +140,7 @@ from .compliance import ClientComplianceError
 from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
 from .roles.negotiation import negotiate_roles
 from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS, role_requires_pairing
+from .roles.source import SourceV1Role
 
 if TYPE_CHECKING:
     from aiosendspin.models.artwork import ClientHelloArtworkSupport
@@ -1060,17 +1062,23 @@ class SendspinConnection:
 
     async def _send_server_hello_and_recv(self, transport: Transport) -> bool:
         """Send ``server/hello`` and receive+ingest ``client/hello``."""
-        languages = self._server.languages
-        await transport.send_str(
-            ServerHelloMessage(
-                payload=ServerHelloPayload(
-                    name=self._server.name,
-                    languages=list(languages) if languages is not None else None,
-                )
-            ).to_json()
-        )
+        await transport.send_str(ServerHelloMessage(payload=self._server_hello()).to_json())
         client_hello_text = await receive_text_frame(transport, what="client/hello")
         return await self._ingest_client_hello(client_hello_text)
+
+    def _server_hello(self) -> ServerHelloPayload:
+        """Build server/hello, listing accepted source codecs when the source role is offered."""
+        source_support = None
+        if Roles.SOURCE.value in ROLE_FACTORIES:
+            source_support = ServerHelloSourceSupport(
+                supported_codecs=SourceV1Role.accepted_codecs()
+            )
+        languages = self._server.languages
+        return ServerHelloPayload(
+            name=self._server.name,
+            languages=list(languages) if languages is not None else None,
+            source_support=source_support,
+        )
 
     def _flag_noncompliance(self, reason: str) -> None:
         """Log a tolerated spec violation, or reject it when the server is strict.

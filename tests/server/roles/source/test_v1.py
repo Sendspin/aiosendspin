@@ -374,3 +374,30 @@ def test_reconnect_resurfaces_the_current_signal() -> None:
 
     signals = [e.signal for e in client.events if isinstance(e, SourceSignalChangedEvent)]
     assert signals == [SignalState.PRESENT, SignalState.PRESENT]
+
+
+def test_accepted_codecs_track_opus_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opus joins the mandatory codecs only when PyAV can handle it."""
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.opus_available", lambda: False)
+    assert SourceV1Role.accepted_codecs() == [AudioCodec.FLAC, AudioCodec.PCM]
+
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.opus_available", lambda: True)
+    assert AudioCodec.OPUS in SourceV1Role.accepted_codecs()
+
+
+def test_unlisted_codec_is_flagged_and_opens_no_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A codec server/hello did not list is rejected as non-compliant."""
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.opus_available", lambda: False)
+    role, client = _make_role()
+
+    role.on_client_stream_start(
+        ClientStreamStartPayload(
+            source=ClientStreamStartSource(
+                codec=AudioCodec.OPUS, channels=2, sample_rate=48000, bit_depth=16
+            )
+        )
+    )
+
+    assert any("server/hello did not list" in reason for reason in client.noncompliance)
+    assert not role.stream_active
+    assert [e for e in client.events if isinstance(e, SourceStreamStartedEvent)] == []

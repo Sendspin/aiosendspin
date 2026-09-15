@@ -37,6 +37,7 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
     pack_player_audio_header,
 )
+from aiosendspin.models.source import ServerHelloSourceSupport
 from aiosendspin.models.types import (
     Activity,
     ArtworkSource,
@@ -73,9 +74,10 @@ def _player_support() -> ClientHelloPlayerSupport:
     )
 
 
-@pytest.mark.asyncio
-async def test_server_hello_populates_server_info(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Receiving server/hello records the server's name."""
+async def _exchange_hellos_with(
+    monkeypatch: pytest.MonkeyPatch, hello: ServerHelloPayload
+) -> SendspinClient:
+    """Drive the client through a hello exchange against ``hello``."""
     client = make_sdk_client(
         client_name="Test Client",
         roles=[Roles.PLAYER],
@@ -86,8 +88,6 @@ async def test_server_hello_populates_server_info(monkeypatch: pytest.MonkeyPatc
     client._admitted_connection = connection  # noqa: SLF001
     # server_id comes from the Noise handshake, not the hello payload.
     connection._server_id = "server-1"  # noqa: SLF001
-
-    hello = ServerHelloPayload(name="Test Server")
 
     async def receive_hello() -> ServerHelloPayload:
         return hello
@@ -102,9 +102,34 @@ async def test_server_hello_populates_server_info(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(connection, "_receive_server_activate", receive_activate)
 
     await connection._exchange_hellos()  # noqa: SLF001
+    return client
+
+
+@pytest.mark.asyncio
+async def test_server_hello_populates_server_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Receiving server/hello records the server's name."""
+    client = await _exchange_hellos_with(monkeypatch, ServerHelloPayload(name="Test Server"))
 
     assert client.server_info is not None
     assert client.server_info.server_id == "server-1"
+    # A server without source support leaves the accepted codecs unknown.
+    assert client.server_info.source_codecs is None
+
+
+@pytest.mark.asyncio
+async def test_server_hello_records_accepted_source_codecs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The codecs a server accepts from sources are recorded for source captures."""
+    hello = ServerHelloPayload(
+        name="Test Server",
+        source_support=ServerHelloSourceSupport(supported_codecs=[AudioCodec.FLAC, AudioCodec.PCM]),
+    )
+
+    client = await _exchange_hellos_with(monkeypatch, hello)
+
+    assert client.server_info is not None
+    assert client.server_info.source_codecs == frozenset({AudioCodec.FLAC, AudioCodec.PCM})
 
 
 async def _connection(

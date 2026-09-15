@@ -431,6 +431,11 @@ class SendspinConnection:
             server_id=self._server_id,
             name=hello.name,
             languages=tuple(hello.languages or ()),
+            source_codecs=(
+                frozenset(hello.source_support.supported_codecs)
+                if hello.source_support is not None
+                else None
+            ),
         )
         await self._send_client_hello()
         return await self._receive_server_activate()
