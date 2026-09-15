@@ -123,4 +123,4 @@ class ServerInfo:
     languages: tuple[str, ...] = ()
     """The operator's BCP 47 language preferences in descending order, empty when undeclared."""
     source_codecs: frozenset[AudioCodec] | None = None
-    """Codecs the server accepts from a source, or None when it does not support sources."""
+    """Codecs the server accepts from a source, or None when server/hello listed none."""

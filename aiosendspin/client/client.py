@@ -10,6 +10,7 @@ from dataclasses import replace
 
 from aiohttp import ClientSession, web
 
+from aiosendspin.audio.codecs import opus_available
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.core import (
@@ -365,7 +366,7 @@ class SendspinClient:
         Create a capture for PCM matching ``audio_format`` on the source connection.
 
         The codec falls back to FLAC, or else PCM, when server/hello did not list the
-        requested one.
+        requested one or this client cannot encode it.
         """
         if Roles.SOURCE not in self._roles:
             raise RuntimeError("Client does not have the source role")
@@ -377,11 +378,12 @@ class SendspinClient:
             if server_info is not None and server_info.source_codecs is not None
             else _MANDATORY_SOURCE_CODECS
         )
-        if audio_format.codec not in accepted:
+        codec = audio_format.codec
+        if codec not in accepted or (codec is AudioCodec.OPUS and not opus_available()):
             fallback = AudioCodec.FLAC if AudioCodec.FLAC in accepted else AudioCodec.PCM
             logger.info(
-                "Server does not accept %s from sources, streaming %s instead",
-                audio_format.codec.value,
+                "%s is not available on this connection, streaming %s instead",
+                codec.value,
                 fallback.value,
             )
             audio_format = replace(audio_format, codec=fallback)
