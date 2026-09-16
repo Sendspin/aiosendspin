@@ -1323,7 +1323,7 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    await client_store.record_pairing_round()  # a prior failure to be reset
+    await client_store.record_pairing_round()  # a prior round to be reset
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
     async def emit(pairing_code: str) -> None:
@@ -1369,7 +1369,7 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
     assert "server/activate" in leftover
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
-    # Inner authentication succeeded, so the failure counter resets like any other attempt.
+    # server_kc verified, so the round count resets like any other attempt.
     assert await client_store.pairing_round_count() == 0
 
 

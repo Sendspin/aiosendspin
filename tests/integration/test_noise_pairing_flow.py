@@ -1230,7 +1230,10 @@ async def test_live_pairing_round_limit_holds_back_until_pairing_window() -> Non
 async def _abandoning_dynamic_client(
     ws: EncryptedWebSocket, *, pairing_index: int, **_kwargs: object
 ) -> str | None:
-    """Dynamic client that abandons the attempt on a cancelling server/activate."""
+    """Dynamic client that abandons the attempt on a cancelling server/activate, as spec'd.
+
+    The SDK client does not yet treat a mid-attempt server/activate as a cancellation.
+    """
     commit_b = pairing_code_mod.commit(pairing_code_mod.generate_nonce())
     await ws.send_str(
         ClientPairInitMessage(

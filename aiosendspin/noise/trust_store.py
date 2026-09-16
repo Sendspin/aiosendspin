@@ -658,7 +658,7 @@ class _ClientPairingStoreBase(ClientPairingStore):
         self._records: dict[str, ClientPairingRecord] = {}
         self._pairing_psk: PairingPsk | None = None
         self._static_pairing_code: str | None = None
-        self._pin_failures = 0
+        self._pairing_rounds = 0
         self._pairing_config: ClientPairingConfig | None = None
         self._last_playback_server_id: str | None = None
 
@@ -766,23 +766,23 @@ class _ClientPairingStoreBase(ClientPairingStore):
 
     async def pairing_round_count(self) -> int:
         """Return the dynamic-pairing-code rounds since the last verified ``server_kc``."""
-        return self._pin_failures
+        return self._pairing_rounds
 
     async def record_pairing_round(self) -> int:
         """Count one more dynamic-pairing-code round and return the new count."""
-        self._pin_failures += 1
+        self._pairing_rounds += 1
         await self._save()
-        return self._pin_failures
+        return self._pairing_rounds
 
     async def reset_pairing_rounds(self) -> None:
         """Reset the round count to zero (no-op if already zero)."""
-        if self._pin_failures:
-            self._pin_failures = 0
+        if self._pairing_rounds:
+            self._pairing_rounds = 0
             await self._save()
 
     async def is_pairing_round_limit_reached(self) -> bool:
         """Return whether the round count has reached ``PAIRING_ROUND_LIMIT``."""
-        return self._pin_failures >= PAIRING_ROUND_LIMIT
+        return self._pairing_rounds >= PAIRING_ROUND_LIMIT
 
 
 class InMemoryClientPairingStore(_ClientPairingStoreBase):
@@ -835,7 +835,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
         if isinstance(raw_failures, bool) or not isinstance(raw_failures, int):
             msg = "pairing store 'pin_failures' must be an integer"
             raise TypeError(msg)
-        self._pin_failures = raw_failures
+        self._pairing_rounds = raw_failures
         self._last_playback_server_id = _opt_str(data, "last_playback_server_id")
 
     async def _seed(self) -> None:
@@ -855,7 +855,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
                 "pairing_config": self._pairing_config.to_dict(),
                 "pairing_psk": self._pairing_psk.to_dict() if self._pairing_psk else None,
                 "static_pin": self._static_pairing_code,
-                "pin_failures": self._pin_failures,
+                "pin_failures": self._pairing_rounds,
                 "last_playback_server_id": self._last_playback_server_id,
             }
             await asyncio.to_thread(_atomic_write_json, self._path, payload)
