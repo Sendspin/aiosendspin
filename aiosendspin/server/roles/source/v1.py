@@ -7,7 +7,7 @@ import binascii
 import logging
 from typing import TYPE_CHECKING
 
-from aiosendspin.audio.codecs import create_decoder
+from aiosendspin.audio.codecs import create_decoder, opus_available
 from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
 from aiosendspin.models.source import SourceCommandServerPayload
@@ -68,6 +68,14 @@ class SourceV1Role(Role):
         """Role family name for protocol messages."""
         return "source"
 
+    @staticmethod
+    def accepted_codecs() -> list[AudioCodec]:
+        """Codecs accepted in client-stream/start, as listed in server/hello."""
+        codecs = [AudioCodec.FLAC, AudioCodec.PCM]
+        if opus_available():
+            codecs.append(AudioCodec.OPUS)
+        return codecs
+
     def on_connect(self) -> None:
         """Connect without a group role."""
 
@@ -120,6 +128,12 @@ class SourceV1Role(Role):
         if self._stream_active:
             self._end_stream()
 
+        if source.codec not in self.accepted_codecs():
+            self._client.flag_noncompliance(
+                f"client-stream/start announced codec {source.codec.value!r}, "
+                "which server/hello did not list"
+            )
+            return
         # The spec ignores bit_depth for opus, so decode at the canonical 16 bits.
         bit_depth = 16 if source.codec is AudioCodec.OPUS else source.bit_depth
         audio_format = AudioFormat(

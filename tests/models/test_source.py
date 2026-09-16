@@ -13,12 +13,14 @@ from aiosendspin.models.core import (
     ClientStatePayload,
     PairMethodDescriptor,
     ServerCommandPayload,
+    ServerHelloPayload,
 )
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
     ClientStreamStartPayload,
     ClientStreamStartSource,
+    ServerHelloSourceSupport,
 )
 from aiosendspin.models.types import (
     AudioCodec,
@@ -180,3 +182,54 @@ def test_a_client_message_without_a_type_does_not_break_dispatch() -> None:
         ClientMessage.from_json('{"type":"nope/not-a-message"}')
     parsed = ClientMessage.from_json('{"type":"client-stream/end"}')
     assert isinstance(parsed, ClientStreamEndMessage)
+
+
+def test_server_hello_serializes_source_support_under_versioned_alias() -> None:
+    """The accepted source codecs round-trip under the wire key ``source@v1_support``."""
+    hello = ServerHelloPayload(
+        name="Server",
+        source_support=ServerHelloSourceSupport(
+            supported_codecs=[AudioCodec.FLAC, AudioCodec.PCM, AudioCodec.OPUS]
+        ),
+    )
+
+    assert hello.to_dict()["source@v1_support"] == {"supported_codecs": ["flac", "pcm", "opus"]}
+    parsed = ServerHelloPayload.from_json(hello.to_json())
+    assert parsed.source_support is not None
+    assert parsed.source_support.supported_codecs == [
+        AudioCodec.FLAC,
+        AudioCodec.PCM,
+        AudioCodec.OPUS,
+    ]
+
+
+def test_server_hello_carries_languages_alongside_source_support() -> None:
+    """Both optional server/hello fields round-trip together."""
+    hello = ServerHelloPayload(
+        name="s",
+        languages=["nl-NL", "en"],
+        source_support=ServerHelloSourceSupport(supported_codecs=[AudioCodec.PCM]),
+    )
+
+    assert hello.to_dict() == {
+        "name": "s",
+        "languages": ["nl-NL", "en"],
+        "source@v1_support": {"supported_codecs": ["pcm"]},
+    }
+    assert ServerHelloPayload.from_json(hello.to_json()) == hello
+
+
+def test_server_hello_omits_source_support_when_absent() -> None:
+    """A server without source support neither sends nor expects the support object."""
+    assert ServerHelloPayload(name="s").to_dict() == {"name": "s"}
+    assert ServerHelloPayload.from_json('{"name":"s"}').source_support is None
+
+
+def test_server_hello_ignores_unknown_source_codecs() -> None:
+    """Codec identifiers this implementation does not recognize are dropped."""
+    hello = ServerHelloPayload.from_json(
+        '{"name":"s","source@v1_support":{"supported_codecs":["flac","pcm","aac"]}}'
+    )
+
+    assert hello.source_support is not None
+    assert hello.source_support.supported_codecs == [AudioCodec.FLAC, AudioCodec.PCM]

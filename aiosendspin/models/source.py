@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .base import SendspinConfig, SendspinModel
 from .types import AudioCodec, ClientMessage, SignalState
@@ -34,6 +34,24 @@ class ClientHelloSourceSupport(SendspinModel):
         """Config for parsing json messages."""
 
         omit_none = True
+
+
+# Server -> Client: server/hello source@v1 support object
+@dataclass
+class ServerHelloSourceSupport(SendspinModel):
+    """Codecs the server accepts from a source, sent in server/hello."""
+
+    supported_codecs: list[AudioCodec]
+    """Codecs accepted in client_stream/start; always includes flac and pcm."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop codec identifiers this implementation does not recognize."""
+        codecs = d.get("supported_codecs")
+        if isinstance(codecs, list):
+            known = {codec.value for codec in AudioCodec}
+            d = {**d, "supported_codecs": [codec for codec in codecs if codec in known]}
+        return d
 
 
 # Client -> Server: client/state source object

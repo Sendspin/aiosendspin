@@ -31,6 +31,7 @@ from .player import (
 )
 from .source import (
     ClientHelloSourceSupport,
+    ServerHelloSourceSupport,
     SourceCommandServerPayload,
     SourceStatePayload,
 )
@@ -395,11 +396,14 @@ class ServerHelloPayload(SendspinModel):
     """Friendly name of the server"""
     languages: list[str] | None = None
     """BCP 47 tags in descending operator preference, informing operator-facing output."""
+    source_support: Annotated[ServerHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Codecs accepted from sources; present only when the server supports source@v1."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
+        serialize_by_alias = True
 
 
 @dataclass

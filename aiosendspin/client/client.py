@@ -6,9 +6,11 @@ import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from dataclasses import replace
 
 from aiohttp import ClientSession, web
 
+from aiosendspin.audio.codecs import opus_available
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.artwork import ClientHelloArtworkSupport
 from aiosendspin.models.core import (
@@ -22,6 +24,7 @@ from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFo
 from aiosendspin.models.source import ClientHelloSourceSupport
 from aiosendspin.models.types import (
     Activity,
+    AudioCodec,
     GoodbyeReason,
     MediaCommand,
     PairAbortReason,
@@ -50,6 +53,10 @@ from .source import SourceCapture
 logger = logging.getLogger(__name__)
 
 _PAIRING_WINDOW_LIFETIME_S: float = 300.0
+
+# Every server accepts these; a server predating the codec list in server/hello
+# activates the source role without sending one.
+_MANDATORY_SOURCE_CODECS = frozenset({AudioCodec.FLAC, AudioCodec.PCM})
 
 
 def _validate_decodable_formats(player_support: ClientHelloPlayerSupport) -> None:
@@ -355,11 +362,31 @@ class SendspinClient:
         return self._source_support
 
     def create_source_capture(self, audio_format: SupportedAudioFormat) -> SourceCapture:
-        """Create a capture for PCM matching ``audio_format`` on the source connection."""
+        """
+        Create a capture for PCM matching ``audio_format`` on the source connection.
+
+        The codec falls back to FLAC, or else PCM, when server/hello did not list the
+        requested one or this client cannot encode it.
+        """
         if Roles.SOURCE not in self._roles:
             raise RuntimeError("Client does not have the source role")
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
+        server_info = self._admitted_connection.server_info
+        accepted = (
+            server_info.source_codecs
+            if server_info is not None and server_info.source_codecs is not None
+            else _MANDATORY_SOURCE_CODECS
+        )
+        codec = audio_format.codec
+        if codec not in accepted or (codec is AudioCodec.OPUS and not opus_available()):
+            fallback = AudioCodec.FLAC if AudioCodec.FLAC in accepted else AudioCodec.PCM
+            logger.info(
+                "%s is not available on this connection, streaming %s instead",
+                codec.value,
+                fallback.value,
+            )
+            audio_format = replace(audio_format, codec=fallback)
         return SourceCapture(self, self._admitted_connection, audio_format)
 
     @property

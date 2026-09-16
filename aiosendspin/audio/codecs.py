@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import struct
 import types
@@ -30,6 +31,19 @@ def _require_av() -> types.ModuleType:
             "PyAV is required for Opus/FLAC encoding and decoding. "
             "Install the 'source' extra: pip install aiosendspin[source]"
         ) from err
+
+
+@functools.cache
+def opus_available() -> bool:
+    """Whether Opus can be encoded and decoded, which needs PyAV built with libopus."""
+    try:
+        av = _get_av()
+        av.codec.Codec("libopus", "w")
+        av.codec.Codec("libopus", "r")
+    except (ImportError, ValueError):
+        # PyAV reports a missing codec as UnknownCodecError, a ValueError.
+        return False
+    return True
 
 
 class PcmPassthrough:
@@ -689,4 +703,5 @@ __all__ = [
     "PcmPassthrough",
     "create_decoder",
     "create_encoder",
+    "opus_available",
 ]
