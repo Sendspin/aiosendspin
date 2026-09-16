@@ -202,7 +202,7 @@ class SendspinClient:
     _initial_muted: bool
     """Initial mute state for player role."""
     _state_supported_commands: list[PlayerCommand]
-    """Supported commands advertised in client/state messages."""
+    """Commands advertised in client/state messages."""
 
     def __init__(  # noqa: PLR0913, PLR0915
         self,
@@ -277,7 +277,11 @@ class SendspinClient:
         self.set_output_delay_ms(output_delay_ms)
         self.set_required_lead_time_ms(required_lead_time_ms)
         self.set_min_buffer_ms(min_buffer_ms)
-        self._state_supported_commands: list[PlayerCommand] = list(state_supported_commands or [])
+        # Commands an embedder declared on player_support are sent in client/state instead.
+        hello_commands = player_support.supported_commands if player_support else None
+        self._state_supported_commands: list[PlayerCommand] = list(
+            dict.fromkeys([*(hello_commands or []), *(state_supported_commands or [])])
+        )
 
         self._provisional_connections = set()
         self._admission_lock = asyncio.Lock()
@@ -471,7 +475,7 @@ class SendspinClient:
 
     @property
     def state_supported_commands(self) -> list[PlayerCommand]:
-        """Supported commands advertised in client/state messages."""
+        """Commands advertised in client/state, including any declared on player_support."""
         return self._state_supported_commands
 
     @property

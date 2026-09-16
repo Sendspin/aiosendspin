@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import struct
 from dataclasses import replace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from aiosendspin.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.models import AudioFormat
 from aiosendspin.models import pack_binary_header_raw
@@ -64,7 +66,6 @@ def _player_support() -> ClientHelloPlayerSupport:
             )
         ],
         buffer_capacity=100_000,
-        supported_commands=[],
     )
 
 
@@ -509,12 +510,114 @@ async def test_send_group_command_seek_forwards_position_ms() -> None:
     assert msg["payload"]["controller"]["position_ms"] == 12_000
 
 
+async def _reporting_connection(
+    client: SendspinClient,
+) -> tuple[SendspinConnection, list[dict[str, Any]]]:
+    """Return a connected connection that has sent its player state, and the sent messages."""
+    connection = SendspinConnection(client)
+    sent: list[dict[str, Any]] = []
+
+    async def _capture(payload: str) -> None:
+        sent.append(json.loads(payload))
+
+    connection._ws = MagicMock(closed=False)  # noqa: SLF001
+    connection._connected = True  # noqa: SLF001
+    connection._send_message = _capture  # noqa: SLF001
+    await connection.send_player_state(available=True, volume=50, muted=False)
+    return connection, sent
+
+
+async def test_build_client_hello_omits_player_supported_commands() -> None:
+    """The hello never carries player supported_commands, even when the embedder set them."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=replace(_player_support(), supported_commands=[PlayerCommand.VOLUME]),
+    )
+    connection = SendspinConnection(client)
+
+    hello = (await connection._build_client_hello()).to_dict()  # noqa: SLF001
+
+    assert "supported_commands" not in hello["payload"]["player@v1_support"]
+
+
+@pytest.mark.parametrize(
+    ("state_commands", "expected"),
+    [(None, []), ([PlayerCommand.SET_OUTPUT_DELAY], ["set_output_delay"])],
+)
+async def test_send_player_state_always_carries_supported_commands(
+    state_commands: list[PlayerCommand] | None, expected: list[str]
+) -> None:
+    """The player state always carries supported_commands, as an explicit list when empty."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+        state_supported_commands=state_commands,
+    )
+
+    _, sent = await _reporting_connection(client)
+
+    assert sent[0]["payload"]["player"]["supported_commands"] == expected
+
+
+async def test_player_support_commands_fold_into_state_list() -> None:
+    """Commands an embedder declared on player_support are reported in client/state."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=replace(
+            _player_support(), supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE]
+        ),
+        state_supported_commands=[PlayerCommand.SET_OUTPUT_DELAY, PlayerCommand.VOLUME],
+    )
+
+    _, sent = await _reporting_connection(client)
+
+    assert sent[0]["payload"]["player"]["supported_commands"] == [
+        "volume",
+        "mute",
+        "set_output_delay",
+    ]
+
+
+async def test_server_command_not_reported_is_ignored() -> None:
+    """A server/command absent from the last reported supported_commands is not delivered."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+        state_supported_commands=[PlayerCommand.MUTE],
+    )
+    connection, _ = await _reporting_connection(client)
+
+    received: list[ServerCommandPayload] = []
+    client.add_server_command_listener(received.append)
+
+    connection._handle_server_command(  # noqa: SLF001
+        ServerCommandPayload(
+            player=PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY, output_delay_ms=250)
+        )
+    )
+    connection._handle_server_command(  # noqa: SLF001
+        ServerCommandPayload(player=PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=10))
+    )
+    mute = ServerCommandPayload(player=PlayerCommandPayload(command=PlayerCommand.MUTE, mute=True))
+    connection._handle_server_command(mute)  # noqa: SLF001
+
+    assert connection.output_delay_ms == 0.0
+    assert received == [mute]
+
+
 async def test_server_command_set_output_delay_applies_and_notifies() -> None:
     """A server/command SET_OUTPUT_DELAY updates the offset and fires the callback."""
     client = make_sdk_client(
-        client_name="Test Client", roles=[Roles.PLAYER], player_support=_player_support()
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+        state_supported_commands=[PlayerCommand.SET_OUTPUT_DELAY],
     )
-    connection = SendspinConnection(client)
+    connection, _ = await _reporting_connection(client)
 
     received: list[ServerCommandPayload] = []
     client.add_server_command_listener(received.append)
@@ -531,9 +634,12 @@ async def test_server_command_set_output_delay_applies_and_notifies() -> None:
 async def test_server_command_pre_rename_delay_applies_and_notifies() -> None:
     """A pre-rename server/command set_static_delay updates the offset and fires the callback."""
     client = make_sdk_client(
-        client_name="Test Client", roles=[Roles.PLAYER], player_support=_player_support()
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+        state_supported_commands=[PlayerCommand.SET_STATIC_DELAY],
     )
-    connection = SendspinConnection(client)
+    connection, _ = await _reporting_connection(client)
 
     received: list[ServerCommandPayload] = []
     client.add_server_command_listener(received.append)
