@@ -361,7 +361,7 @@ async def test_drop_pending_binary_unblocks_backpressured_role() -> None:
 
 
 def test_check_late_binary_uses_player_effective_timestamp() -> None:
-    """Static delay should make late-drop compare against effective play time."""
+    """Output delay should make late-drop compare against effective play time."""
     loop = asyncio.new_event_loop()
     try:
         clock = ManualClock(now_us_value=10_000_000)
@@ -372,7 +372,7 @@ def test_check_late_binary_uses_player_effective_timestamp() -> None:
         conn._transport = wsock  # noqa: SLF001
 
         role = PlayerV1Role(client=_make_player_client_stub())
-        role.static_delay_ms = 5_000
+        role.output_delay_ms = 5_000
         role._stream_start_time_us = 0  # noqa: SLF001
 
         handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
@@ -711,7 +711,7 @@ def _make_connection_with_droppable_client(
     client = MagicMock()
     client.active_roles = []
     role = MagicMock()
-    role.get_static_delay_us.return_value = 0
+    role.get_output_delay_us.return_value = 0
     client.get_binary_handling_cached.return_value = (
         BinaryHandling(drop_late=drop_late, grace_period_us=2_000_000),
         role,
@@ -862,7 +862,7 @@ def test_late_binary_warning_is_throttled_across_a_burst(
 def test_late_binary_diagnostics_use_the_effective_play_time(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A static delay shifts the deadline, so enq_lead must agree with late_by_us."""
+    """A output delay shifts the deadline, so enq_lead must agree with late_by_us."""
     loop = asyncio.new_event_loop()
     try:
         clock = ManualClock(now_us_value=10_000_000)
@@ -874,7 +874,7 @@ def test_late_binary_diagnostics_use_the_effective_play_time(
 
         role = PlayerV1Role(client=_make_player_client_stub())
         role._stream_start_time_us = 0  # noqa: SLF001
-        role.static_delay_ms = 5_000
+        role.output_delay_ms = 5_000
 
         # Raw timestamp is 4s ahead, but the effective play time is 1s in the past.
         entry = _RoleQueueEntry(epoch=0, timestamp_us=14_000_000, enqueued_at_us=9_500_000)
