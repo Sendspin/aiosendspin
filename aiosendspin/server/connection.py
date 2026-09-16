@@ -60,6 +60,7 @@ from aiosendspin.models.core import (
     LegacyServerHelloPayload,
     ServerActivateMessage,
     ServerActivatePayload,
+    ServerCommandMessage,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,
@@ -2507,6 +2508,16 @@ class SendspinConnection:
         """Drop everything still queued or held for a role."""
         if role_queue := self._role_queues.pop(role, None):
             self._queue_size = max(self._queue_size - len(role_queue), 0)
+        # Commands are control messages, keyed in their payload by role family.
+        commands = [
+            message
+            for message in self._normal_messages
+            if isinstance(message, ServerCommandMessage)
+            and getattr(message.payload, role, None) is not None
+        ]
+        for message in commands:
+            self._normal_messages.remove(message)
+        self._queue_size = max(self._queue_size - len(commands), 0)
         self._last_enqueued_ts_by_role.pop(role, None)
         self.drop_pending_binary([role])
 

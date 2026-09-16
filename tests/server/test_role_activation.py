@@ -350,6 +350,21 @@ async def test_reactivated_player_gets_no_command_before_its_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_removed_player_drops_its_queued_commands() -> None:
+    """A server/command queued for a player being removed is not sent after server/activate."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value]))
+    player = _client(conn).role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player.set_volume(20)
+    assert any(isinstance(m, ServerCommandMessage) for m in conn._normal_messages)  # noqa: SLF001
+
+    await _set_trusted(conn, trusted=False)
+
+    assert not any(isinstance(m, ServerCommandMessage) for m in conn._normal_messages)  # noqa: SLF001
+    assert await _drain_priority(conn, fake) == ["server/activate"]
+
+
+@pytest.mark.asyncio
 async def test_role_added_after_a_stateless_connect_is_held_with_a_timeout() -> None:
     """A connection that needed no initial state holds roles activated later like any other."""
     conn, _fake = await _connect(_hello([Roles.PLAYER.value]), trusted=False)
