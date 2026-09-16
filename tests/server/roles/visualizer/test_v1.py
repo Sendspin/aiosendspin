@@ -133,6 +133,7 @@ def test_role_id_is_v1() -> None:
     assert role.role_family == "visualizer"
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_visualizer_role_flags_nonpositive_request_fields() -> None:
     """A stream/request-format with a non-positive field is flagged."""
     client = _make_client_stub()
@@ -143,6 +144,7 @@ def test_visualizer_role_flags_nonpositive_request_fields() -> None:
     client.flag_noncompliance.assert_called_once()
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_visualizer_role_no_flag_for_valid_request_fields() -> None:
     """A stream/request-format with positive fields is not flagged."""
     client = _make_client_stub()
@@ -153,6 +155,7 @@ def test_visualizer_role_no_flag_for_valid_request_fields() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_visualizer_role_flags_request_buffer_capacity() -> None:
     """buffer_capacity is not a visualizer stream/request-format field and is flagged."""
     client = _make_client_stub()
@@ -713,10 +716,10 @@ def test_beat_only_stream_initial_includes_beat() -> None:
 
 # ---------------------------------------------------------------------------
 # stream/request-format renegotiation
-# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 # ---------------------------------------------------------------------------
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_replaces_spectrum() -> None:
     """request-format replaces the spectrum config and rebuilds the extractor."""
     client = _make_client_stub()
@@ -739,6 +742,7 @@ def test_request_format_replaces_spectrum() -> None:
     assert role._extractor is not original_extractor  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_replaces_rate_max() -> None:
     """request-format replaces rate_max."""
     client = _make_client_stub()
@@ -753,6 +757,7 @@ def test_request_format_replaces_rate_max() -> None:
     assert role._stream_config.rate_max == 15  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_with_no_active_stream_does_not_start_stream() -> None:
     """The server MUST NOT start a stream in response to request-format when none is active."""
     client = _make_client_stub()
@@ -773,6 +778,7 @@ def test_request_format_with_no_active_stream_does_not_start_stream() -> None:
     assert role._stream_started is False  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_with_no_active_stream_is_remembered_for_next_stream() -> None:
     """With no active stream, the request is remembered and applied to the next stream/start."""
     client = _make_client_stub()
@@ -789,6 +795,7 @@ def test_request_format_with_no_active_stream_is_remembered_for_next_stream() ->
     assert cfg.rate_max == 15
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_replaces_types() -> None:
     """request-format replaces the negotiated types."""
     client = _make_client_stub()
@@ -805,6 +812,7 @@ def test_request_format_replaces_types() -> None:
     assert list(role._stream_config.types) == ["loudness"]  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_emits_new_stream_start() -> None:
     """A request-format that changes the config emits a fresh stream/start."""
     client = _make_client_stub()
@@ -819,6 +827,7 @@ def test_request_format_emits_new_stream_start() -> None:
     assert _stream_start_count(client) == starts_before + 1
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_without_change_sends_no_stream_start() -> None:
     """A request-format that leaves the derived config unchanged sends no stream/start."""
     client = _make_client_stub()
@@ -834,6 +843,7 @@ def test_request_format_without_change_sends_no_stream_start() -> None:
     assert _stream_start_count(client) == starts_before
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_adding_spectrum_without_spectrum_object_falls_back() -> None:
     """A `types` change adding `spectrum` without a `spectrum` object is normalized away."""
     client = _make_client_stub()
@@ -856,6 +866,7 @@ def test_request_format_adding_spectrum_without_spectrum_object_falls_back() -> 
     role.on_audio_chunk(_audio_chunk(1_000_000))
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_clears_pending_beats_and_re_defers() -> None:
     """request-format drops pending beats and re-defers `beat` until next landing."""
     client = _make_beat_client_stub()
@@ -889,17 +900,6 @@ def test_buffer_tracker_uses_hello_capacity_with_state_config() -> None:
     tracker = role.get_buffer_tracker()
     assert tracker is not None
     assert tracker.capacity_bytes == 1234
-
-
-def test_buffer_tracker_uses_negotiated_capacity() -> None:
-    """Buffer tracker uses negotiated capacity."""
-    client = _make_client_stub()
-    role = VisualizerV1Role(client=client)
-    _connect(role)
-    role.on_stream_start()
-    tracker = role.get_buffer_tracker()
-    assert tracker is not None
-    assert tracker.capacity_bytes == 65536
 
 
 def test_buffer_tracker_resets_on_stream_clear() -> None:
@@ -993,7 +993,7 @@ def test_first_state_object_joins_running_stream() -> None:
 
 
 def test_stream_start_follows_state_request() -> None:
-    """stream/start carries a subset of the requested types and at most its rate_max."""
+    """stream/start carries the requested types it can stream now and the requested rate_max."""
     client = _make_client_stub()
     client.visualizer_state = {"types": ["loudness", "beat"], "rate_max": 12}
     role = VisualizerV1Role(client=client)
@@ -1001,8 +1001,8 @@ def test_stream_start_follows_state_request() -> None:
     role.on_stream_start()
 
     config = _last_stream_start(client).payload.visualizer
-    assert set(config.types) <= {"loudness", "beat"}
-    assert config.rate_max <= 12
+    assert config.types == ("loudness",)
+    assert config.rate_max == 12
 
 
 def test_empty_types_stream_sends_no_frames() -> None:
@@ -1143,10 +1143,10 @@ def test_reconnect_waits_for_fresh_state_object() -> None:
 
 # ---------------------------------------------------------------------------
 # Pre-#195 hello stream configuration
-# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 # ---------------------------------------------------------------------------
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_legacy_hello_streams_without_state_object() -> None:
     """A hello carrying stream configuration streams with it without a state object."""
     client = _make_client_stub()
@@ -1166,6 +1166,7 @@ def test_legacy_hello_streams_without_state_object() -> None:
     assert role.initial_state_deviations(ClientStatePayload(available=True)) == []
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_legacy_hello_defaults_and_spectrum_without_config() -> None:
     """A legacy hello keeps the old defaults and drops `spectrum` without a config."""
     client = _make_client_stub()
@@ -1189,6 +1190,7 @@ def test_legacy_hello_defaults_and_spectrum_without_config() -> None:
     assert config.rate_max == 30
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_state_object_replaces_legacy_hello_config() -> None:
     """A state object after a legacy hello replaces its configuration."""
     client = _make_client_stub()
@@ -1209,8 +1211,13 @@ def test_state_object_replaces_legacy_hello_config() -> None:
     client.join_active_stream.assert_not_called()
 
 
-def test_unsupported_types_are_filtered() -> None:
-    """Types the reference impl can't produce are dropped from stream/start."""
+# ---------------------------------------------------------------------------
+# Type filtering
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_requested_types_are_omitted() -> None:
+    """Unknown requested types never reach stream/start."""
     client = _make_client_stub()
     client.visualizer_state = {
         "types": ["loudness", "_not_a_real_type"],

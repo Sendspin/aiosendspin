@@ -256,7 +256,8 @@ class VisualizerV1Role(Role):
             raise ValueError("visualizer support object missing for visualizer@v1 role")
         self._buffer_capacity = support.buffer_capacity
         # A current client's request arrives in client/state; no stream starts before it.
-        self._request = self._legacy_hello_request(support)
+        legacy_request = self._legacy_hello_request(support)
+        self._request = None if legacy_request is None else self._filter_request(legacy_request)
         self._stream_config = None
         self._subscribe_to_group_role()
 
@@ -771,6 +772,7 @@ class VisualizerV1Role(Role):
         self._pending_beats.clear()
         self._has_beats_landed = False
 
+        # Rebuilt after the reset, which can drop `beat` from the config.
         self._stream_config = self._build_stream_config()
         # Held frames carry old-config payloads (e.g. stale spectrum bins);
         # drop them and re-evaluate the warmup cap against the new request.
@@ -812,13 +814,8 @@ class VisualizerV1Role(Role):
         """Return the stream configuration a pre-#195 hello carried, or None without one."""
         if not support.has_stream_config:
             return None
-        types: list[SupportedVisualizerType] = (
-            ["loudness", "f_peak"] if support.types is None else list(support.types)
-        )
-        if "spectrum" in types and support.spectrum is None:
-            types.remove("spectrum")
         return VisualizerStatePayload(
-            types=types,
+            types=["loudness", "f_peak"] if support.types is None else list(support.types),
             rate_max=30 if support.rate_max is None else support.rate_max,
             spectrum=support.spectrum,
         )
@@ -854,11 +851,8 @@ class VisualizerV1Role(Role):
             exposed_types = [t for t in client_types if t != "beat"]
         # Server-wide pitch shed: drop the (heavy) pitch feature unless it is
         # the only exposed type, so a pitch-only client still gets its data.
-        # The pitch toggle is ignored when the server rejects non-compliant
-        # clients, since pitch rides spec-reserved binary type 21.
-        server = self._client._server  # noqa: SLF001
-        pitch_enabled = server.visualizer_pitch_enabled and server.allow_noncompliant_clients
-        if not pitch_enabled:
+        # A compliance-strict server never gets here with pitch (`_filter_request`).
+        if not self._client._server.visualizer_pitch_enabled:  # noqa: SLF001
             without_pitch: list[SupportedVisualizerType] = [
                 t for t in exposed_types if t != "pitch"
             ]

@@ -90,6 +90,7 @@ class ClientHelloVisualizerSupport(SendspinModel):
     types: list[SupportedVisualizerType] | None = None
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     @classmethod
     def __pre_deserialize__(cls, payload: dict[str, Any]) -> dict[str, Any]:
         """Normalize incoming support payload before dataclass construction."""
@@ -105,6 +106,7 @@ class ClientHelloVisualizerSupport(SendspinModel):
         if self.rate_max is not None and self.rate_max <= 0:
             raise ValueError(f"rate_max must be > 0, got {self.rate_max}")
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     @property
     def has_stream_config(self) -> bool:
         """Whether the hello carried stream configuration that belongs in client/state."""
@@ -195,6 +197,7 @@ class StreamStartVisualizer(SendspinModel):
 
 
 # Client -> Server: stream/request-format visualizer object
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 @dataclass
 class StreamRequestFormatVisualizer(SendspinModel):
     """Visualizer stream format renegotiation payload.
