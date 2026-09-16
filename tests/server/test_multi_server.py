@@ -30,6 +30,13 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
 )
+from aiosendspin.noise.constants import (
+    MAX_TRANSPORT_PLAINTEXT,
+    MSG_TYPE_FRAGMENT,
+    MSG_TYPE_FRAGMENT_END,
+    MSG_TYPE_FRAGMENT_MORE,
+    MSG_TYPE_JSON_BODY,
+)
 from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.pairing import PairingAbortError, RemotePairingAbortError
 from aiosendspin.noise.trust_store import (
@@ -43,13 +50,15 @@ from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
-from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.connection import SendspinConnection, _QueuedTransport
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.negotiation import negotiate_roles
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
+from tests.noise.conftest import FakeWebSocket, make_paired_sessions
 
 if TYPE_CHECKING:
     from aiosendspin.models.types import ServerMessage
+    from aiosendspin.noise.session import NoiseSession
 
 
 @dataclass
@@ -764,6 +773,184 @@ class TestInitialConnectPairingAbort:
 
         with pytest.raises(PairingAbortError):
             await conn._exchange_hellos()  # noqa: SLF001
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+class TestLegacyFragmentTolerance:
+    """Legacy fragment IDs 2/3 are tolerated on receive and sent only to pre-#177 clients."""
+
+    @staticmethod
+    def _hello_text(*, pre_spec_177: bool) -> str:
+        support: dict[str, object] = {
+            "supported_formats": [
+                {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+            ],
+            "buffer_capacity": 100_000,
+        }
+        if pre_spec_177:
+            support["supported_commands"] = ["volume"]
+        return orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "client-1",
+                    "supported_roles": ["player@v1"],
+                    "player@v1_support": support,
+                },
+            }
+        ).decode()
+
+    @staticmethod
+    async def _encrypted_connection(
+        server: _MockServer,
+    ) -> tuple[SendspinConnection, EncryptedWebSocket, FakeWebSocket, NoiseSession]:
+        """Return a connection whose transport is installed as after a Noise handshake.
+
+        The returned session is the client's, for encrypting inbound frames.
+        """
+        server_session, client_session = make_paired_sessions()
+        raw = FakeWebSocket()
+        transport = EncryptedWebSocket(raw, server_session)
+        conn = SendspinConnection(server, wsock_client=AsyncMock())
+        psk = generate_psk()
+        conn._client_id = "client-1"  # noqa: SLF001
+        conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+            psk_id=psk_id_for(psk), psk=psk, category=PskCategory.LONG_TERM
+        )
+        conn._establish_transport = AsyncMock(return_value=transport)  # type: ignore[method-assign]  # noqa: SLF001
+        await conn._setup_connection()  # noqa: SLF001
+        return conn, transport, raw, client_session
+
+    @staticmethod
+    async def _push(raw: FakeWebSocket, session: NoiseSession, plaintexts: list[bytes]) -> None:
+        for plaintext in plaintexts:
+            await raw.push(WSMessage(WSMsgType.BINARY, session.encrypt(plaintext), ""))
+
+    @staticmethod
+    def _legacy_hello_frames(text: str) -> list[bytes]:
+        """Split a client/hello across legacy 2/3 fragment frames."""
+        body = text.encode()
+        return [
+            bytes([MSG_TYPE_FRAGMENT_MORE, MSG_TYPE_JSON_BODY]) + body[:10],
+            bytes([MSG_TYPE_FRAGMENT_END]) + body[10:],
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pre_spec_177", [True, False])
+    async def test_legacy_send_framing_follows_pre_spec_177_hello(
+        self, mock_server: _MockServer, *, pre_spec_177: bool
+    ) -> None:
+        """Only a pre-#177 hello switches the transport to legacy fragment framing."""
+        conn, transport, raw, client_session = await self._encrypted_connection(mock_server)
+        hello = self._hello_text(pre_spec_177=pre_spec_177).encode()
+        await self._push(raw, client_session, [bytes([MSG_TYPE_JSON_BODY]) + hello])
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert conn.uses_pre_spec_177_wire is pre_spec_177
+        assert transport.legacy_fragment_framing is pre_spec_177
+
+        await transport.send_bytes(b"\x08" + b"a" * MAX_TRANSPORT_PLAINTEXT)
+        frames = [client_session.decrypt(ct) for ct in raw.sent]  # type: ignore[arg-type]
+        expected = (
+            [MSG_TYPE_FRAGMENT_MORE, MSG_TYPE_FRAGMENT_END]
+            if pre_spec_177
+            else [MSG_TYPE_FRAGMENT, MSG_TYPE_FRAGMENT]
+        )
+        assert [f[0] for f in frames[-2:]] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("legacy", [True, False])
+    async def test_queued_transport_keeps_send_framing(self, *, legacy: bool) -> None:
+        """The pairing transport sends with the same fragment framing as its base."""
+        server_session, client_session = make_paired_sessions()
+        raw = FakeWebSocket()
+        base = EncryptedWebSocket(raw, server_session)
+        base.legacy_fragment_framing = legacy
+
+        queued = _QueuedTransport(base, asyncio.Queue())
+        await queued.send_bytes(b"\x08" + b"a" * MAX_TRANSPORT_PLAINTEXT)
+
+        expected = MSG_TYPE_FRAGMENT_MORE if legacy else MSG_TYPE_FRAGMENT
+        assert client_session.decrypt(raw.sent[0])[0] == expected
+
+    @pytest.mark.asyncio
+    async def test_legacy_fragment_in_hello_is_flagged_when_lenient(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A lenient server reassembles a legacy-fragmented hello and flags it."""
+        conn, _, raw, client_session = await self._encrypted_connection(mock_server)
+        hello = self._hello_text(pre_spec_177=False)
+        await self._push(raw, client_session, self._legacy_hello_frames(hello))
+
+        with caplog.at_level("WARNING"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "fragment used legacy binary message IDs 2/3" in caplog.text
+        assert "client-1" in mock_server._clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_legacy_fragment_in_hello_closes_when_strict(self) -> None:
+        """A strict server closes a connection whose hello uses legacy fragments."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn, _, raw, client_session = await self._encrypted_connection(strict_server)
+        hello = self._hello_text(pre_spec_177=False)
+        await self._push(raw, client_session, self._legacy_hello_frames(hello))
+
+        await conn.handle_client()
+
+        assert conn._closing is True  # noqa: SLF001
+        assert conn.should_retry_server_initiated_connection is False
+        assert "client-1" not in strict_server._clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_legacy_fragment_after_hello_is_flagged_when_lenient(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A lenient message loop reassembles a legacy fragment and keeps the connection."""
+        conn, _, raw, client_session = await self._encrypted_connection(mock_server)
+        hello = self._hello_text(pre_spec_177=False).encode()
+        await self._push(raw, client_session, [bytes([MSG_TYPE_JSON_BODY]) + hello])
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        routed: list[bytes] = []
+        conn._route_inbound_binary = routed.append  # type: ignore[method-assign]  # noqa: SLF001
+
+        await self._push(
+            raw,
+            client_session,
+            [
+                bytes([MSG_TYPE_FRAGMENT_MORE, 0x08]) + b"ab",
+                bytes([MSG_TYPE_FRAGMENT_END]) + b"cd",
+                bytes([MSG_TYPE_FRAGMENT_MORE, 0x08]) + b"ef",
+                bytes([MSG_TYPE_FRAGMENT_END]) + b"gh",
+            ],
+        )
+        await raw.push(None)
+        with caplog.at_level("WARNING"):
+            await conn._run_message_loop()  # noqa: SLF001
+
+        assert routed == [b"\x08abcd", b"\x08efgh"]
+        assert caplog.text.count("fragment used legacy binary message IDs 2/3") == 1
+        assert conn._closing is False  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_legacy_fragment_after_hello_closes_when_strict(self) -> None:
+        """A strict server's message loop closes on a legacy fragment."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn, _, raw, client_session = await self._encrypted_connection(strict_server)
+        hello = self._hello_text(pre_spec_177=False).encode()
+        await self._push(raw, client_session, [bytes([MSG_TYPE_JSON_BODY]) + hello])
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+
+        await self._push(raw, client_session, [bytes([MSG_TYPE_FRAGMENT_MORE, 0x08]) + b"a"])
+        await raw.push(None)
+        await conn._run_message_loop()  # noqa: SLF001
+
+        assert conn._closing is True  # noqa: SLF001
 
 
 class TestHandshakeOrdering:

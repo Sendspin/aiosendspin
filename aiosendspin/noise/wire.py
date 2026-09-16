@@ -8,17 +8,26 @@ from aiohttp import WSMessage, WSMsgType
 from noise.exceptions import NoiseInvalidMessage
 
 from .constants import (
+    FRAGMENT_FLAG_FIRST,
+    FRAGMENT_FLAG_LAST,
+    FRAGMENT_FLAGS_RESERVED,
     MAX_TRANSPORT_PLAINTEXT,
+    MSG_TYPE_FRAGMENT,
     MSG_TYPE_FRAGMENT_END,
     MSG_TYPE_FRAGMENT_MORE,
     MSG_TYPE_JSON_BODY,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .session import NoiseSession
 
 # Bounds a single connection's reassembly buffer against a peer streaming endless fragments.
 MAX_REASSEMBLED_MESSAGE_BYTES = 64 * 1024 * 1024
+
+# Binary types owned by the transport: 1 is a fragment and 2-3 are reserved.
+_TRANSPORT_BINARY_TYPES = frozenset({MSG_TYPE_FRAGMENT, 2, 3})
 
 
 class RawWebSocket(Protocol):
@@ -53,7 +62,18 @@ class RawWebSocket(Protocol):
 class EncryptedWebSocket:
     """Wraps a raw WebSocket post-handshake; routes I/O through a ``NoiseSession``.
 
-    Construct only after ``NoiseSession.handshake_complete`` is true.
+    Construct only after ``NoiseSession.handshake_complete`` is true. A message
+    larger than one Noise frame is sent as binary type ``1`` fragments and
+    reassembled on receive; a malformed fragment sequence surfaces as an ERROR
+    message.
+
+    Two opt-ins keep pre-spec-#172 peers working; both are off by default:
+
+    - ``on_legacy_fragment``: when set, legacy fragment types ``2``/``3`` are
+      accepted and the callback runs once per such message. When unset they are
+      a protocol error.
+    - ``legacy_fragment_framing``: when true, oversized messages are sent with
+      the legacy type ``2``/``3`` framing.
     """
 
     def __init__(self, ws: RawWebSocket, session: NoiseSession) -> None:
@@ -65,6 +85,11 @@ class EncryptedWebSocket:
         self._session = session
         self._reasm_buf: bytearray | None = None
         self._reasm_type: int | None = None
+        self._reasm_legacy = False
+        # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+        self.on_legacy_fragment: Callable[[], None] | None = None
+        # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+        self.legacy_fragment_framing = False
 
     @property
     def session(self) -> NoiseSession:
@@ -101,9 +126,15 @@ class EncryptedWebSocket:
         await self._send_plaintext(bytes([MSG_TYPE_JSON_BODY]) + data.encode("utf-8"))
 
     async def send_bytes(self, data: bytes) -> None:
-        """Encrypt and send pre-typed binary data (caller has prefixed the role type byte)."""
+        """Encrypt and send pre-typed binary data (caller has prefixed the role type byte).
+
+        Raises ``ValueError`` for an empty payload or a type byte the transport reserves (1-3).
+        """
         if not data:
             msg = "binary payload must include a leading type byte"
+            raise ValueError(msg)
+        if data[0] in _TRANSPORT_BINARY_TYPES:
+            msg = f"binary type {data[0]} is reserved for the transport"
             raise ValueError(msg)
         await self._send_plaintext(data)
 
@@ -112,7 +143,9 @@ class EncryptedWebSocket:
         if len(plaintext) <= MAX_TRANSPORT_PLAINTEXT:
             await self._ws.send_bytes(self._session.encrypt(plaintext))
             return
-        for frame in _fragment(plaintext):
+        # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+        fragment = _fragment_legacy if self.legacy_fragment_framing else _fragment
+        for frame in fragment(plaintext):
             await self._ws.send_bytes(self._session.encrypt(frame))
 
     def __aiter__(self) -> EncryptedWebSocket:
@@ -127,7 +160,11 @@ class EncryptedWebSocket:
         return msg
 
     async def receive(self) -> WSMessage:
-        """Return the next decrypted message, reassembling fragments across frames."""
+        """Return the next decrypted message, reassembling fragments across frames.
+
+        Protocol violations are returned as an ERROR message. An exception raised by
+        the pre-spec-#172 ``on_legacy_fragment`` callback propagates to the caller.
+        """
         while True:
             raw = await self._ws.receive()
             if raw.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
@@ -146,10 +183,11 @@ class EncryptedWebSocket:
             if not plaintext:
                 return self._error("empty plaintext after Noise decrypt")
             type_byte = plaintext[0]
-            if type_byte == MSG_TYPE_FRAGMENT_MORE:
-                return self._on_fragment_more(plaintext)
-            if type_byte == MSG_TYPE_FRAGMENT_END:
-                return self._on_fragment_end(plaintext)
+            if type_byte == MSG_TYPE_FRAGMENT:
+                return self._on_fragment(plaintext)
+            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+            if type_byte in (MSG_TYPE_FRAGMENT_MORE, MSG_TYPE_FRAGMENT_END):
+                return self._on_legacy_fragment(plaintext)
             if self._reasm_buf is not None:
                 return self._error("non-fragment frame while a fragmented message is in flight")
             return self._dispatch(plaintext)
@@ -157,33 +195,72 @@ class EncryptedWebSocket:
             return msg
         return self._error(f"unexpected {msg.type.name} frame after Noise handshake")
 
-    def _on_fragment_more(self, plaintext: bytes) -> WSMessage | None:
-        """Begin or continue a fragmented message."""
-        if self._reasm_buf is None:
-            orig_type = plaintext[1:2]
-            if not orig_type:
-                return self._error("fragment-more start frame missing orig_type")
-            self._reasm_type = orig_type[0]
-            self._reasm_buf = bytearray(plaintext[2:])
+    def _on_fragment(self, plaintext: bytes) -> WSMessage | None:
+        """Handle a type ``1`` fragment frame; return the message once its last frame arrives."""
+        if len(plaintext) < 2:
+            return self._error("fragment frame missing flags byte")
+        flags = plaintext[1]
+        if flags & FRAGMENT_FLAGS_RESERVED:
+            return self._error(f"fragment flags 0x{flags:02x} set reserved bits")
+        if flags & FRAGMENT_FLAG_FIRST:
+            if self._reasm_buf is not None:
+                return self._error("first fragment while a fragmented message is in flight")
+            if len(plaintext) < 3:
+                return self._error("first fragment missing orig_type")
+            if plaintext[2] == MSG_TYPE_FRAGMENT:
+                return self._error("first fragment has orig_type 1")
+            self._start_reassembly(plaintext[2], legacy=False)
+            data = plaintext[3:]
+        elif self._reasm_buf is None:
+            return self._error("continuation fragment with no fragmented message in flight")
+        elif self._reasm_legacy:
+            return self._error("type 1 fragment inside a legacy fragmented message")
         else:
-            data = plaintext[1:]
-            if len(self._reasm_buf) + len(data) > MAX_REASSEMBLED_MESSAGE_BYTES:
-                return self._error("fragmented message exceeds maximum reassembly size")
-            self._reasm_buf += data
-        return None
+            data = plaintext[2:]
+        return self._append_fragment(data, last=bool(flags & FRAGMENT_FLAG_LAST))
 
-    def _on_fragment_end(self, plaintext: bytes) -> WSMessage:
-        """Close a fragmented message and dispatch the reassembled payload."""
-        if self._reasm_buf is None or self._reasm_type is None:
-            return self._error("fragment-end frame with no fragmented message in flight")
-        data = plaintext[1:]
+    # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+    def _on_legacy_fragment(self, plaintext: bytes) -> WSMessage | None:
+        """Handle a legacy type ``2``/``3`` fragment frame, if the owner opted in."""
+        if self.on_legacy_fragment is None:
+            return self._error(f"reserved binary message type {plaintext[0]}")
+        last = plaintext[0] == MSG_TYPE_FRAGMENT_END
+        if self._reasm_buf is None:
+            if last:
+                return self._error("legacy fragment-end frame with no fragmented message in flight")
+            if len(plaintext) < 2:
+                return self._error("legacy fragment start frame missing orig_type")
+            self.on_legacy_fragment()
+            self._start_reassembly(plaintext[1], legacy=True)
+            return self._append_fragment(plaintext[2:], last=False)
+        if not self._reasm_legacy:
+            return self._error("legacy fragment inside a type 1 fragmented message")
+        return self._append_fragment(plaintext[1:], last=last)
+
+    def _start_reassembly(self, orig_type: int, *, legacy: bool) -> None:
+        """Begin buffering a fragmented message of ``orig_type``."""
+        self._reasm_buf = bytearray()
+        self._reasm_type = orig_type
+        self._reasm_legacy = legacy
+
+    def _append_fragment(self, data: bytes, *, last: bool) -> WSMessage | None:
+        """Append to the in-flight message; dispatch it when ``last`` is set."""
+        assert self._reasm_buf is not None
+        assert self._reasm_type is not None
         if len(self._reasm_buf) + len(data) > MAX_REASSEMBLED_MESSAGE_BYTES:
             return self._error("fragmented message exceeds maximum reassembly size")
         self._reasm_buf += data
+        if not last:
+            return None
         reassembled = bytes([self._reasm_type]) + bytes(self._reasm_buf)
+        self._reset_reassembly()
+        return self._dispatch(reassembled)
+
+    def _reset_reassembly(self) -> None:
+        """Drop any in-flight fragmented message."""
         self._reasm_buf = None
         self._reasm_type = None
-        return self._dispatch(reassembled)
+        self._reasm_legacy = False
 
     def _dispatch(self, plaintext: bytes) -> WSMessage:
         """Synthesize a ``WSMessage`` from a complete, type-prefixed plaintext."""
@@ -193,13 +270,34 @@ class EncryptedWebSocket:
 
     def _error(self, message: str) -> WSMessage:
         """Discard any reassembly state and build an ERROR ``WSMessage``."""
-        self._reasm_buf = None
-        self._reasm_type = None
+        self._reset_reassembly()
         return WSMessage(WSMsgType.ERROR, RuntimeError(message), "")
 
 
 def _fragment(plaintext: bytes) -> list[bytes]:
-    """Split an oversized type-prefixed plaintext into fragment frames."""
+    """Split an oversized type-prefixed plaintext into type ``1`` fragment frames."""
+    orig_type = plaintext[0]
+    data = memoryview(plaintext)[1:]
+    first_cap = MAX_TRANSPORT_PLAINTEXT - 3
+    cont_cap = MAX_TRANSPORT_PLAINTEXT - 2
+
+    chunks = [data[:first_cap]]
+    chunks += [data[i : i + cont_cap] for i in range(first_cap, len(data), cont_cap)]
+    last = len(chunks) - 1
+    frames = []
+    for index, chunk in enumerate(chunks):
+        flags = FRAGMENT_FLAG_LAST if index == last else 0
+        if index == 0:
+            header = bytes([MSG_TYPE_FRAGMENT, flags | FRAGMENT_FLAG_FIRST, orig_type])
+        else:
+            header = bytes([MSG_TYPE_FRAGMENT, flags])
+        frames.append(header + bytes(chunk))
+    return frames
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+def _fragment_legacy(plaintext: bytes) -> list[bytes]:
+    """Split an oversized type-prefixed plaintext into legacy type ``2``/``3`` frames."""
     orig_type = plaintext[0]
     data = memoryview(plaintext)[1:]
     first_cap = MAX_TRANSPORT_PLAINTEXT - 2
