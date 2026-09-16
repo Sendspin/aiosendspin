@@ -624,13 +624,12 @@ class SendspinConnection:
                     server_id=self._server_id,
                     store=store,
                 )
-        # Dynamic pairing code is gesture-gated only after the failure counter escalates.
+        # Dynamic pairing code is held back only at the round limit, until an operator action.
         pairing_format = await self._validate_pairing_format(pairing.format)
-        if (
-            await store.is_pairing_code_escalated()
-            and (leave := await self._gate_on_pairing_window(pairing_index)) is not None
-        ):
-            return leave
+        if await store.is_pairing_round_limit_reached():
+            if (leave := await self._gate_on_pairing_window(pairing_index)) is not None:
+                return leave
+            await store.reset_pairing_rounds()
         self._client.consume_pairing_window()
         try:
             with self._attempt_in_progress():

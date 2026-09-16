@@ -122,6 +122,7 @@ from aiosendspin.noise.driver import (
 )
 from aiosendspin.noise.keys import b64url_encode, psk_id_for
 from aiosendspin.noise.pairing import (
+    InvalidPairingCodeError,
     LocalPairingAbortError,
     PairingAbortError,
     PairingAttempt,
@@ -179,6 +180,7 @@ _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
         "client/pair-finalize",
         "client/pair-auth",
         "client/pair-confirm",
+        "client/pair-retry",
         "pair/abort",
     }
 )
@@ -192,6 +194,7 @@ _PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
         "client/pair-finalize",
         "client/pair-auth",
         "client/pair-confirm",
+        "client/pair-retry",
         "pair/abort",
     }
 )
@@ -1044,9 +1047,9 @@ class SendspinConnection:
                 except ClientComplianceError:
                     await self.disconnect(retry_connection=False)
                     return False
-                except PairingTimeoutError as exc:
-                    # Timeout waiting for client; the connection stays open for a retry.
-                    self._logger.debug("Initial-connect pairing timed out: %s", exc)
+                except (PairingTimeoutError, InvalidPairingCodeError) as exc:
+                    # The connection stays open for a retry.
+                    self._logger.debug("Initial-connect pairing failed: %s", exc)
                     self._pairing_attempt = None
                 except PairingAbortError as exc:
                     if exc.reason in CLOSING_ABORT_REASONS:
@@ -1420,7 +1423,8 @@ class SendspinConnection:
         """Run a pairing attempt on a connection.
 
         A pair abort raises and leaves the connection for a retry or ``end_pairing``.
-        A server-side timeout raises after leaving pairing, also keeping the connection.
+        A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
+        after leaving pairing, also keeping the connection.
         Any other failure propagates for the caller to disconnect.
         """
         if self._pairing_attempt is not None:
@@ -1448,9 +1452,10 @@ class SendspinConnection:
                 # Our own cancellation was forwarded into the child and converted; restore it.
                 raise asyncio.CancelledError from None
             raise
-        except PairingTimeoutError:
-            # A server has no pair/abort reason for its own timeout: cancel the attempt in
-            # band with the leave activate (best-effort; the client may be gone).
+        except (PairingTimeoutError, InvalidPairingCodeError):
+            # A server has no pair/abort reason for its own timeout or a malformed entry:
+            # cancel the attempt in band with the leave activate (best-effort; the client
+            # may be gone).
             with suppress(Exception):
                 await self._leave_pairing()
             raise
@@ -1585,9 +1590,13 @@ class SendspinConnection:
         assert self._pairing_attempt.pairing_code_provider is not None
         assert self._handshake_hash is not None
         assert self._noise_psk is not None
+        assert self._client_info is not None
         verify = self._pairing_attempt.verify
         if verify and self._noise_psk.category is not PskCategory.LONG_TERM:
             raise PairingError("verification requires an existing pairing")
+        # The list form of supported_pair_methods predates pairing rounds.
+        # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+        legacy_rounds = bool(self._client_info.legacy_pair_methods_list_used)
         if method is PairMethod.STATIC_PAIRING_CODE:
             return await run_static_pairing_code_server(
                 transport,
@@ -1599,6 +1608,7 @@ class SendspinConnection:
                 verify=verify,
                 on_pair_pending=self._pairing_attempt.on_pair_pending,
                 owner=self._pairing_attempt.owner,
+                legacy_rounds=legacy_rounds,
             )
         assert pairing_format is not None
         return await run_dynamic_pairing_code_server(
@@ -1612,6 +1622,7 @@ class SendspinConnection:
             verify=verify,
             on_pair_pending=self._pairing_attempt.on_pair_pending,
             owner=self._pairing_attempt.owner,
+            legacy_rounds=legacy_rounds,
         )
 
     # DEPRECATED(spec-pr-247): remove in aiosendspin <version>

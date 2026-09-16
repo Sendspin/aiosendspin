@@ -12,7 +12,7 @@ import pytest
 from aiosendspin.models.types import PairMethod
 from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
-    PAIRING_CODE_ESCALATION_THRESHOLD,
+    PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
     ClientPairingStore,
     FileClientPairingStore,
@@ -334,28 +334,28 @@ async def test_file_client_store_persists_state(tmp_path: Path) -> None:
     await store.store_record(record)
     await store.set_pairing_psk(pairing)
     await store.set_static_pairing_code("12345678")
-    await store.record_pairing_code_failure()
+    await store.record_pairing_round()
 
     reloaded = await FileClientPairingStore.open(path)
     assert await reloaded.record_by_server_id("server-X") == record
     assert await reloaded.pairing_psk() == pairing
     assert await reloaded.static_pairing_code() == "12345678"
-    assert await reloaded.pairing_code_failure_count() == 1
+    assert await reloaded.pairing_round_count() == 1
 
 
 async def test_file_client_store_migrates_per_method_pin_failures(tmp_path: Path) -> None:
-    """A pre-escalation store carries its dynamic count over, keeping escalation state."""
+    """A store with per-method counters carries its dynamic count over as the round count."""
     path = tmp_path / "client.json"
     await FileClientPairingStore.open(path)
     data = json.loads(path.read_text(encoding="utf-8"))
     data["pin_failures"] = {
-        PairMethod.DYNAMIC_PAIRING_CODE.value: PAIRING_CODE_ESCALATION_THRESHOLD,
+        PairMethod.DYNAMIC_PAIRING_CODE.value: PAIRING_ROUND_LIMIT,
         PairMethod.STATIC_PAIRING_CODE.value: 3,
     }
     path.write_text(json.dumps(data), encoding="utf-8")
 
     reloaded = await FileClientPairingStore.open(path)
-    assert await reloaded.pairing_code_failure_count() == PAIRING_CODE_ESCALATION_THRESHOLD
+    assert await reloaded.pairing_round_count() == PAIRING_ROUND_LIMIT
 
 
 async def test_file_client_store_persists_last_playback_server(tmp_path: Path) -> None:
@@ -531,28 +531,29 @@ async def test_client_store_reports_no_storage_accounting_by_default(
     assert await client_store.storage_accounting() is None
 
 
-async def test_pairing_code_failure_counter_increments_and_resets(
+async def test_pairing_round_counter_increments_and_resets(
     client_store: ClientPairingStore,
 ) -> None:
-    """Failures accumulate and reset clears the counter."""
-    assert await client_store.pairing_code_failure_count() == 0
-    assert await client_store.record_pairing_code_failure() == 1
-    assert await client_store.record_pairing_code_failure() == 2
-    await client_store.reset_pairing_code_failures()
-    assert await client_store.pairing_code_failure_count() == 0
+    """Rounds accumulate and reset clears the count."""
+    assert await client_store.pairing_round_count() == 0
+    assert await client_store.record_pairing_round() == 1
+    assert await client_store.record_pairing_round() == 2
+    await client_store.reset_pairing_rounds()
+    assert await client_store.pairing_round_count() == 0
 
 
-async def test_pairing_code_escalation_at_threshold_and_clears_on_reset(
+async def test_pairing_round_limit_is_reached_at_20_and_clears_on_reset(
     client_store: ClientPairingStore,
 ) -> None:
-    """Escalation trips at the threshold and clears only on reset."""
-    for _ in range(PAIRING_CODE_ESCALATION_THRESHOLD - 1):
-        await client_store.record_pairing_code_failure()
-    assert not await client_store.is_pairing_code_escalated()
-    await client_store.record_pairing_code_failure()
-    assert await client_store.is_pairing_code_escalated()
-    await client_store.reset_pairing_code_failures()
-    assert not await client_store.is_pairing_code_escalated()
+    """The round limit is reached at 20 rounds and clears only on reset."""
+    assert PAIRING_ROUND_LIMIT == 20
+    for _ in range(PAIRING_ROUND_LIMIT - 1):
+        await client_store.record_pairing_round()
+    assert not await client_store.is_pairing_round_limit_reached()
+    await client_store.record_pairing_round()
+    assert await client_store.is_pairing_round_limit_reached()
+    await client_store.reset_pairing_rounds()
+    assert not await client_store.is_pairing_round_limit_reached()
 
 
 # --- shared-PSK records --------------------------------------------------

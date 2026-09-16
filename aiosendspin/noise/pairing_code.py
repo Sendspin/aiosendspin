@@ -21,6 +21,11 @@ def is_valid_static_pairing_code(code: str) -> bool:
     return len(code) == STATIC_DIGITS and code.isascii() and code.isdigit()
 
 
+def strip_separators(code: str) -> str:
+    """Return ``code`` without the spaces and hyphens an operator may type between groups."""
+    return code.replace(" ", "").replace("-", "")
+
+
 def generate_nonce() -> bytes:
     """Return a fresh 32-byte CSPRNG nonce (``nonce_A`` or ``nonce_B``)."""
     return secrets.token_bytes(NONCE_SIZE)

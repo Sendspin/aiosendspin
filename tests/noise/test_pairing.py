@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -26,16 +27,23 @@ from aiosendspin.noise.models import (
     ClientPairInitPayload,
     ClientPairPendingMessage,
     ClientPairPendingPayload,
+    ClientPairRetryMessage,
     ServerPairAuthMessage,
     ServerPairAuthPayload,
+    ServerPairConfirmMessage,
+    ServerPairConfirmPayload,
     ServerPairFinalizeMessage,
     ServerPairInitMessage,
+    ServerPairInitPayload,
 )
 from aiosendspin.noise.pairing import (
+    InvalidPairingCodeError,
     PairingAbortError,
     PairingAttempt,
     PairingError,
     PairingTimeoutError,
+    _legacy_pake_sid,
+    _pake_sid,
     run_dynamic_pairing_code_client,
     run_dynamic_pairing_code_server,
     run_pairing_psk_client,
@@ -44,6 +52,7 @@ from aiosendspin.noise.pairing import (
     run_static_pairing_code_server,
 )
 from aiosendspin.noise.trust_store import (
+    PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
     InMemoryClientPairingStore,
     InMemoryServerPairingStore,
@@ -422,7 +431,7 @@ async def test_static_pairing_code_server_rejects_non_8_digit_operator_code() ->
     await client_ews.send_str(
         ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json(),
     )
-    with pytest.raises(PairingError, match="8 decimal digits"):
+    with pytest.raises(InvalidPairingCodeError, match="8 decimal digits"):
         await run_static_pairing_code_server(
             server_ews,
             handshake_hash=_HANDSHAKE_HASH,
@@ -432,6 +441,47 @@ async def test_static_pairing_code_server_rejects_non_8_digit_operator_code() ->
             store=server_store,
         )
     assert server_raw.sent == []
+    assert await server_store.record_by_client_id("client-X") is None
+
+
+@pytest.mark.parametrize(
+    ("pairing_format", "entered"),
+    [
+        pytest.param(PairingCodeFormat.DIGITS, "12345", id="short-digits"),
+        pytest.param(PairingCodeFormat.DIGITS, "12a456", id="non-digit"),
+        pytest.param(PairingCodeFormat.DIGITS, "123_456", id="unknown-separator"),
+        pytest.param(PairingCodeFormat.QR_CODE, "SP:0AAAA", id="wrong-token-version"),
+    ],
+)
+async def test_dynamic_pairing_code_server_rejects_malformed_operator_input(
+    pairing_format: PairingCodeFormat, entered: str
+) -> None:
+    """Malformed operator input raises before the server emits its PAKE share."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    async def bad_code() -> str:
+        return entered
+
+    await client_ews.send_str(
+        ClientPairInitMessage(
+            payload=ClientPairInitPayload(
+                pairing_index=0,
+                commit_B=b64url_encode(pairing_code_mod.commit(pairing_code_mod.generate_nonce())),
+            ),
+        ).to_json(),
+    )
+    with pytest.raises(InvalidPairingCodeError):
+        await run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_code_provider=bad_code,
+            pairing_format=pairing_format,
+            client_id="client-X",
+            store=server_store,
+        )
+    assert len(server_raw.sent) == 1  # server/pair-init only
     assert await server_store.record_by_client_id("client-X") is None
 
 
@@ -820,8 +870,12 @@ async def test_pairing_psk_server_discards_a_stale_pair_pending() -> None:
 _HANDSHAKE_HASH = bytes(range(32))
 
 
-async def test_dynamic_pairing_code_round_trip() -> None:
-    """A matching pairing code authenticates the PAKE and both sides persist the record."""
+@pytest.mark.parametrize("separator", ["", "-", " "])
+async def test_dynamic_pairing_code_round_trip(separator: str) -> None:
+    """A matching pairing code authenticates the PAKE and both sides persist the record.
+
+    Separators the operator types between the digit groups are ignored.
+    """
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
@@ -831,7 +885,8 @@ async def test_dynamic_pairing_code_round_trip() -> None:
         shown.set_result(pairing_code)
 
     async def provide() -> str:
-        return await shown  # operator types the pairing code the client displayed
+        pairing_code = await shown  # operator types the pairing code the client displayed
+        return pairing_code[:3] + separator + pairing_code[3:]
 
     _client_ret, server_record = await asyncio.gather(
         run_dynamic_pairing_code_client(
@@ -905,6 +960,68 @@ async def test_dynamic_pairing_code_qr_round_trip() -> None:
     assert client_record.psk == server_record.psk
 
 
+async def test_code_server_discards_a_superseded_attempts_pair_retry() -> None:
+    """A client/pair-retry still in flight from a superseded attempt does not fail the next one."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def emit(pairing_code: str) -> None:
+        shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown
+
+    await client_ews.send_str(ClientPairRetryMessage().to_json())
+
+    _client_ret, server_record = await asyncio.gather(
+        run_dynamic_pairing_code_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_emitter=emit,
+            server_id="server-X",
+            store=client_store,
+        ),
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=server_store,
+        ),
+    )
+    assert server_record is not None
+    assert await server_store.record_by_client_id("client-A") == server_record
+
+
+async def test_pairing_psk_server_discards_a_superseded_attempts_pair_retry() -> None:
+    """A client/pair-retry in flight from a dynamic attempt does not fail a Pairing PSK attempt."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    await client_ews.send_str(ClientPairRetryMessage().to_json())
+
+    _client_ret, server_record = await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews, pairing_index=1, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews,
+            pairing_index=1,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            on_legacy_finalize=_unexpected_legacy_finalize,
+        ),
+    )
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert server_record.psk == client_record.psk
+
+
 async def test_dynamic_pairing_code_server_discards_stale_pair_init() -> None:
     """A pair-init left over from a superseded activate is discarded; the fresh one pairs."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
@@ -969,27 +1086,132 @@ async def test_pair_init_ahead_of_server_count_is_protocol_error() -> None:
         )
 
 
-async def test_dynamic_pairing_code_wrong_code_aborts_and_persists_nothing() -> None:
-    """A pairing-code mismatch fails confirmation; both sides abort and store nothing."""
+def test_pake_sid_known_answer() -> None:
+    """The sid is label || h || u32be(pairing_index) || u32be(round)."""
+    prefix = (
+        "73656e647370696e2d706169722d70616b652d7631"
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        "00000002"
+    )
+    assert _pake_sid(_HANDSHAKE_HASH, 2, 1).hex() == prefix + "00000001"
+    assert _pake_sid(_HANDSHAKE_HASH, 2, 3).hex() == prefix + "00000003"
+
+
+# DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+def test_legacy_pake_sid_known_answer() -> None:
+    """The sid for a client predating rounds carries no round number."""
+    assert _legacy_pake_sid(_HANDSHAKE_HASH, 2).hex() == (
+        "73656e647370696e2d706169722d70616b652d7631"
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        "00000002"
+    )
+
+
+class _RecordingWS:
+    """Wraps an ``EncryptedWebSocket``, recording the pairing messages sent through it."""
+
+    def __init__(self, ws: EncryptedWebSocket) -> None:
+        self._ws = ws
+        self.session = ws.session
+        self.sent: list[str] = []
+
+    async def send_str(self, data: str) -> None:
+        self.sent.append(data)
+        await self._ws.send_str(data)
+
+    async def receive(self) -> object:
+        return await self._ws.receive()
+
+    def types(self) -> list[str]:
+        return [json.loads(frame)["type"] for frame in self.sent]
+
+
+async def test_dynamic_pairing_code_retries_a_wrong_round() -> None:
+    """A wrong code fails one round; the next round runs on the same code and pairs."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_rec, server_rec = _RecordingWS(client_ews), _RecordingWS(server_ews)
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    entered: list[str] = []
 
     async def emit(pairing_code: str) -> None:
-        shown.set_result(pairing_code)
+        shown.put_nowait(pairing_code)
+
+    async def provide() -> str:
+        pairing_code = await shown.get()
+        if not entered:
+            pairing_code = ("2" if pairing_code[0] == "1" else "1") + pairing_code[1:]
+        entered.append(pairing_code)
+        return pairing_code
+
+    _client_ret, server_record = await asyncio.gather(
+        run_dynamic_pairing_code_client(
+            client_rec,  # type: ignore[arg-type]
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_emitter=emit,
+            server_id="server-X",
+            store=client_store,
+        ),
+        run_dynamic_pairing_code_server(
+            server_rec,  # type: ignore[arg-type]
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=server_store,
+        ),
+    )
+
+    assert server_record is not None
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert client_record.psk == server_record.psk
+    assert len(entered) == 2
+    assert entered[0] != entered[1]
+    assert client_rec.types() == [
+        "client/pair-init",
+        "client/pair-auth",
+        "client/pair-retry",
+        "client/pair-auth",
+        "client/pair-confirm",
+        "client/pair-finalize",
+    ]
+    inits = [
+        ServerPairInitMessage.from_json(frame)
+        for frame in server_rec.sent
+        if json.loads(frame)["type"] == "server/pair-init"
+    ]
+    assert len(inits) == 2
+    assert inits[0].payload.nonce_A is not None
+    assert inits[1].payload.nonce_A is None
+    assert await client_store.pairing_round_count() == 0
+
+
+async def test_dynamic_pairing_code_aborts_at_round_limit_and_persists_nothing() -> None:
+    """A code that never matches runs rounds up to the limit, then the client aborts."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_rec = _RecordingWS(client_ews)
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    emitted: list[str] = []
+
+    async def emit(pairing_code: str) -> None:
+        emitted.append(pairing_code)
+        shown.put_nowait(pairing_code)
 
     async def provide_wrong() -> str:
-        pairing_code = await shown
-        wrong_first = (
-            "2" if pairing_code[0] == "1" else "1"
-        )  # guaranteed different from the shown pairing code
-        return wrong_first + pairing_code[1:]
+        pairing_code = await shown.get()
+        return ("2" if pairing_code[0] == "1" else "1") + pairing_code[1:]
 
     with pytest.raises(PairingAbortError) as excinfo:
         await asyncio.gather(
             run_dynamic_pairing_code_client(
-                client_ews,
+                client_rec,  # type: ignore[arg-type]
                 handshake_hash=_HANDSHAKE_HASH,
                 pairing_index=0,
                 pairing_format=PairingCodeFormat.DIGITS,
@@ -1009,9 +1231,153 @@ async def test_dynamic_pairing_code_wrong_code_aborts_and_persists_nothing() -> 
         )
 
     assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
-    assert await client_store.pairing_code_failure_count() == 1
+    assert len(emitted) == PAIRING_ROUND_LIMIT
+    assert len(set(emitted)) == 1  # the code is stable across rounds
+    assert client_rec.types().count("client/pair-retry") == PAIRING_ROUND_LIMIT - 1
+    assert client_rec.types()[-1] == "pair/abort"
+    assert await client_store.pairing_round_count() == PAIRING_ROUND_LIMIT
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_dynamic_pairing_code_client_aborts_early_when_rounds_carry_over() -> None:
+    """Rounds from earlier attempts count: one round short of the limit leaves no retry."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_rec = _RecordingWS(client_ews)
+    client_store = InMemoryClientPairingStore()
+    for _ in range(PAIRING_ROUND_LIMIT - 1):
+        await client_store.record_pairing_round()
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def emit(pairing_code: str) -> None:
+        shown.set_result(pairing_code)
+
+    async def provide_wrong() -> str:
+        pairing_code = await shown
+        return ("2" if pairing_code[0] == "1" else "1") + pairing_code[1:]
+
+    with pytest.raises(PairingAbortError):
+        await asyncio.gather(
+            run_dynamic_pairing_code_client(
+                client_rec,  # type: ignore[arg-type]
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_format=PairingCodeFormat.DIGITS,
+                pairing_code_emitter=emit,
+                server_id="server-X",
+                store=client_store,
+            ),
+            run_dynamic_pairing_code_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_format=PairingCodeFormat.DIGITS,
+                pairing_code_provider=provide_wrong,
+                client_id="client-A",
+                store=InMemoryServerPairingStore(),
+            ),
+        )
+
+    assert "client/pair-retry" not in client_rec.types()
+    assert await client_store.pairing_round_count() == PAIRING_ROUND_LIMIT
+
+
+async def test_dynamic_pairing_code_counts_a_round_once_emitted() -> None:
+    """A round counts as soon as its code is emitted, even if the attempt ends there."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+
+    async def emit(_pairing_code: str) -> None:
+        raise asyncio.CancelledError
+
+    await server_ews.send_str(
+        ServerPairInitMessage(
+            payload=ServerPairInitPayload(nonce_A=b64url_encode(bytes(32)))
+        ).to_json()
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await run_dynamic_pairing_code_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_emitter=emit,
+            server_id="server-X",
+            store=client_store,
+        )
+    assert await client_store.pairing_round_count() == 1
+
+
+async def _emitting_client(
+    client_ews: EncryptedWebSocket, client_store: InMemoryClientPairingStore
+) -> None:
+    async def emit(_pairing_code: str) -> None:
+        pass
+
+    await run_dynamic_pairing_code_client(
+        client_ews,
+        handshake_hash=_HANDSHAKE_HASH,
+        pairing_index=0,
+        pairing_format=PairingCodeFormat.DIGITS,
+        pairing_code_emitter=emit,
+        server_id="server-X",
+        store=client_store,
+    )
+
+
+async def test_dynamic_pairing_code_client_requires_nonce_a_in_first_round() -> None:
+    """A first server/pair-init without nonce_A is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    await server_ews.send_str(ServerPairInitMessage(payload=ServerPairInitPayload()).to_json())
+
+    with pytest.raises(PairingError, match="missing nonce_A") as excinfo:
+        await _emitting_client(client_ews, client_store)
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await client_store.pairing_round_count() == 0
+
+
+async def test_dynamic_pairing_code_client_rejects_nonce_a_in_later_round() -> None:
+    """A server/pair-init carrying nonce_A after a retry is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+
+    async def server() -> None:
+        await server_ews.receive()  # client/pair-init
+        nonce_a = b64url_encode(pairing_code_mod.generate_nonce())
+        await server_ews.send_str(
+            ServerPairInitMessage(payload=ServerPairInitPayload(nonce_A=nonce_a)).to_json()
+        )
+        # A share for the wrong code, so the client's server_kc check fails.
+        cpace = CPace.start(
+            role=CPaceRole.INITIATOR,
+            prs=b"not-the-code",
+            sid=_pake_sid(_HANDSHAKE_HASH, 0, 1),
+            ad=b"server",
+        )
+        await server_ews.send_str(
+            ServerPairAuthMessage(
+                payload=ServerPairAuthPayload(pake_msg_1=b64url_encode(cpace.public_share))
+            ).to_json()
+        )
+        auth = ClientPairAuthMessage.from_json((await server_ews.receive()).data)
+        cpace.derive(b64url_decode(auth.payload.pake_msg_2), b"client")
+        await server_ews.send_str(
+            ServerPairConfirmMessage(
+                payload=ServerPairConfirmPayload(server_kc=b64url_encode(cpace.tag()))
+            ).to_json()
+        )
+        retry = (await server_ews.receive()).data
+        assert ClientPairRetryMessage.from_json(retry) == ClientPairRetryMessage()
+        await server_ews.send_str(
+            ServerPairInitMessage(payload=ServerPairInitPayload(nonce_A=nonce_a)).to_json()
+        )
+
+    with pytest.raises(PairingError, match="nonce_A after the first round") as excinfo:
+        await asyncio.gather(_emitting_client(client_ews, client_store), server())
+
+    assert not isinstance(excinfo.value, PairingAbortError)
 
 
 async def test_client_relays_leave_pairing_without_storing() -> None:
@@ -1019,7 +1385,7 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    await client_store.record_pairing_code_failure()  # a prior failure to be reset
+    await client_store.record_pairing_round()  # a prior round to be reset
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
     async def emit(pairing_code: str) -> None:
@@ -1065,24 +1431,26 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
     assert "server/activate" in leftover
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
-    # Inner authentication succeeded, so the failure counter resets like any other attempt.
-    assert await client_store.pairing_code_failure_count() == 0
+    # server_kc verified, so the round count resets like any other attempt.
+    assert await client_store.pairing_round_count() == 0
 
 
 _STATIC_PAIRING_CODE = "12345678"
 
 
-async def test_static_pairing_code_round_trip() -> None:
-    """A matching static pairing code authenticates the PAKE and both sides persist the record."""
+@pytest.mark.parametrize("separator", ["", "-", " "])
+async def test_static_pairing_code_round_trip(separator: str) -> None:
+    """A matching static pairing code authenticates the PAKE and both sides persist the record.
+
+    Separators the operator types between the digit groups are ignored.
+    """
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    await (
-        client_store.record_pairing_code_failure()
-    )  # a dynamic-pairing-code failure static pairing ignores
+    await client_store.record_pairing_round()  # a dynamic-pairing-code round static pairing ignores
 
     async def provide() -> str:
-        return _STATIC_PAIRING_CODE
+        return _STATIC_PAIRING_CODE[:4] + separator + _STATIC_PAIRING_CODE[4:]
 
     _client_ret, server_record = await asyncio.gather(
         run_static_pairing_code_client(
@@ -1109,8 +1477,8 @@ async def test_static_pairing_code_round_trip() -> None:
     assert client_record.psk_id == server_record.psk_id
     assert server_record.client_id == "client-A"
     assert await server_store.record_by_client_id("client-A") == server_record
-    # The static flow leaves the dynamic-pairing-code failure counter alone.
-    assert await client_store.pairing_code_failure_count() == 1
+    # The static flow leaves the dynamic-pairing-code round count alone.
+    assert await client_store.pairing_round_count() == 1
 
 
 async def test_static_pairing_code_wrong_code_aborts_and_persists_nothing() -> None:
@@ -1143,9 +1511,50 @@ async def test_static_pairing_code_wrong_code_aborts_and_persists_nothing() -> N
         )
 
     assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
-    assert await client_store.pairing_code_failure_count() == 0
+    assert await client_store.pairing_round_count() == 0
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_static_pairing_code_pair_retry_is_protocol_error() -> None:
+    """The static flow has no rounds: a client/pair-retry is a protocol error."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    async def retrying_client() -> None:
+        await client_ews.send_str(
+            ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json()
+        )
+        cpace = CPace.start(
+            role=CPaceRole.RESPONDER,
+            prs=b"87654321",
+            sid=_pake_sid(_HANDSHAKE_HASH, 0, 1),
+            ad=b"client",
+        )
+        await client_ews.receive()  # server/pair-auth
+        await client_ews.send_str(
+            ClientPairAuthMessage(
+                payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+            ).to_json(),
+        )
+        await client_ews.receive()  # server/pair-confirm
+        await client_ews.send_str(ClientPairRetryMessage().to_json())
+
+    with pytest.raises(PairingError, match="got ClientPairRetryMessage") as excinfo:
+        await asyncio.gather(
+            run_static_pairing_code_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_code_provider=provide,
+                client_id="client-A",
+                store=InMemoryServerPairingStore(),
+            ),
+            retrying_client(),
+        )
+    assert not isinstance(excinfo.value, PairingAbortError)
 
 
 @pytest.mark.parametrize(
@@ -1183,7 +1592,7 @@ async def test_static_pairing_code_invalid_server_share_is_protocol_error(pake_m
         )
 
     assert not isinstance(excinfo.value, PairingAbortError)
-    assert await client_store.pairing_code_failure_count() == 0
+    assert await client_store.pairing_round_count() == 0
     assert _added_records(await client_store.list_records()) == []
 
 
@@ -1230,10 +1639,12 @@ def _wrap_nonce_b(sid: bytes, cpace: CPace, nonce: bytes) -> str:
 
 
 async def _honest_pake_to_finalize(
-    client_ews: EncryptedWebSocket, *, wrapped_nonce_b: str | None = None
-) -> None:
+    client_ews: EncryptedWebSocket,
+    *,
+    wrapped_nonce_b: str | None = None,
+    sid: bytes = _pake_sid(_HANDSHAKE_HASH, 0, 1),
+) -> CPace:
     """Drive an honest static PAKE round, stopping before ``client/pair-finalize``."""
-    sid = b"sendspin-pair-pake-v1" + _HANDSHAKE_HASH + (0).to_bytes(4, "big")
     await client_ews.send_str(
         ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json()
     )
@@ -1255,6 +1666,74 @@ async def _honest_pake_to_finalize(
             ),
         ).to_json(),
     )
+    return cpace
+
+
+def _psk_finalize_wrapped(sid: bytes, cpace: CPace, psk: bytes) -> str:
+    """Independently build a ``client/pair-finalize`` wrapping ``psk`` under ``sid``."""
+    key = hashlib.sha256(b"sendspin-pair-psk-wrap-v1" + sid + cpace.isk).digest()
+    wrapped = ChaCha20Poly1305(key).encrypt(bytes(12), psk, None)
+    return ClientPairFinalizeMessage(
+        payload=ClientPairFinalizePayload(wrapped_psk=b64url_encode(wrapped))
+    ).to_json()
+
+
+async def test_static_pairing_code_wraps_under_the_round_one_sid() -> None:
+    """The static flow keys and wraps under the sid of round 1."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    psk = generate_psk()
+    sid = _pake_sid(_HANDSHAKE_HASH, 0, 1)
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    async def client() -> None:
+        cpace = await _honest_pake_to_finalize(client_ews, sid=sid)
+        await client_ews.send_str(_psk_finalize_wrapped(sid, cpace, psk))
+
+    server_record, _ = await asyncio.gather(
+        run_static_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+        ),
+        client(),
+    )
+    assert server_record is not None
+    assert server_record.psk == psk
+
+
+# DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+async def test_legacy_rounds_static_server_pairs_under_the_pre_round_sid() -> None:
+    """A static server serving a client predating rounds keys and wraps with the old sid."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    psk = generate_psk()
+    sid = _legacy_pake_sid(_HANDSHAKE_HASH, 0)
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    async def legacy_client() -> None:
+        cpace = await _honest_pake_to_finalize(client_ews, sid=sid)
+        await client_ews.send_str(_psk_finalize_wrapped(sid, cpace, psk))
+
+    server_record, _ = await asyncio.gather(
+        run_static_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            legacy_rounds=True,
+        ),
+        legacy_client(),
+    )
+    assert server_record is not None
+    assert server_record.psk == psk
 
 
 async def test_static_pairing_code_server_rejects_dynamic_only_wrapped_nonce_b() -> None:
@@ -1329,18 +1808,18 @@ async def _dynamic_pake_client(
     client_ews: EncryptedWebSocket,
     pairing_code_future: asyncio.Future[str],
     *,
+    sid: bytes = _pake_sid(_HANDSHAKE_HASH, 0, 1),
     mangle_pairing_code: bool = False,
     mangle_nonce: bool = False,
     mangle_wrap: bool = False,
     omit_wrap: bool = False,
-) -> None:
+) -> CPace:
     """Drive a dynamic PAKE round through ``client/pair-confirm``, optionally cheating.
 
     ``mangle_pairing_code`` emits (and uses) a pairing code not bound to the handshake;
     ``mangle_nonce`` reveals a nonce that does not match the commitment; ``mangle_wrap``
     sends an undecryptable ``wrapped_nonce_B``; ``omit_wrap`` sends none at all.
     """
-    sid = b"sendspin-pair-pake-v1" + _HANDSHAKE_HASH + (0).to_bytes(4, "big")
     nonce_b = pairing_code_mod.generate_nonce()
     await client_ews.send_str(
         ClientPairInitMessage(
@@ -1380,6 +1859,82 @@ async def _dynamic_pake_client(
             ),
         ).to_json(),
     )
+    return cpace
+
+
+# DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+async def test_legacy_rounds_server_pairs_under_the_pre_round_sid() -> None:
+    """A server serving a client predating rounds keys the PAKE and wraps with the old sid."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    psk = generate_psk()
+    sid = _legacy_pake_sid(_HANDSHAKE_HASH, 0)
+
+    async def legacy_client() -> None:
+        cpace = await _dynamic_pake_client(client_ews, pairing_code_future, sid=sid)
+        await client_ews.send_str(_psk_finalize_wrapped(sid, cpace, psk))
+
+    server_record, _ = await asyncio.gather(
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_provider=lambda: pairing_code_future,
+            client_id="client-A",
+            store=server_store,
+            legacy_rounds=True,
+        ),
+        legacy_client(),
+    )
+    assert server_record is not None
+    assert server_record.psk == psk
+
+
+# DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+async def test_legacy_rounds_server_rejects_pair_retry() -> None:
+    """A server serving a client predating rounds runs no retry loop."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    sid = _legacy_pake_sid(_HANDSHAKE_HASH, 0)
+
+    async def client() -> None:
+        nonce_b = pairing_code_mod.generate_nonce()
+        await client_ews.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(
+                    pairing_index=0, commit_B=b64url_encode(pairing_code_mod.commit(nonce_b))
+                ),
+            ).to_json(),
+        )
+        await client_ews.receive()  # server/pair-init
+        pairing_code_future.set_result("123456")
+        cpace = CPace.start(role=CPaceRole.RESPONDER, prs=b"123456", sid=sid, ad=b"client")
+        await client_ews.receive()  # server/pair-auth
+        await client_ews.send_str(
+            ClientPairAuthMessage(
+                payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+            ).to_json(),
+        )
+        await client_ews.receive()  # server/pair-confirm
+        await client_ews.send_str(ClientPairRetryMessage().to_json())
+
+    with pytest.raises(PairingError, match="got ClientPairRetryMessage") as excinfo:
+        await asyncio.gather(
+            run_dynamic_pairing_code_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_format=PairingCodeFormat.DIGITS,
+                pairing_code_provider=lambda: pairing_code_future,
+                client_id="client-A",
+                store=InMemoryServerPairingStore(),
+                legacy_rounds=True,
+            ),
+            client(),
+        )
+    assert not isinstance(excinfo.value, PairingAbortError)
 
 
 async def test_dynamic_pairing_code_mismatched_commit_is_protocol_error() -> None:

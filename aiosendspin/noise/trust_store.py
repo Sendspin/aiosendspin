@@ -24,12 +24,12 @@ from .keys import (
 )
 from .pairing_code import is_valid_static_pairing_code
 
-# Dynamic pairing-code pairing escalates to gesture-gating when its failure counter reaches
-# this value.
-PAIRING_CODE_ESCALATION_THRESHOLD: Final[int] = 5
+# Dynamic-pairing-code rounds since the last verified server_kc after which the client aborts
+# instead of retrying and holds attempts back until an operator action.
+PAIRING_ROUND_LIMIT: Final[int] = 20
 
 __all__ = [
-    "PAIRING_CODE_ESCALATION_THRESHOLD",
+    "PAIRING_ROUND_LIMIT",
     "ClientPairingConfig",
     "ClientPairingRecord",
     "ClientPairingStore",
@@ -442,22 +442,22 @@ class ClientPairingStore(ABC):
         """Return the configured static pairing code, if any."""
 
     @abstractmethod
-    async def pairing_code_failure_count(self) -> int:
-        """Return the persisted dynamic-pairing-code failure count."""
+    async def pairing_round_count(self) -> int:
+        """Return the persisted dynamic-pairing-code round count since the last ``server_kc``."""
 
     @abstractmethod
-    async def record_pairing_code_failure(self) -> int:
-        """Increment the dynamic-pairing-code failure counter and return the new count."""
+    async def record_pairing_round(self) -> int:
+        """Count one more dynamic-pairing-code round and return the new count."""
 
     @abstractmethod
-    async def reset_pairing_code_failures(self) -> None:
-        """Reset the dynamic-pairing-code failure counter to zero (on ``server_kc`` success)."""
+    async def reset_pairing_rounds(self) -> None:
+        """Reset the round count to zero (on a verified ``server_kc`` or an operator action)."""
 
     @abstractmethod
-    async def is_pairing_code_escalated(self) -> bool:
-        """Return whether dynamic pairing code is escalated to gesture-gating.
+    async def is_pairing_round_limit_reached(self) -> bool:
+        """Return whether the round count has reached ``PAIRING_ROUND_LIMIT``.
 
-        Escalation begins when the failure count reaches the threshold.
+        While it has, the client aborts instead of retrying and holds attempts back.
         """
 
     @abstractmethod
@@ -658,7 +658,7 @@ class _ClientPairingStoreBase(ClientPairingStore):
         self._records: dict[str, ClientPairingRecord] = {}
         self._pairing_psk: PairingPsk | None = None
         self._static_pairing_code: str | None = None
-        self._pin_failures = 0
+        self._pairing_rounds = 0
         self._pairing_config: ClientPairingConfig | None = None
         self._last_playback_server_id: str | None = None
 
@@ -764,25 +764,25 @@ class _ClientPairingStoreBase(ClientPairingStore):
         """Return the configured static pairing code, if any."""
         return self._static_pairing_code
 
-    async def pairing_code_failure_count(self) -> int:
-        """Return the dynamic-pairing-code failure count."""
-        return self._pin_failures
+    async def pairing_round_count(self) -> int:
+        """Return the dynamic-pairing-code rounds since the last verified ``server_kc``."""
+        return self._pairing_rounds
 
-    async def record_pairing_code_failure(self) -> int:
-        """Increment the dynamic-pairing-code failure counter and return the new count."""
-        self._pin_failures += 1
+    async def record_pairing_round(self) -> int:
+        """Count one more dynamic-pairing-code round and return the new count."""
+        self._pairing_rounds += 1
         await self._save()
-        return self._pin_failures
+        return self._pairing_rounds
 
-    async def reset_pairing_code_failures(self) -> None:
-        """Reset the dynamic-pairing-code failure counter to zero (no-op if already zero)."""
-        if self._pin_failures:
-            self._pin_failures = 0
+    async def reset_pairing_rounds(self) -> None:
+        """Reset the round count to zero (no-op if already zero)."""
+        if self._pairing_rounds:
+            self._pairing_rounds = 0
             await self._save()
 
-    async def is_pairing_code_escalated(self) -> bool:
-        """Return whether dynamic pairing code has escalated to gesture-gating."""
-        return self._pin_failures >= PAIRING_CODE_ESCALATION_THRESHOLD
+    async def is_pairing_round_limit_reached(self) -> bool:
+        """Return whether the round count has reached ``PAIRING_ROUND_LIMIT``."""
+        return self._pairing_rounds >= PAIRING_ROUND_LIMIT
 
 
 class InMemoryClientPairingStore(_ClientPairingStoreBase):
@@ -835,7 +835,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
         if isinstance(raw_failures, bool) or not isinstance(raw_failures, int):
             msg = "pairing store 'pin_failures' must be an integer"
             raise TypeError(msg)
-        self._pin_failures = raw_failures
+        self._pairing_rounds = raw_failures
         self._last_playback_server_id = _opt_str(data, "last_playback_server_id")
 
     async def _seed(self) -> None:
@@ -855,7 +855,7 @@ class FileClientPairingStore(_ClientPairingStoreBase):
                 "pairing_config": self._pairing_config.to_dict(),
                 "pairing_psk": self._pairing_psk.to_dict() if self._pairing_psk else None,
                 "static_pin": self._static_pairing_code,
-                "pin_failures": self._pin_failures,
+                "pin_failures": self._pairing_rounds,
                 "last_playback_server_id": self._last_playback_server_id,
             }
             await asyncio.to_thread(_atomic_write_json, self._path, payload)

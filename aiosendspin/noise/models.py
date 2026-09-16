@@ -205,10 +205,15 @@ class ClientPairInitMessage(PairingMessage):
 
 @dataclass
 class ServerPairInitPayload(SendspinModel):
-    """``server/pair-init`` payload — the server's nonce contribution (dynamic pairing code)."""
+    """``server/pair-init`` payload — begins a dynamic-pairing-code round."""
 
-    nonce_A: str  # noqa: N815 - spec wire field name
-    """32 bytes from a CSPRNG, base64url-encoded (43 chars)."""
+    nonce_A: str | None = None  # noqa: N815 - spec wire field name
+    """32 bytes from a CSPRNG, base64url-encoded (43 chars). Present in the first round only."""
+
+    class Config(SendspinConfig):
+        """Omit the nonce in the rounds after the first."""
+
+        omit_none = True
 
 
 @dataclass
@@ -265,6 +270,19 @@ class ServerPairConfirmMessage(PairingMessage):
 
     payload: ServerPairConfirmPayload
     type: Literal["server/pair-confirm"] = "server/pair-confirm"
+
+
+@dataclass
+class ClientPairRetryPayload(SendspinModel):
+    """``client/pair-retry`` payload — empty request for another dynamic-pairing-code round."""
+
+
+@dataclass
+class ClientPairRetryMessage(PairingMessage):
+    """Envelope for ``ClientPairRetryPayload``."""
+
+    payload: ClientPairRetryPayload = field(default_factory=ClientPairRetryPayload)
+    type: Literal["client/pair-retry"] = "client/pair-retry"
 
 
 @dataclass
