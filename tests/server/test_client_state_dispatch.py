@@ -75,6 +75,7 @@ def _conn_with_client() -> tuple[SendspinConnection, MagicMock]:
         _DummyServer(loop=loop, clock=LoopClock(loop)), wsock_client=MagicMock()
     )
     client = MagicMock()
+    client.awaits_role_state.return_value = False
     conn._client = client  # noqa: SLF001
     return conn, client
 
@@ -100,6 +101,19 @@ async def test_unsolicited_management_result_is_flagged() -> None:
         timestamp_us=0,
     )
     client.flag_noncompliance.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_state_before_the_initial_gate_opens_is_not_initial() -> None:
+    """A client/state read before any activation needs one (connect-time pairing) is ordinary."""
+    conn, client = _conn_with_client()
+    client.active_roles = []
+    client.available = True
+
+    await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
+
+    client.mark_connected.assert_not_called()
+    assert conn._initial_state_received is False  # noqa: SLF001
 
 
 def _role_mock(deviations: list[str]) -> MagicMock:

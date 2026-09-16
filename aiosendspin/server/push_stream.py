@@ -797,6 +797,8 @@ class PushStream:
     @classmethod
     def _role_in_audio_pipeline(cls, client: SendspinClient, role: Role) -> bool:
         """Whether a specific role should participate in transform/delivery processing."""
+        if client.awaits_role_state(role.role_family):
+            return False
         if cls._client_in_audio_pipeline(client):
             return True
         if not client.has_cold_preinitialized_roles:

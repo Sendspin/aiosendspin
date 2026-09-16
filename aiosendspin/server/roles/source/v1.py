@@ -98,6 +98,10 @@ class SourceV1Role(Role):
         """Require synchronized client state before accepting captured audio."""
         return True
 
+    def requires_activation_state(self) -> bool:
+        """Hold nothing on activation: a source gets no server binary and no stream."""
+        return False
+
     def request_start(self) -> None:
         """Ask the source client to begin streaming (server/command: start)."""
         self._start_requested = True

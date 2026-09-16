@@ -249,6 +249,12 @@ class VisualizerV1Role(Role):
         """Visualizer receives server binary, gated on the client's initial state."""
         return True
 
+    def requires_activation_state(self) -> bool:
+        """Visualizer waits for its client/state request unless the hello configured it."""
+        support = self._client.info.visualizer_support
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        return support is None or not support.has_stream_config
+
     def on_connect(self) -> None:
         """Load the hello's visualizer support and subscribe to group role."""
         support = self._client.info.visualizer_support

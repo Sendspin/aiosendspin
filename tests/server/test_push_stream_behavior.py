@@ -135,6 +135,8 @@ class _FakeConnection:
 
 
 class _DummyRole:
+    role_family = "player"
+
     def __init__(
         self,
         requirements: AudioRequirements,
@@ -188,6 +190,9 @@ class _DummyClient:
         self.is_connected = True
         self.active_roles = roles
         self.connection = _FakeConnection()
+
+    def awaits_role_state(self, role_family: str) -> bool:  # noqa: ARG002
+        return False
 
 
 def _expand_packed_s24_to_s32(data: bytes) -> bytes:

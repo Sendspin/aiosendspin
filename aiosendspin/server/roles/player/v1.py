@@ -893,9 +893,11 @@ class PlayerV1Role(Role):
         before = self._effective_format()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
-        # A connection still awaiting its initial client/state has not joined the stream;
-        # the join picks up the new requirements.
-        joining = self._client.connection is not None and not self._client.is_connected
+        # A role still awaiting its client/state (initial or after activation) has not
+        # joined the stream; the join picks up the new requirements.
+        joining = self._client.connection is not None and (
+            not self._client.is_connected or self._client.awaits_role_state(self.role_family)
+        )
         if (
             not joining
             and self._client.group.has_active_stream

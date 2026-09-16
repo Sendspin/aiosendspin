@@ -168,6 +168,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     mock_client = MagicMock()
     binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
     mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
+    mock_client.awaits_role_state.return_value = False
     conn._client = mock_client  # noqa: SLF001
 
     payload = b"audio_data"
@@ -224,6 +225,7 @@ async def test_writer_does_not_register_without_metadata() -> None:
     mock_client = MagicMock()
     binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
     mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
+    mock_client.awaits_role_state.return_value = False
     conn._client = mock_client  # noqa: SLF001
 
     payload = b"audio_data"
@@ -271,6 +273,7 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
     mock_client = MagicMock()
     binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
     mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
+    mock_client.awaits_role_state.return_value = False
     conn._client = mock_client  # noqa: SLF001
 
     payload = b"audio_data"
@@ -332,6 +335,7 @@ async def test_drop_pending_binary_unblocks_backpressured_role() -> None:
     mock_client = MagicMock()
     binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
     mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
+    mock_client.awaits_role_state.return_value = False
     conn._client = mock_client  # noqa: SLF001
 
     message_type = BinaryMessageType.AUDIO_CHUNK.value
@@ -725,6 +729,7 @@ def _make_connection_with_droppable_client(
     conn._transport = wsock  # noqa: SLF001
     client = MagicMock()
     client.active_roles = []
+    client.awaits_role_state.return_value = False
     role = MagicMock()
     role.get_output_delay_us.return_value = 0
     client.get_binary_handling_cached.return_value = (

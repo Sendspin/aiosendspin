@@ -413,6 +413,13 @@ class Role(ABC):
         """
         return False
 
+    def requires_activation_state(self) -> bool:
+        """Whether this role, activated mid-connection, waits for its client/state object.
+
+        Until that object arrives the role gets no stream and no binary.
+        """
+        return self.requires_initial_state()
+
     def initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:  # noqa: ARG002
         """Spec requirements this role's part of the initial client/state does not meet."""
         return []

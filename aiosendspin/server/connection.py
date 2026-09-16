@@ -60,6 +60,7 @@ from aiosendspin.models.core import (
     LegacyServerHelloPayload,
     ServerActivateMessage,
     ServerActivatePayload,
+    ServerCommandMessage,
     ServerHelloMessage,
     ServerHelloPayload,
     ServerTimeMessage,
@@ -168,6 +169,9 @@ _WARN_INTERVAL_S = 30.0
 
 # Bound the wait for the writer to drain when quiescing.
 QUIESCE_TIMEOUT_S: float = 30.0
+
+# How long a client may take to send the client/state an activation requires.
+_CLIENT_STATE_TIMEOUT_S = 5.0
 
 # Distinct unknown message types warned about per connection; later ones log at debug.
 _MAX_WARNED_UNKNOWN_TYPES = 16
@@ -337,11 +341,15 @@ class SendspinConnection:
 
         self._initial_state_received = False
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
+        self._activation_state_timeout_handle: asyncio.TimerHandle | None = None
         # Binary held while a role that receives binary awaits the initial client/state.
         # The spec forbids sending binary before it; flushed once the state arrives.
         # Each entry carries the role's epoch at buffer time so a stream boundary
         # in the meantime (which bumps the epoch) discards it instead of replaying.
         self._pending_binary: list[tuple[str, int, Callable[[], None]]] = []
+        # Role families being removed by the activation in progress; their teardown
+        # goes out ahead of that server/activate.
+        self._retiring_roles: set[str] = set()
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._warned_unknown_types: set[str] = set()
@@ -414,10 +422,11 @@ class SendspinConnection:
         return any(role.requires_initial_state() for role in self._client.active_roles)
 
     def _flush_pending_binary(self) -> None:
-        """Enqueue binary held until the initial client/state arrived, dropping stale entries."""
+        """Enqueue held binary whose role is no longer held, dropping stale entries."""
         pending, self._pending_binary = self._pending_binary, []
         for role, epoch, send in pending:
             # A stream boundary during the wait bumped the epoch; that data is stale.
+            # A role that is still held puts its entry back.
             if epoch == self._epoch_by_role[role]:
                 send()
 
@@ -485,8 +494,10 @@ class SendspinConnection:
             player_audio_header: Prepend the player audio header, stamped with
                 send_ahead immediately before transmission.
         """
-        if self.requires_initial_state() and not self._initial_state_received:
-            # No binary before the client's initial state; replay once it arrives,
+        if (self._client is not None and self._client.awaits_role_state(role)) or (
+            self.requires_initial_state() and not self._initial_state_received
+        ):
+            # No binary before the client's state for this role; replay once it arrives,
             # tagged with the current epoch so a stream boundary can invalidate it.
             self._pending_binary.append(
                 (
@@ -626,6 +637,11 @@ class SendspinConnection:
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 
+        if role in self._retiring_roles:
+            # A removed role's teardown reaches the wire before the server/activate.
+            self.send_priority_message(message)
+            return
+
         if self._is_role_queue_full(role):
             self._disconnect_due_to_queue_overflow(
                 f"Role queue full for {role} ({len(self._role_queues.get(role, []))}/"
@@ -702,6 +718,7 @@ class SendspinConnection:
         if self._initial_state_timeout_handle is not None:
             self._initial_state_timeout_handle.cancel()
             self._initial_state_timeout_handle = None
+        self._cancel_activation_state_timeout()
 
         if self._pairing_task and not self._pairing_task.done():
             # Ends like end_pairing: the attempt aborts instead of waiting out its timeout.
@@ -743,6 +760,8 @@ class SendspinConnection:
         # Lenient: keep the connection and mark the client connected anyway.
         if self._client is not None:
             self._initial_state_received = True
+            self._client.release_all_role_holds()
+            self._cancel_activation_state_timeout()
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
             self._flush_pending_binary()
@@ -1043,10 +1062,12 @@ class SendspinConnection:
 
         if self.requires_initial_state():
             self._initial_state_timeout_handle = self._server.loop.call_later(
-                5.0, self._initial_state_timeout_callback
+                _CLIENT_STATE_TIMEOUT_S, self._initial_state_timeout_callback
             )
         else:
             assert self._client is not None
+            # Nothing to wait for: roles activated later are held until their own state.
+            self._initial_state_received = True
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
         return True
@@ -1765,18 +1786,81 @@ class SendspinConnection:
             self._declared_activities = self._initial_activities
         else:
             self._declared_activities = self._desired_activities
-        active_roles = self._roles_to_activate
-        await self._transport.send_str(
+        self._send_activation(self._roles_to_activate)
+        # The writer is paused here, so put the queued activation on the wire now.
+        while await self._process_priority_messages(self._transport):
+            pass
+        self._resume_writer()
+
+    def _send_activation(self, active_roles: list[str]) -> None:
+        """Queue ``server/activate`` behind the teardown of the roles it removes, then add roles."""
+        assert self._client is not None
+        assert self._declared_activities is not None
+        retiring = {
+            role.role_family
+            for role in self._client.active_roles
+            if role.role_id not in active_roles
+        }
+        for role in retiring:
+            self._discard_role_queue(role)
+        self._retiring_roles = retiring
+        try:
+            self._client.deactivate_roles(active_roles)
+        finally:
+            self._retiring_roles = set()
+        self.send_priority_message(
             ServerActivateMessage(
                 payload=ServerActivatePayload(
-                    activities=self._declared_activities,
-                    active_roles=active_roles,
+                    activities=self._declared_activities, active_roles=active_roles
                 )
-            ).to_json()
+            )
         )
-        assert self._client is not None
         self._client.set_active_roles(active_roles)
-        self._resume_writer()
+        if not self._initial_state_received:
+            return  # The initial client/state releases every role, under its own timeout.
+        if self._held_roles():
+            self._arm_activation_state_timeout()
+
+    def _held_roles(self) -> list[Role]:
+        """Active roles still waiting for their client/state object."""
+        assert self._client is not None
+        return [
+            role
+            for role in self._client.active_roles
+            if self._client.awaits_role_state(role.role_family)
+        ]
+
+    def _arm_activation_state_timeout(self) -> None:
+        self._cancel_activation_state_timeout()
+        self._activation_state_timeout_handle = self._server.loop.call_later(
+            _CLIENT_STATE_TIMEOUT_S, self._activation_state_timeout_callback
+        )
+
+    def _cancel_activation_state_timeout(self) -> None:
+        if self._activation_state_timeout_handle is not None:
+            self._activation_state_timeout_handle.cancel()
+            self._activation_state_timeout_handle = None
+
+    def _activation_state_timeout_callback(self) -> None:
+        """Flag a client that did not send a held role's object in time, then start the role."""
+        self._activation_state_timeout_handle = None
+        if self._client is None:
+            return
+        held = self._held_roles()
+        if not held:
+            return
+        try:
+            for role in held:
+                self._flag_noncompliance(
+                    f"did not send the {role.role_family} client/state object "
+                    "after server/activate in time"
+                )
+        except ClientComplianceError:
+            # A timer callback can't propagate into the message loop, so tear down here.
+            create_task(self.disconnect(retry_connection=False))
+            return
+        # Lenient: start the roles without their state.
+        self._release_roles(held)
 
     async def refresh_trusted_unpaired(self) -> None:
         """Re-read the trusted-unpaired approval and re-activate roles.
@@ -1797,16 +1881,8 @@ class SendspinConnection:
             if was_trusted and not self._trusted_unpaired:
                 await self.end_pairing()
             return
-        active_roles = self._roles_to_activate
         self._declared_activities = self._desired_activities
-        self.send_priority_message(
-            ServerActivateMessage(
-                payload=ServerActivatePayload(
-                    activities=self._declared_activities, active_roles=active_roles
-                )
-            )
-        )
-        self._client.set_active_roles(active_roles)
+        self._send_activation(self._roles_to_activate)
 
     def enable_management(self) -> None:
         """Add ``management`` to this connection's activities; requires a paired connection."""
@@ -2187,26 +2263,24 @@ class SendspinConnection:
             return
 
         # Validate before applying initial state.
-        is_initial = self.requires_initial_state() and not self._initial_state_received
+        # Still initial once its timeout runs, even if the roles that needed it were removed.
+        is_initial = not self._initial_state_received and (
+            self.requires_initial_state() or self._initial_state_timeout_handle is not None
+        )
         if is_initial:
             self._flag_initial_state_deviations(payload)
         if payload.legacy_state_used:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
-        self._flag_inactive_role_payloads(
-            "client/state",
-            {
-                "player": payload.player,
-                "source": payload.source,
-                "artwork": payload.artwork,
-                "visualizer": payload.visualizer,
-            },
-        )
+        self._flag_inactive_role_payloads("client/state", self._role_state_objects(payload))
         for role in self._client.active_roles:
             for reason in role.client_state_deviations(payload):
                 self._flag_noncompliance(f"client/state {reason}")
 
+        released: list[Role] = []
         if is_initial:
             self._initial_state_received = True
+            self._client.release_all_role_holds()
+            self._cancel_activation_state_timeout()
             if self._initial_state_timeout_handle is not None:
                 self._initial_state_timeout_handle.cancel()
                 self._initial_state_timeout_handle = None
@@ -2215,11 +2289,65 @@ class SendspinConnection:
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
             self._flush_pending_binary()
+        else:
+            released = self._apply_activation_state(payload)
+            if released:
+                # Their state is here: the timeout must not start them during the dispatch.
+                self._cancel_activation_state_timeout()
 
         if payload.available is not None and payload.available != self._client.available:
             await self._client.handle_availability_change(available=payload.available)
         for role in self._client.active_roles:
             role.on_client_state(payload)
+        if released:
+            # After the dispatch, so the join schedules with this state's timing.
+            self._release_roles(released)
+
+    @staticmethod
+    def _role_state_objects(payload: ClientStatePayload) -> dict[str, object]:
+        """Map each role family that has a client/state object to that object."""
+        return {
+            "player": payload.player,
+            "source": payload.source,
+            "artwork": payload.artwork,
+            "visualizer": payload.visualizer,
+        }
+
+    def _apply_activation_state(self, payload: ClientStatePayload) -> list[Role]:
+        """Apply a client/state to the held roles whose object it carries, and return them."""
+        objects = self._role_state_objects(payload)
+        released = [
+            role for role in self._held_roles() if objects.get(role.role_family) is not None
+        ]
+        for role in released:
+            for reason in role.initial_state_deviations(payload):
+                self._flag_noncompliance(f"client/state after server/activate {reason}")
+            # Still held, so a join the role attempts here is a no-op; the release starts it.
+            role.on_initial_client_state(payload)
+        return released
+
+    def _release_roles(self, roles: list[Role]) -> None:
+        """Stop holding ``roles``, send their held binary and join them to the running stream.
+
+        Roles no longer active or already released are skipped; any other held role keeps a
+        running timeout.
+        """
+        assert self._client is not None
+        roles = [
+            role
+            for role in roles
+            if role in self._client.active_roles
+            and self._client.awaits_role_state(role.role_family)
+        ]
+        for role in roles:
+            self._client.release_role_hold(role.role_family)
+        if self._held_roles():
+            self._arm_activation_state_timeout()
+        else:
+            self._cancel_activation_state_timeout()
+        self._flush_pending_binary()
+        for role in roles:
+            self._client.join_active_stream(role)
 
     def _late_binary_diagnostics(
         self, role: Role, entry: _RoleQueueEntry, now_us: int, elapsed_us: int
@@ -2397,6 +2525,31 @@ class SendspinConnection:
         if role_queue := self._role_queues.get(role):
             head_sort_ts, head_seq, _ = role_queue[0]
             heapq.heappush(self._ready_roles, (head_sort_ts, head_seq, role))
+
+    def _discard_role_queue(self, role: str) -> None:
+        """Drop everything still queued or held for a role, except a stream/end it still owes."""
+        if role_queue := self._role_queues.pop(role, None):
+            self._queue_size = max(self._queue_size - len(role_queue), 0)
+            lifecycle = [
+                entry.json_message
+                for _, _, entry in sorted(role_queue)
+                if isinstance(entry.json_message, StreamStartMessage | StreamEndMessage)
+            ]
+            if lifecycle and isinstance(lifecycle[-1], StreamEndMessage):
+                # The role considers this stream ended and will not send the end again.
+                self.send_priority_message(lifecycle[-1])
+        # Commands are control messages, keyed in their payload by role family.
+        commands = [
+            message
+            for message in self._normal_messages
+            if isinstance(message, ServerCommandMessage)
+            and getattr(message.payload, role, None) is not None
+        ]
+        for message in commands:
+            self._normal_messages.remove(message)
+        self._queue_size = max(self._queue_size - len(commands), 0)
+        self._last_enqueued_ts_by_role.pop(role, None)
+        self.drop_pending_binary([role])
 
     def _discard_role_head(self, role: str) -> None:
         role_queue = self._role_queues.get(role)

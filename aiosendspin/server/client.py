@@ -115,6 +115,9 @@ class SendspinClient:
         self._roles_warm_disconnected: bool = False
         self._roles_cold_preinitialized: bool = False
         self._roles_attached: bool = False
+        # Families of roles activated on the current connection that still wait for
+        # their client/state object; they get no stream or binary until it arrives.
+        self._roles_awaiting_state: set[str] = set()
 
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
@@ -482,6 +485,7 @@ class SendspinClient:
 
         self._connection = connection
         self._connected = False  # set True once initial state is received (spec)
+        self._roles_awaiting_state.clear()
         self._cleanup_on_mdns_removal = False
         on_transport_attached = getattr(self._server, "on_client_transport_attached", None)
         if callable(on_transport_attached):
@@ -550,33 +554,65 @@ class SendspinClient:
                 self._rebuild_binary_handling_cache()
             return
 
-        # Tear down in reverse attach order: the controller unwinds before the player it reads.
-        for role_id in reversed(list(self._roles)):
-            if role_id not in desired_set:
-                deactivated_role = self._roles.pop(role_id)
-                deactivated_role.on_deactivate()
-                self.group.on_role_deactivated(deactivated_role)
+        self.deactivate_roles(active_role_ids)
 
         roles: dict[str, Role] = {}
+        activated: list[Role] = []
         for role_id in active_role_ids:
             role = self._roles.get(role_id)
             if role is None:
                 role = create_role(role_id, self)
                 if role is None:
                     continue
+                if role.requires_activation_state():
+                    self._roles_awaiting_state.add(role.role_family)
                 role.on_connect()
-                self.group.on_role_activated(role)
+                activated.append(role)
             roles[role.role_id] = role
         self._roles = roles
 
         self._rebuild_binary_handling_cache()
+        for role in activated:
+            self.join_active_stream(role)
+
+    def deactivate_roles(self, active_role_ids: list[str]) -> None:
+        """Deactivate every active role missing from ``active_role_ids``."""
+        desired_set = set(active_role_ids)
+        deactivated = False
+        # Tear down in reverse attach order: the controller unwinds before the player it reads.
+        for role_id in reversed(list(self._roles)):
+            if role_id not in desired_set:
+                deactivated_role = self._roles.pop(role_id)
+                self._roles_awaiting_state.discard(deactivated_role.role_family)
+                deactivated_role.on_deactivate()
+                self.group.on_role_deactivated(deactivated_role)
+                deactivated = True
+        if deactivated:
+            self._rebuild_binary_handling_cache()
+
+    def awaits_role_state(self, role_family: str) -> bool:
+        """Whether an activated role's stream and binary wait for its client/state object."""
+        return role_family in self._roles_awaiting_state
+
+    def release_role_hold(self, role_family: str) -> None:
+        """Stop holding a role whose client/state object has arrived."""
+        self._roles_awaiting_state.discard(role_family)
+
+    def release_all_role_holds(self) -> None:
+        """Stop holding every role."""
+        self._roles_awaiting_state.clear()
 
     def join_active_stream(self, role: Role) -> None:
-        """Join an active role to its group's running stream, once the client is connected.
+        """Join an active, released role to its group's running stream.
 
-        For a role whose stream waits on client/state it received after connecting.
+        Does nothing until the client is connected or while the role awaits its
+        client/state object.
         """
-        if self._connected and self._roles.get(role.role_id) is role:
+        if (
+            self._connected
+            and self._roles.get(role.role_id) is role
+            and not self.awaits_role_state(role.role_family)
+        ):
             self.group.on_role_activated(role)
 
     def refresh_identity_from_hello(
@@ -741,6 +777,7 @@ class SendspinClient:
             for role in reversed(self._roles.values()):
                 role.on_disconnect()
         self._roles.clear()
+        self._roles_awaiting_state.clear()
         self._active_roles = None
         self._binary_handling_cache.clear()
         self._roles_cold_preinitialized = False
