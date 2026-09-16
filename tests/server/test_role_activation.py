@@ -25,6 +25,7 @@ from aiosendspin.models.player import (
     PlayerStatePayload,
     SupportedAudioFormat,
 )
+from aiosendspin.models.source import ClientHelloSourceSupport
 from aiosendspin.models.types import (
     ArtworkSource,
     AudioCodec,
@@ -81,6 +82,7 @@ def _hello(roles: list[str], *, legacy: bool = False) -> ClientHelloPayload:
             supported_commands=[],
         ),
         artwork_support=ClientHelloArtworkSupport(channels=[_ARTWORK_CHANNEL]) if legacy else None,
+        source_support=ClientHelloSourceSupport(),
         visualizer_support=ClientHelloVisualizerSupport(
             buffer_capacity=10_000,
             rate_max=30 if legacy else None,
@@ -107,7 +109,11 @@ def _full_state() -> ClientStatePayload:
 
 
 async def _connect(
-    hello: ClientHelloPayload, *, trusted: bool = True, send_state: bool = True
+    hello: ClientHelloPayload,
+    *,
+    trusted: bool = True,
+    send_state: bool = True,
+    category: PskCategory = PskCategory.SENTINEL,
 ) -> tuple[SendspinConnection, _FakeTransport]:
     """Connect an unpaired client; a trusted one also delivers its initial client/state."""
     loop = asyncio.get_running_loop()
@@ -118,7 +124,7 @@ async def _connect(
     psk = generate_psk()
     conn._client_id = CLIENT_ID  # noqa: SLF001
     conn._noise_psk = ResolvedPsk(  # noqa: SLF001
-        psk_id=psk_id_for(psk), psk=psk, category=PskCategory.SENTINEL, counterparty_id=CLIENT_ID
+        psk_id=psk_id_for(psk), psk=psk, category=category, counterparty_id=CLIENT_ID
     )
     fake = _FakeTransport([WSMessage(WSMsgType.TEXT, ClientHelloMessage(hello).to_json(), "")])
     conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
@@ -445,3 +451,23 @@ async def test_held_player_joins_with_the_timing_of_its_state() -> None:
         await conn._handle_client_state(ClientStatePayload(player=state))  # noqa: SLF001
 
     assert timing_at_join == [(40, 500, 2000)]
+
+
+@pytest.mark.asyncio
+async def test_reactivated_source_is_not_held() -> None:
+    """A source has no stream or binary to hold, so an availability-only state is enough."""
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value, "source@v1"]), category=PskCategory.LONG_TERM
+    )
+    client = _client(conn)
+    conn._send_activation([Roles.PLAYER.value])  # noqa: SLF001
+    conn._send_activation([Roles.PLAYER.value, "source@v1"])  # noqa: SLF001
+
+    assert client.role("source@v1") is not None
+    assert not client.awaits_role_state("source")
+    with patch.object(conn, "_flag_noncompliance") as flag:
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=True, player=_PLAYER_STATE)
+        )
+    flag.assert_not_called()
+    assert conn._activation_state_timeout_handle is None  # noqa: SLF001
