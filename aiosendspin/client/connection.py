@@ -1035,6 +1035,8 @@ class SendspinConnection:
         if not self._connected:
             return
         self._connected = False
+        for name in list(self._pending_state):
+            self._discard_pending_state(name)
 
         current_task = asyncio.current_task(loop=self._client.loop)
         if self._pairing_task is not None and self._pairing_task is not current_task:
@@ -1061,8 +1063,6 @@ class SendspinConnection:
         self._noise_psk = None
         self._group_state = None
         self._server_state = None
-        for name in list(self._pending_state):
-            self._discard_pending_state(name)
         self._stream_active = False
         self._current_audio_format = None
         self._current_player = None
