@@ -47,16 +47,18 @@ class PairingSupport:
     pairing_code_display: PairingCodeDisplay | None = None
     """Visual out-channel for the derived dynamic pairing code (``digits`` format).
 
-    Called with ``None`` when the pairing exchange ends so the channel can clear.
+    Called with the same code at the start of every round, and with ``None`` when the
+    pairing exchange ends so the channel can clear.
     """
     pairing_code_speaker: PairingCodeSpeaker | None = None
     """Spoken out-channel for the derived dynamic pairing code, which also receives the operator's
-    language preferences."""
+    language preferences. Called with the same code at the start of every round."""
     qr_code_display: QRCodeDisplay | None = None
     """Display able to render the dynamic pairing token as a QR code (``qr_code`` format).
 
-    Its presence offers the ``qr_code`` emission format. Called with ``None`` when the
-    pairing exchange ends so the display can clear.
+    Its presence offers the ``qr_code`` emission format. Called with the same token at the
+    start of every round, and with ``None`` when the pairing exchange ends so the display
+    can clear.
     """
     offer_static_pairing_code: bool = True
     """Whether to offer ``static_pairing_code`` for a device without a per-device code."""

@@ -51,6 +51,7 @@ from .models import (
     ServerPairFinalizePayload,
 )
 from .pairing import (
+    InvalidPairingCodeError,
     PairingError,
     run_dynamic_pairing_code_client,
     run_dynamic_pairing_code_server,
@@ -114,6 +115,7 @@ __all__ = [
     "InMemoryClientPairingStore",
     "InMemoryServerPairingStore",
     "InitRejectedError",
+    "InvalidPairingCodeError",
     "NoiseCipherSuite",
     "NoiseHandshakeMessage",
     "NoiseHandshakePayload",

@@ -223,9 +223,7 @@ class PairingMethodConfig(SendspinModel):
 
     enabled: bool
     escalated: bool | None = None
-    """For dynamic pairing code only: ``true`` when the failure counter
-    escalated it to gesture-gating.
-    """
+    """For dynamic pairing code only: ``true`` while the round limit holds attempts back."""
 
     class Config(SendspinConfig):
         """Omit method-specific fields where they do not apply."""

@@ -32,7 +32,12 @@ from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.noise.keys import Identity
-from aiosendspin.noise.pairing import PairingAbortError, PairingAttempt, PairingTimeoutError
+from aiosendspin.noise.pairing import (
+    InvalidPairingCodeError,
+    PairingAbortError,
+    PairingAttempt,
+    PairingTimeoutError,
+)
 from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedClient
 from aiosendspin.util import create_task, get_local_ip
 
@@ -582,13 +587,13 @@ class SendspinServer:
         """Run a pairing attempt on a connected client.
 
         A pair abort raises and leaves the connection open (retry with another
-        ``initiate_pairing`` or drop out with ``end_pairing``); a server-side timeout
-        raises with pairing already left; other failures disconnect.
+        ``initiate_pairing`` or drop out with ``end_pairing``); a server-side timeout or
+        ``InvalidPairingCodeError`` raises with pairing already left; other failures disconnect.
         """
         connection = self._connection_for(client_id)
         try:
             await connection.initiate_pairing(attempt)
-        except (PairingAbortError, PairingTimeoutError):
+        except (PairingAbortError, PairingTimeoutError, InvalidPairingCodeError):
             raise
         except BaseException:
             await connection.disconnect(retry_connection=False)

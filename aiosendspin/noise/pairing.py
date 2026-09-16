@@ -27,6 +27,7 @@ from .models import (
     ClientPairInitMessage,
     ClientPairInitPayload,
     ClientPairPendingMessage,
+    ClientPairRetryMessage,
     PairAbortMessage,
     PairAbortPayload,
     PairingMessage,
@@ -75,6 +76,10 @@ class PairingTimeoutError(PairingError):
     """A server-side bound on waiting for a client pairing message expired."""
 
 
+class InvalidPairingCodeError(PairingError):
+    """The operator-entered pairing code or token is malformed; nothing was sent for it."""
+
+
 class PairingAbortError(PairingError):
     """A pairing attempt ended with a ``pair/abort`` carrying ``reason`` (base)."""
 
@@ -105,7 +110,10 @@ class PairingAttempt:
 
     method: PairMethod
     pairing_code_provider: PairingCodeProvider | None = None
-    """Required for code methods; supplies the operator-entered pairing code or token."""
+    """Required for code methods; supplies the operator-entered pairing code or token.
+
+    Called once per dynamic-pairing-code round.
+    """
     pairing_format: PairingCodeFormat | None = None
     """Emission format for the dynamic pairing code; absent for the other methods."""
     pairing_psk: bytes | None = None
@@ -113,7 +121,7 @@ class PairingAttempt:
     verify: bool = False
     """Re-verify an already-paired client instead of pairing anew."""
     on_pair_pending: Callable[[], None] | None = None
-    """Called when the client reports the attempt gesture-gated."""
+    """Called when the client reports the attempt gesture-gated or held back."""
     owner: str | None = None
     """Application-defined authorization id the resulting record is bound to."""
 
@@ -257,7 +265,6 @@ async def run_dynamic_pairing_code_client(
 
     Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
     """
-    sid = _pake_sid(handshake_hash, pairing_index)
     nonce_b = pairing_code_mod.generate_nonce()
     async with _client_timeout(ws):
         await ws.send_str(
@@ -269,7 +276,10 @@ async def run_dynamic_pairing_code_client(
             ).to_json(),
         )
 
+        round_number = 1
         init = await _receive_pairing(ws, ServerPairInitMessage)
+        if init.payload.nonce_A is None:
+            raise PairingError("first server/pair-init is missing nonce_A")
         nonce_a = _decode_field(
             init.payload.nonce_A, "nonce_A", expect_len=pairing_code_mod.NONCE_SIZE
         )
@@ -279,33 +289,22 @@ async def run_dynamic_pairing_code_client(
         else:
             prs = pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
             pairing_code = encode_pairing_code_token(prs)
-        await pairing_code_emitter(pairing_code)
-        try:
-            cpace = CPace.start(role=CPaceRole.RESPONDER, prs=prs, sid=sid, ad=_PAKE_AD_CLIENT)
-        except CPaceError as exc:
-            raise PairingError("CPace initialization failed") from exc
-
-        auth = await _receive_pairing(ws, ServerPairAuthMessage)
-        await ws.send_str(
-            ClientPairAuthMessage(
-                payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
-            ).to_json(),
-        )
-        peer_share = _decode_field(
-            auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
-        )
-        try:
-            cpace.derive(peer_share, _PAKE_AD_SERVER)
-        except CPaceError as exc:
-            raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
-
-        confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
-        if not cpace.verify(
-            _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
-        ):
-            await store.record_pairing_code_failure()
-            await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
-        await store.reset_pairing_code_failures()
+        while True:
+            # The round counts once its code is being emitted, even if the attempt then ends.
+            await store.record_pairing_round()
+            await pairing_code_emitter(pairing_code)
+            sid = _pake_sid(handshake_hash, pairing_index, round_number)
+            cpace, verified = await _run_client_pake(ws, prs, sid)
+            if verified:
+                break
+            if await store.is_pairing_round_limit_reached():
+                await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
+            await ws.send_str(ClientPairRetryMessage().to_json())
+            round_number += 1
+            init = await _receive_pairing(ws, ServerPairInitMessage)
+            if init.payload.nonce_A is not None:
+                raise PairingError("server/pair-init carries nonce_A after the first round")
+        await store.reset_pairing_rounds()
         wrapped_nonce = _wrap_aead(
             ws.session.suite, _wrap_key(_NONCE_WRAP_LABEL, sid, cpace)
         ).encrypt(_WRAP_NONCE, nonce_b, None)
@@ -326,7 +325,7 @@ async def run_dynamic_pairing_code_client(
         )
 
 
-async def run_dynamic_pairing_code_server(
+async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     ws: EncryptedWebSocket,
     *,
     handshake_hash: bytes,
@@ -338,12 +337,15 @@ async def run_dynamic_pairing_code_server(
     verify: bool = False,
     on_pair_pending: Callable[[], None] | None = None,
     owner: str | None = None,
+    # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+    legacy_rounds: bool = False,
 ) -> ServerPairingRecord | None:
     """Run the server side of the dynamic-pairing-code flow.
 
     Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
+    Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
+    client predating rounds: one round under the ``sid`` without a round number.
     """
-    sid = _pake_sid(handshake_hash, pairing_index)
     init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
     if init.payload.commit_B is None:
         raise PairingError("client/pair-init missing commit_B for dynamic pairing code")
@@ -352,50 +354,29 @@ async def run_dynamic_pairing_code_server(
     )
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
         nonce_a = pairing_code_mod.generate_nonce()
-        await ws.send_str(
-            ServerPairInitMessage(
-                payload=ServerPairInitPayload(nonce_A=b64url_encode(nonce_a)),
-            ).to_json(),
-        )
-        entered = await pairing_code_provider()
-        if pairing_format is PairingCodeFormat.DIGITS:
-            if (
-                not entered.isascii()
-                or not entered.isdigit()
-                or len(entered) != pairing_code_mod.DYNAMIC_DIGITS
-            ):
-                raise PairingError("dynamic pairing code must be exactly 6 ASCII digits")
-            prs = entered.encode("ascii")
-        else:
-            try:
-                prs = decode_pairing_code_token(entered)
-            except ValueError as exc:
-                raise PairingError("malformed pairing token") from exc
-        try:
-            cpace = CPace.start(role=CPaceRole.INITIATOR, prs=prs, sid=sid, ad=_PAKE_AD_SERVER)
-        except CPaceError as exc:
-            raise PairingError("CPace initialization failed") from exc
-        await ws.send_str(
-            ServerPairAuthMessage(
-                payload=ServerPairAuthPayload(pake_msg_1=b64url_encode(cpace.public_share)),
-            ).to_json(),
-        )
+        init_payload = ServerPairInitPayload(nonce_A=b64url_encode(nonce_a))
+        round_number = 1
+        while True:
+            await ws.send_str(ServerPairInitMessage(payload=init_payload).to_json())
+            prs = _entered_dynamic_prs(await pairing_code_provider(), pairing_format)
+            # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+            sid = (
+                _legacy_pake_sid(handshake_hash, pairing_index)
+                if legacy_rounds
+                else _pake_sid(handshake_hash, pairing_index, round_number)
+            )
+            cpace = await _run_server_pake(ws, prs, sid)
+            # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+            if legacy_rounds:
+                confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
+                break
+            reply = await _receive_pairing(ws, (ClientPairConfirmMessage, ClientPairRetryMessage))
+            if isinstance(reply, ClientPairConfirmMessage):
+                confirm = reply
+                break
+            round_number += 1
+            init_payload = ServerPairInitPayload()
 
-        auth = await _receive_pairing(ws, ClientPairAuthMessage)
-        peer_share = _decode_field(
-            auth.payload.pake_msg_2, "pake_msg_2", expect_len=_PAKE_SHARE_SIZE
-        )
-        try:
-            cpace.derive(peer_share, _PAKE_AD_CLIENT)
-        except CPaceError as exc:
-            raise PairingError("malformed pake_msg_2: invalid CPace share") from exc
-        await ws.send_str(
-            ServerPairConfirmMessage(
-                payload=ServerPairConfirmPayload(server_kc=b64url_encode(cpace.tag())),
-            ).to_json(),
-        )
-
-        confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
         if not cpace.verify(
             _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
         ):
@@ -450,41 +431,15 @@ async def run_static_pairing_code_client(
     The caller has opened the pairing window. Returns ``None`` on finalize,
     else the raw ``server/activate`` leave frame.
     """
-    sid = _pake_sid(handshake_hash, pairing_index)
+    sid = _pake_sid(handshake_hash, pairing_index, 1)
     async with _client_timeout(ws):
         await ws.send_str(
             ClientPairInitMessage(
                 payload=ClientPairInitPayload(pairing_index=pairing_index),
             ).to_json(),
         )
-        try:
-            cpace = CPace.start(
-                role=CPaceRole.RESPONDER,
-                prs=static_pairing_code.encode("ascii"),
-                sid=sid,
-                ad=_PAKE_AD_CLIENT,
-            )
-        except CPaceError as exc:
-            raise PairingError("CPace initialization failed") from exc
-
-        auth = await _receive_pairing(ws, ServerPairAuthMessage)
-        await ws.send_str(
-            ClientPairAuthMessage(
-                payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
-            ).to_json(),
-        )
-        peer_share = _decode_field(
-            auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE
-        )
-        try:
-            cpace.derive(peer_share, _PAKE_AD_SERVER)
-        except CPaceError as exc:
-            raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
-
-        confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
-        if not cpace.verify(
-            _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
-        ):
+        cpace, verified = await _run_client_pake(ws, static_pairing_code.encode("ascii"), sid)
+        if not verified:
             await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
         await ws.send_str(
             ClientPairConfirmMessage(
@@ -511,47 +466,29 @@ async def run_static_pairing_code_server(
     verify: bool = False,
     on_pair_pending: Callable[[], None] | None = None,
     owner: str | None = None,
+    # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+    legacy_rounds: bool = False,
 ) -> ServerPairingRecord | None:
     """Run the server side of the static-pairing-code flow.
 
     Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
+    Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
+    client predating rounds with the ``sid`` without a round number.
     """
-    sid = _pake_sid(handshake_hash, pairing_index)
+    # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+    sid = (
+        _legacy_pake_sid(handshake_hash, pairing_index)
+        if legacy_rounds
+        else _pake_sid(handshake_hash, pairing_index, 1)
+    )
     init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
     if init.payload.commit_B is not None:
         raise PairingError("client/pair-init carries commit_B for static pairing code")
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
-        pairing_code = await pairing_code_provider()
+        pairing_code = pairing_code_mod.strip_separators(await pairing_code_provider())
         if not pairing_code_mod.is_valid_static_pairing_code(pairing_code):
-            raise PairingError("static pairing code must be exactly 8 decimal digits")
-        try:
-            cpace = CPace.start(
-                role=CPaceRole.INITIATOR,
-                prs=pairing_code.encode("ascii"),
-                sid=sid,
-                ad=_PAKE_AD_SERVER,
-            )
-        except CPaceError as exc:
-            raise PairingError("CPace initialization failed") from exc
-        await ws.send_str(
-            ServerPairAuthMessage(
-                payload=ServerPairAuthPayload(pake_msg_1=b64url_encode(cpace.public_share)),
-            ).to_json(),
-        )
-
-        auth = await _receive_pairing(ws, ClientPairAuthMessage)
-        peer_share = _decode_field(
-            auth.payload.pake_msg_2, "pake_msg_2", expect_len=_PAKE_SHARE_SIZE
-        )
-        try:
-            cpace.derive(peer_share, _PAKE_AD_CLIENT)
-        except CPaceError as exc:
-            raise PairingError("malformed pake_msg_2: invalid CPace share") from exc
-        await ws.send_str(
-            ServerPairConfirmMessage(
-                payload=ServerPairConfirmPayload(server_kc=b64url_encode(cpace.tag())),
-            ).to_json(),
-        )
+            raise InvalidPairingCodeError("static pairing code must be exactly 8 decimal digits")
+        cpace = await _run_server_pake(ws, pairing_code.encode("ascii"), sid)
 
         confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
         if confirm.payload.wrapped_nonce_B is not None:
@@ -572,6 +509,72 @@ async def run_static_pairing_code_server(
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             owner=owner,
         )
+
+
+def _entered_dynamic_prs(entered: str, pairing_format: PairingCodeFormat) -> bytes:
+    """Return the CPace ``PRS`` for an operator-entered dynamic pairing code or token."""
+    if pairing_format is PairingCodeFormat.DIGITS:
+        code = pairing_code_mod.strip_separators(entered)
+        if not code.isascii() or not code.isdigit() or len(code) != pairing_code_mod.DYNAMIC_DIGITS:
+            raise InvalidPairingCodeError("dynamic pairing code must be exactly 6 ASCII digits")
+        return code.encode("ascii")
+    try:
+        return decode_pairing_code_token(entered)
+    except ValueError as exc:
+        raise InvalidPairingCodeError("malformed pairing token") from exc
+
+
+async def _run_server_pake(ws: EncryptedWebSocket, prs: bytes, sid: bytes) -> CPace:
+    """Run the server's side of a CPace exchange through ``server/pair-confirm``."""
+    try:
+        cpace = CPace.start(role=CPaceRole.INITIATOR, prs=prs, sid=sid, ad=_PAKE_AD_SERVER)
+    except CPaceError as exc:
+        raise PairingError("CPace initialization failed") from exc
+    await ws.send_str(
+        ServerPairAuthMessage(
+            payload=ServerPairAuthPayload(pake_msg_1=b64url_encode(cpace.public_share)),
+        ).to_json(),
+    )
+
+    auth = await _receive_pairing(ws, ClientPairAuthMessage)
+    peer_share = _decode_field(auth.payload.pake_msg_2, "pake_msg_2", expect_len=_PAKE_SHARE_SIZE)
+    try:
+        cpace.derive(peer_share, _PAKE_AD_CLIENT)
+    except CPaceError as exc:
+        raise PairingError("malformed pake_msg_2: invalid CPace share") from exc
+    await ws.send_str(
+        ServerPairConfirmMessage(
+            payload=ServerPairConfirmPayload(server_kc=b64url_encode(cpace.tag())),
+        ).to_json(),
+    )
+    return cpace
+
+
+async def _run_client_pake(ws: EncryptedWebSocket, prs: bytes, sid: bytes) -> tuple[CPace, bool]:
+    """Run the client's side of a CPace exchange through ``server/pair-confirm``.
+
+    Returns the CPace state and whether ``server_kc`` verified.
+    """
+    try:
+        cpace = CPace.start(role=CPaceRole.RESPONDER, prs=prs, sid=sid, ad=_PAKE_AD_CLIENT)
+    except CPaceError as exc:
+        raise PairingError("CPace initialization failed") from exc
+
+    auth = await _receive_pairing(ws, ServerPairAuthMessage)
+    await ws.send_str(
+        ClientPairAuthMessage(
+            payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+        ).to_json(),
+    )
+    peer_share = _decode_field(auth.payload.pake_msg_1, "pake_msg_1", expect_len=_PAKE_SHARE_SIZE)
+    try:
+        cpace.derive(peer_share, _PAKE_AD_SERVER)
+    except CPaceError as exc:
+        raise PairingError("malformed pake_msg_1: invalid CPace share") from exc
+
+    confirm = await _receive_pairing(ws, ServerPairConfirmMessage)
+    server_kc = _decode_field(confirm.payload.server_kc, "server_kc", expect_len=_KC_TAG_SIZE)
+    return cpace, cpace.verify(server_kc)
 
 
 async def _finalize_client(
@@ -824,8 +827,19 @@ async def _receive_pair_init(
     return init
 
 
-def _pake_sid(handshake_hash: bytes, pairing_index: int) -> bytes:
-    """CPace session id binding the PAKE to the Noise handshake and pairing-code pairing attempt."""
+def _pake_sid(handshake_hash: bytes, pairing_index: int, round_number: int) -> bytes:
+    """CPace session id binding the PAKE to the Noise handshake, pairing attempt, and round."""
+    return (
+        _PAKE_SID_LABEL
+        + handshake_hash
+        + pairing_index.to_bytes(4, "big")
+        + round_number.to_bytes(4, "big")
+    )
+
+
+# DEPRECATED(spec-pr-237): remove in aiosendspin <version>
+def _legacy_pake_sid(handshake_hash: bytes, pairing_index: int) -> bytes:
+    """CPace session id for a client predating rounds: no round number."""
     return _PAKE_SID_LABEL + handshake_hash + pairing_index.to_bytes(4, "big")
 
 

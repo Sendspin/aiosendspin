@@ -32,7 +32,7 @@ from aiosendspin.noise.models import (
 )
 from aiosendspin.noise.pairing import LocalPairingAbortError, PairingError
 from aiosendspin.noise.trust_store import (
-    PAIRING_CODE_ESCALATION_THRESHOLD,
+    PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
     InMemoryClientPairingStore,
     PairingPsk,
@@ -213,12 +213,12 @@ def _static_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
     return _pairing_connection(PairingSupport())
 
 
-async def test_escalated_dynamic_attempt_is_gesture_gated() -> None:
-    """Once escalated, even a dynamic pairing-code attempt signals pair-pending."""
+async def test_dynamic_attempt_at_round_limit_is_held_back() -> None:
+    """At the round limit a dynamic attempt signals pair-pending and keeps the count."""
     connection, ws = _dynamic_pairing_code_connection()
     store = connection._client.pairing_store  # noqa: SLF001
-    for _ in range(PAIRING_CODE_ESCALATION_THRESHOLD):
-        await store.record_pairing_code_failure()
+    for _ in range(PAIRING_ROUND_LIMIT):
+        await store.record_pairing_round()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
         method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
     )
@@ -235,12 +235,13 @@ async def test_escalated_dynamic_attempt_is_gesture_gated() -> None:
 
     assert frame == leave
     assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 1
+    assert await store.pairing_round_count() == PAIRING_ROUND_LIMIT
 
 
 async def test_ungated_dynamic_attempt_starts_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unescalated dynamic attempt runs without pair-pending or a window."""
+    """Below the round limit a dynamic attempt runs without pair-pending or a window."""
     connection, ws = _dynamic_pairing_code_connection()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
         method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
@@ -271,13 +272,15 @@ async def test_unrecognized_activation_format_aborts() -> None:
     assert abort.payload.reason is PairAbortReason.METHOD_NOT_SUPPORTED
 
 
-async def test_gated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a window already open, a gated attempt skips pair-pending and consumes it."""
+async def test_held_back_attempt_consumes_open_window_and_resets_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a window already open, a held-back attempt skips pair-pending, consumes it, resets."""
     connection, ws = _dynamic_pairing_code_connection()
     client = connection._client  # noqa: SLF001
     store = client.pairing_store
-    for _ in range(PAIRING_CODE_ESCALATION_THRESHOLD):
-        await store.record_pairing_code_failure()
+    for _ in range(PAIRING_ROUND_LIMIT):
+        await store.record_pairing_round()
     client.open_pairing_window()
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
         method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
@@ -291,6 +294,7 @@ async def test_gated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatc
     assert await connection._run_pairing_protocol() is None  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
     assert not client.pairing_window_open  # consumed by the attempt
+    assert await store.pairing_round_count() == 0  # the operator action resets the count
 
 
 async def test_static_pairing_code_attempt_consumes_a_pre_open_window(

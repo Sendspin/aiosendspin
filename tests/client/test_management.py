@@ -29,7 +29,7 @@ from aiosendspin.models.management import (
 from aiosendspin.models.types import ManagementResult, PairMethod
 from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
-    PAIRING_CODE_ESCALATION_THRESHOLD,
+    PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
     InMemoryClientPairingStore,
 )
@@ -235,7 +235,7 @@ async def test_unpair_unknown_psk_id_is_noop() -> None:
 
 
 async def test_get_pairing_config_projects_state() -> None:
-    """get-config reflects enabled flags + escalation, omits unimplemented methods and secrets."""
+    """get-config reflects enabled flags + round-limit hold-back, omits unimplemented + secrets."""
     store = InMemoryClientPairingStore()
     await store.store_pairing_config(
         replace(
@@ -244,8 +244,8 @@ async def test_get_pairing_config_projects_state() -> None:
             unpaired_access_enabled=True,
         )
     )
-    for _ in range(PAIRING_CODE_ESCALATION_THRESHOLD):
-        await store.record_pairing_code_failure()
+    for _ in range(PAIRING_ROUND_LIMIT):
+        await store.record_pairing_round()
     payload, effect = await handle_get_pairing_config(
         store, implemented_pair_methods=_WITHOUT_STATIC_PAIRING_CODE
     )

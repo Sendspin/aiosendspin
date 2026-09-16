@@ -144,7 +144,7 @@ async def handle_get_pairing_config(
         dynamic_pairing_code=(
             PairingMethodConfig(
                 enabled=config.dynamic_pairing_code_enabled,
-                escalated=await store.is_pairing_code_escalated(),
+                escalated=await store.is_pairing_round_limit_reached(),
             )
             if PairMethod.DYNAMIC_PAIRING_CODE in implemented_pair_methods
             else None

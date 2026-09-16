@@ -11,14 +11,18 @@ from aiosendspin.models.types import ServerErrorReason
 from aiosendspin.noise.models import (
     ClientInitMessage,
     ClientInitPayload,
+    ClientPairRetryMessage,
     NoiseHandshakeMessage,
     NoiseHandshakePayload,
     NoiseMsg1Payload,
     NoiseMsg2Payload,
+    PairingMessage,
     ServerErrorMessage,
     ServerErrorPayload,
     ServerInitMessage,
     ServerInitPayload,
+    ServerPairInitMessage,
+    ServerPairInitPayload,
 )
 from aiosendspin.noise.trust_store import PskCategory
 
@@ -128,3 +132,29 @@ def test_noise_msg2_payload_serializes_to_empty_object() -> None:
     assert NoiseMsg2Payload().to_json() == "{}"
     # And empty input roundtrips cleanly.
     assert NoiseMsg2Payload.from_json("{}") == NoiseMsg2Payload()
+
+
+@pytest.mark.parametrize(
+    ("payload", "wire"),
+    [
+        pytest.param(
+            ServerPairInitPayload(nonce_A="A" * 43), {"nonce_A": "A" * 43}, id="first-round"
+        ),
+        pytest.param(ServerPairInitPayload(), {}, id="later-round"),
+    ],
+)
+def test_server_pair_init_omits_absent_nonce(
+    payload: ServerPairInitPayload, wire: dict[str, str]
+) -> None:
+    """server/pair-init carries nonce_A only when set and round-trips either way."""
+    msg = ServerPairInitMessage(payload=payload)
+    raw = msg.to_json()
+    assert json.loads(raw) == {"type": "server/pair-init", "payload": wire}
+    assert PairingMessage.from_json(raw) == msg
+
+
+def test_client_pair_retry_round_trip() -> None:
+    """client/pair-retry is an empty-payload pairing message."""
+    raw = ClientPairRetryMessage().to_json()
+    assert json.loads(raw) == {"type": "client/pair-retry", "payload": {}}
+    assert PairingMessage.from_json(raw) == ClientPairRetryMessage()
