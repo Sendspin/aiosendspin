@@ -27,3 +27,7 @@ class ArtworkRoleProtocol(Protocol):
     def send_artwork_cleared(self, channel: int, timestamp_us: int) -> None:
         """Clear artwork for a channel."""
         ...
+
+    def cancel_scheduled_artwork(self, channel: int) -> bool:
+        """Discard a channel's scheduled image, returning False if the current must be resent."""
+        ...
