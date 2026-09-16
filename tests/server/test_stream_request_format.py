@@ -1,4 +1,4 @@
-"""Tests for stream/request-format behavior in the presence of an active PushStream."""
+"""Legacy acceptance tests for the pre-#195 stream/request-format player object."""
 
 from __future__ import annotations
 
@@ -7,16 +7,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from aiosendspin.models.core import (
+    ClientStatePayload,
     StreamClearMessage,
     StreamRequestFormatPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.player import (
     ClientHelloPlayerSupport,
+    PlayerStatePayload,
     StreamRequestFormatPlayer,
     SupportedAudioFormat,
 )
 from aiosendspin.models.types import AudioCodec, Roles
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
@@ -112,6 +115,7 @@ def _make_player_client(
     return client, conn
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_player_format_request_defers_stream_start_when_stream_active(
     mock_server: MagicMock,
 ) -> None:
@@ -149,10 +153,11 @@ def test_player_format_request_defers_stream_start_when_stream_active(
     assert req.channels == 2
 
 
-def test_player_format_request_defers_stream_start_when_no_stream_active(
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_player_format_request_starts_nothing_when_no_stream_active(
     mock_server: MagicMock,
 ) -> None:
-    """When no PushStream is active, stream/start is also deferred via _pending_stream_start."""
+    """With no active PushStream the request is stored and starts nothing."""
     client, conn = _make_player_client(mock_server, "p1")
     request = StreamRequestFormatPayload(
         player=StreamRequestFormatPlayer(
@@ -163,15 +168,14 @@ def test_player_format_request_defers_stream_start_when_no_stream_active(
     for role in client.active_roles:
         role.on_stream_request_format(request)
 
-    # No immediate stream/start (deferred until first audio chunk).
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
-
-    # _pending_stream_start should be set.
     player_role = client.role("player@v1")
     assert isinstance(player_role, PlayerV1Role)
-    assert player_role._pending_stream_start is True  # noqa: SLF001
+    assert player_role._pending_stream_start is False  # noqa: SLF001
+    assert player_role.preferred_codec == AudioCodec.FLAC
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_player_format_request_uses_client_priority_order_when_codec_missing(
     mock_server: MagicMock,
 ) -> None:
@@ -220,6 +224,7 @@ def test_player_format_request_uses_client_priority_order_when_codec_missing(
     assert player_role.preferred_format.bit_depth == 24
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_player_partial_format_request_preserves_unchanged_fields(
     mock_server: MagicMock,
 ) -> None:
@@ -258,6 +263,7 @@ def test_player_partial_format_request_preserves_unchanged_fields(
     assert player_role.preferred_format.channels == 2
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_format_request_resets_buffer_tracker(mock_server: MagicMock) -> None:
     """A mid-stream format change resets buffer tracking and binary timing.
 
@@ -295,6 +301,7 @@ def test_format_request_resets_buffer_tracker(mock_server: MagicMock) -> None:
     assert tracker.buffered_duration_us == 0
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_noop_format_request_runs_no_boundary(mock_server: MagicMock) -> None:
     """A request for the format already in use must not run the transition.
 
@@ -327,4 +334,61 @@ def test_noop_format_request_runs_no_boundary(mock_server: MagicMock) -> None:
     )
 
     assert tracker.buffered_duration_us > 0
+    assert conn.dropped_pending_binary == []
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_format_request_survives_client_state_without_format(
+    mock_server: MagicMock,
+) -> None:
+    """A pre-#195 client's later player state, which never has format, keeps its request."""
+    client, _conn = _make_player_client(mock_server, "p1")
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    player_role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(codec=AudioCodec.FLAC))
+    )
+
+    player_role.on_client_state(ClientStatePayload(player=PlayerStatePayload(volume=20)))
+    assert player_role.preferred_codec == AudioCodec.FLAC
+
+    # Once the client sends format itself, an absent format clears the preference.
+    flac = SupportedAudioFormat(codec=AudioCodec.FLAC, sample_rate=48000, bit_depth=16, channels=2)
+    player_role.on_client_state(ClientStatePayload(player=PlayerStatePayload(format=flac)))
+    player_role.on_client_state(ClientStatePayload(player=PlayerStatePayload(volume=20)))
+    assert player_role.preferred_codec == AudioCodec.PCM
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_format_request_does_not_beat_operator_override(mock_server: MagicMock) -> None:
+    """The operator override still wins over a pre-#195 request."""
+    client, conn = _make_player_client(mock_server, "p1")
+    client.group.start_stream()
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    assert player_role.set_preferred_format(
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2), AudioCodec.PCM
+    )
+
+    player_role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(codec=AudioCodec.FLAC))
+    )
+
+    assert player_role.preferred_codec == AudioCodec.PCM
+    assert conn.dropped_pending_binary == []
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_unsupported_format_request_is_ignored(mock_server: MagicMock) -> None:
+    """A request matching no encodable format leaves the current preference in place."""
+    client, conn = _make_player_client(mock_server, "p1")
+    client.group.start_stream()
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+
+    player_role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(sample_rate=96000))
+    )
+
+    assert player_role.preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     assert conn.dropped_pending_binary == []

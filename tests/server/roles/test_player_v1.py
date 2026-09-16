@@ -207,6 +207,7 @@ def test_player_role_initial_state_deviations_legacy_hello_commands() -> None:
     assert reasons == ["omitted volume despite declaring the volume command"]
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_player_role_flags_undeclared_format_request() -> None:
     """A request for a format not in the client's declared supported_formats is flagged."""
     client = _stub_with_player_support()
@@ -217,6 +218,7 @@ def test_player_role_flags_undeclared_format_request() -> None:
     client.flag_noncompliance.assert_called_once()
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_player_role_no_flag_for_declared_format_request() -> None:
     """A request matching a declared supported_format is not flagged."""
     client = _stub_with_player_support()

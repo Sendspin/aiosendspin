@@ -632,6 +632,111 @@ async def test_player_support_commands_fold_into_state_list() -> None:
     ]
 
 
+_FLAC_48K = SupportedAudioFormat(
+    codec=AudioCodec.FLAC, sample_rate=48_000, bit_depth=16, channels=2
+)
+_PCM_44K = SupportedAudioFormat(codec=AudioCodec.PCM, sample_rate=44_100, bit_depth=16, channels=2)
+
+
+def _multi_format_client() -> SendspinClient:
+    return make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=replace(
+            _player_support(),
+            supported_formats=[*_player_support().supported_formats, _FLAC_48K, _PCM_44K],
+        ),
+    )
+
+
+def _activate_player(client: SendspinClient, connection: SendspinConnection) -> None:
+    client._admitted_connection = connection  # noqa: SLF001
+    connection._active_roles = ["player@v1"]  # noqa: SLF001
+
+
+async def test_send_player_state_omits_format_without_preference() -> None:
+    """Without a preference the player state carries no format."""
+    _, sent = await _reporting_connection(_multi_format_client())
+
+    assert "format" not in sent[0]["payload"]["player"]
+
+
+async def test_preference_set_before_connecting_is_in_initial_state() -> None:
+    """A preference set while disconnected is carried by the first player state."""
+    client = _multi_format_client()
+    await client.set_preferred_format(_FLAC_48K)
+
+    _, sent = await _reporting_connection(client)
+
+    assert sent[0]["payload"]["player"]["format"] == _FLAC_48K.to_dict()
+
+
+async def test_set_preferred_format_sends_full_player_state() -> None:
+    """Setting a preference sends a full player state carrying it; None clears it."""
+    client = _multi_format_client()
+    connection, sent = await _reporting_connection(client)
+    _activate_player(client, connection)
+    sent.clear()
+
+    await client.set_preferred_format(_FLAC_48K)
+    await client.set_preferred_format(None)
+
+    assert [msg["type"] for msg in sent] == ["client/state", "client/state"]
+    player = sent[0]["payload"]["player"]
+    assert player["format"] == _FLAC_48K.to_dict()
+    assert player["volume"] == 50
+    assert player["supported_commands"] == []
+    assert "output_delay_ms" in player
+    assert "format" not in sent[1]["payload"]["player"]
+
+
+async def test_set_preferred_format_skips_send_without_active_player_role() -> None:
+    """Without an active player role the preference is stored but not sent."""
+    client = _multi_format_client()
+    connection, sent = await _reporting_connection(client)
+    client._admitted_connection = connection  # noqa: SLF001
+    sent.clear()
+
+    await client.set_preferred_format(_FLAC_48K)
+
+    assert sent == []
+    assert client.preferred_format == _FLAC_48K
+
+
+async def test_player_state_updates_keep_preferred_format() -> None:
+    """Later player state updates repeat the preference instead of clearing it."""
+    client = _multi_format_client()
+    await client.set_preferred_format(_FLAC_48K)
+    connection, sent = await _reporting_connection(client)
+
+    await connection.send_player_state(available=True, volume=20, muted=True)
+
+    assert len(sent) == 2
+    assert all(msg["payload"]["player"]["format"] == _FLAC_48K.to_dict() for msg in sent)
+
+
+async def test_set_preferred_format_rejects_unsupported_format() -> None:
+    """A preference outside the client's own supported_formats raises and is not stored."""
+    client = _multi_format_client()
+    await client.set_preferred_format(_FLAC_48K)
+
+    with pytest.raises(ValueError, match="supported_formats"):
+        await client.set_preferred_format(replace(_FLAC_48K, bit_depth=24))
+
+    assert client.preferred_format == _FLAC_48K
+
+
+async def test_sdk_never_sends_stream_request_format() -> None:
+    """Changing the preference is reported via client/state only."""
+    client = _multi_format_client()
+    connection, sent = await _reporting_connection(client)
+    _activate_player(client, connection)
+
+    await client.set_preferred_format(_PCM_44K)
+
+    assert {msg["type"] for msg in sent} == {"client/state"}
+
+
 async def test_server_command_not_reported_is_ignored() -> None:
     """A server/command absent from the last reported supported_commands is not delivered."""
     client = make_sdk_client(

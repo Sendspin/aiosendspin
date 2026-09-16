@@ -151,6 +151,8 @@ class SendspinClient:
     """Reported startup lead time in microseconds."""
     _min_buffer_us: int = 250_000
     """Reported minimum ongoing buffer duration in microseconds."""
+    _preferred_format: SupportedAudioFormat | None = None
+    """Player format preference reported via client/state."""
 
     _admitted_connection: SendspinConnection | None = None
     """The currently-admitted connection (at most one), if any."""
@@ -574,6 +576,28 @@ class SendspinClient:
             return
         self._min_buffer_us = buffer_us
         logger.info("Set minimum ongoing buffer to %.1f ms", self.min_buffer_ms)
+
+    @property
+    def preferred_format(self) -> SupportedAudioFormat | None:
+        """Return the player format preference reported via client/state."""
+        return self._preferred_format
+
+    async def set_preferred_format(self, audio_format: SupportedAudioFormat | None) -> None:
+        """Set or clear the player format preference and report it to the server.
+
+        The server applies it to the current stream when it can produce it, or to the
+        next stream otherwise. None leaves the choice to the `supported_formats` order.
+
+        Raises ValueError when `audio_format` is not one of this client's
+        `supported_formats` (`bit_depth` is not compared for opus).
+        """
+        supported = self._player_support.supported_formats if self._player_support else []
+        if audio_format is not None and not any(audio_format.matches(fmt) for fmt in supported):
+            raise ValueError(f"{audio_format} is not one of the client's supported_formats")
+        self._preferred_format = audio_format
+        connection = self._admitted_connection
+        if connection is not None and connection.connected:
+            await connection.send_full_player_state()
 
     # --- Connection lifecycle ---
 

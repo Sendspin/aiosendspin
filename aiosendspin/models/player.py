@@ -113,6 +113,15 @@ class SupportedAudioFormat(SendspinModel):
         if self.bit_depth <= 0:
             raise ValueError(f"bit_depth must be positive, got {self.bit_depth}")
 
+    def matches(self, other: SupportedAudioFormat) -> bool:
+        """Return whether `other` names the same format; `bit_depth` is ignored for opus."""
+        return (
+            self.codec == other.codec
+            and self.channels == other.channels
+            and self.sample_rate == other.sample_rate
+            and (self.codec == AudioCodec.OPUS or self.bit_depth == other.bit_depth)
+        )
+
 
 @dataclass
 class ClientHelloPlayerSupport(SendspinModel):
@@ -192,6 +201,11 @@ class PlayerStatePayload(SendspinModel):
 
     Required on the initial state message and empty when the player accepts no
     commands; omitted in incremental updates means unchanged.
+    """
+    format: SupportedAudioFormat | None = None
+    """Format the player currently prefers, one of its hello `supported_formats`.
+
+    Absent means no preference: the server selects by `supported_formats` priority.
     """
     legacy_delay_key: str | None = None
     """Pre-rename delay key the parser rewrote, recorded for the role to flag.
@@ -295,6 +309,7 @@ class PlayerCommandPayload(SendspinModel):
 
 
 # Client -> Server stream/request-format player object
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 @dataclass
 class StreamRequestFormatPlayer(SendspinModel):
     """Request different player stream format (upgrade or downgrade)."""

@@ -534,11 +534,7 @@ class SendspinConnection:
         player_active = Roles.PLAYER in self._client.roles and self._is_role_active("player")
         source_active = self._is_role_active("source")
         if player_active:
-            await self.send_player_state(
-                available=self._reported_available,
-                volume=self._reported_volume,
-                muted=self._reported_muted,
-            )
+            await self.send_full_player_state()
             self._initial_state_sent = True
         if source_active and self.is_time_synchronized():
             await self._send_source_state()
@@ -879,6 +875,15 @@ class SendspinConnection:
         self._closed.set()
         self._client.on_connection_closed(self)
 
+    async def send_full_player_state(self) -> None:
+        """Resend the last reported player state when the player role is active."""
+        if Roles.PLAYER in self._client.roles and self._is_role_active("player"):
+            await self.send_player_state(
+                available=self._reported_available,
+                volume=self._reported_volume,
+                muted=self._reported_muted,
+            )
+
     async def send_player_state(
         self,
         *,
@@ -903,6 +908,7 @@ class SendspinConnection:
                     required_lead_time_ms=round(self._client.required_lead_time_ms),
                     min_buffer_ms=round(self._client.min_buffer_ms),
                     supported_commands=list(self._client.state_supported_commands),
+                    format=self._client.preferred_format,
                 ),
             )
         )

@@ -1910,6 +1910,12 @@ class SendspinConnection:
             if self._client is None:
                 return
             fmt = message.payload
+            if fmt.player is not None:
+                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+                self._flag_noncompliance(
+                    "sent a stream/request-format player object, "
+                    "superseded by the client/state player format"
+                )
             self._flag_inactive_role_payloads(
                 "stream/request-format",
                 {"player": fmt.player, "artwork": fmt.artwork, "visualizer": fmt.visualizer},

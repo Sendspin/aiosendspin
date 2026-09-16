@@ -108,6 +108,11 @@ class PlayerV1Role(Role):
         self._preferred_format_override = preferred_format
         self._preferred_format: AudioFormat | None = None
         self._preferred_codec: AudioCodec | None = None
+        # Format the client prefers via client/state, for this connection only.
+        self._client_format: SupportedAudioFormat | None = None
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        # Set when the slot came from stream/request-format, whose senders omit `format`.
+        self._client_format_legacy = False
         self._audio_requirements = audio_requirements
         self._stream_started = False
         self._buffer_tracker = None
@@ -205,6 +210,8 @@ class PlayerV1Role(Role):
         self._subscribe_to_group_role()
         self._stream_started = False
         self._last_sent_format = None
+        self._client_format = None
+        self._client_format_legacy = False
         if state.buffer_reset_handle is not None:
             state.buffer_reset_handle.cancel()
             state.buffer_reset_handle = None
@@ -559,11 +566,7 @@ class PlayerV1Role(Role):
                 state = self._state()
                 state.preferred_format_override = None
                 state.preferred_codec_override = None
-                before = self._effective_format()
-                self._ensure_preferred_format()
-                self._ensure_audio_requirements(force=True)
-                if self._client.group.has_active_stream and self._effective_format() != before:
-                    self._begin_format_transition()
+                self._apply_preferred_format()
                 return True
 
         if codec is None:
@@ -598,19 +601,7 @@ class PlayerV1Role(Role):
         state = self._state()
         state.preferred_format_override = audio_format
         state.preferred_codec_override = codec
-
-        # Set the preferred format for current session.
-        self._preferred_format = audio_format
-        self._preferred_codec = codec
-
-        before = self._effective_format()
-
-        # Rebuild audio requirements with the new format
-        self._ensure_audio_requirements(force=True)
-
-        if self._client.group.has_active_stream and self._effective_format() != before:
-            self._begin_format_transition()
-
+        self._apply_preferred_format()
         return True
 
     def set_volume(self, volume: int) -> None:
@@ -686,6 +677,8 @@ class PlayerV1Role(Role):
             reasons.append(f"used the pre-rename '{state.legacy_delay_key}' key")
         if state.supported_commands and PlayerCommand.SET_STATIC_DELAY in state.supported_commands:
             reasons.append("declared the pre-rename 'set_static_delay' command")
+        if state.format is not None and not self._is_declared_format(state.format):
+            reasons.append("preferred a format not in the client's declared supported_formats")
         return reasons
 
     def on_client_state(self, payload: ClientStatePayload) -> None:
@@ -749,8 +742,19 @@ class PlayerV1Role(Role):
             self.min_buffer_ms = state.min_buffer_ms
             self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
+        if state.format is None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            # A pre-#195 client never sends `format`; keep what it requested instead.
+            if not self._client_format_legacy:
+                self._set_client_format(None)
+        elif self._is_declared_format(state.format):
+            self._client_format_legacy = False
+            self._set_client_format(state.format)
+        # An undeclared format was flagged by client_state_deviations and keeps the slot.
+
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
-        """Handle stream/request-format for player role."""
+        """Apply a pre-#195 player format request as the client's format preference."""
         player_req = payload.player
         if player_req is None:
             return
@@ -792,49 +796,22 @@ class PlayerV1Role(Role):
         )
         base_codec = self.preferred_codec or preferred_supported.codec
 
-        requested_codec = player_req.codec or base_codec
-        requested_format = AudioFormat(
+        requested = SupportedAudioFormat(
+            codec=player_req.codec or base_codec,
             sample_rate=player_req.sample_rate or base_format.sample_rate,
             bit_depth=player_req.bit_depth or base_format.bit_depth,
             channels=player_req.channels or base_format.channels,
         )
-
-        if not any(
-            fmt.codec == requested_codec
-            and fmt.sample_rate == requested_format.sample_rate
-            and fmt.bit_depth == requested_format.bit_depth
-            and fmt.channels == requested_format.channels
-            for fmt in supported
-        ):
+        if not any(requested.matches(fmt) for fmt in supported):
             self._client._logger.warning(  # noqa: SLF001
-                "Client %s requested unsupported format %s codec=%s, falling back to %s",
+                "Client %s requested unsupported format %s, ignoring",
                 self._client.client_id,
-                requested_format,
-                requested_codec,
-                base_format,
+                requested,
             )
-            requested_format = base_format
-            requested_codec = base_codec
-
-        self.preferred_format = requested_format
-        self.preferred_codec = requested_codec
-
-        current_format = self._effective_format()
-        if current_format is not None and current_format == (requested_codec, requested_format):
-            # Already on the requested format. Running the boundary would evict
-            # valid audio while the announcement's identity guard suppresses
-            # the stream/start that would justify it.
             return
 
-        stream_active = self._client.group.has_active_stream
-        if stream_active:
-            self._ensure_audio_requirements(force=True)
-            self._begin_format_transition()
-        else:
-            # No active stream: also defer stream/start via _pending_stream_start
-            # so codec header is included when the first chunk arrives.
-            self._ensure_audio_requirements(force=True)
-            self._pending_stream_start = True
+        self._client_format_legacy = True
+        self._set_client_format(requested)
 
     def _effective_format(self) -> tuple[AudioCodec, AudioFormat] | None:
         """Return the current negotiated (codec, format), or None without requirements."""
@@ -878,6 +855,30 @@ class PlayerV1Role(Role):
         self._client.group.on_role_format_changed(self)
 
     # ---- Internal helpers ----
+
+    def _is_declared_format(self, audio_format: SupportedAudioFormat) -> bool:
+        """Return whether `audio_format` is one of the client's hello supported_formats."""
+        support = self._client.info.player_support
+        return support is not None and any(
+            audio_format.matches(fmt) for fmt in support.supported_formats
+        )
+
+    def _set_client_format(self, audio_format: SupportedAudioFormat | None) -> None:
+        """Store the client's format preference and apply it when it changed."""
+        if audio_format == self._client_format:
+            return
+        self._client_format = audio_format
+        self._apply_preferred_format()
+
+    def _apply_preferred_format(self) -> None:
+        """Re-derive the stream format; restart an active stream only when it changed."""
+        # Running the boundary for an unchanged format would evict valid audio while the
+        # announcement's identity guard suppresses the stream/start that justifies it.
+        before = self._effective_format()
+        self._ensure_preferred_format()
+        self._ensure_audio_requirements(force=True)
+        if self._client.group.has_active_stream and self._effective_format() != before:
+            self._begin_format_transition()
 
     def _legacy_hello_commands(self) -> list[PlayerCommand] | None:
         """Return the commands a pre-#177 hello declared, or None when it declared none."""
@@ -928,13 +929,16 @@ class PlayerV1Role(Role):
             )
             return
 
-        # The spec defines supported_formats as "in priority order (first is preferred)".
-        # On every (re)connect the client sends a fresh client/hello with its current
-        # priority, so compatible[0] represents the client's authoritative preference
-        # for this connection.
-        # If a server-side override was explicitly set, keep it sticky across reconnects
-        # while still validating it against the latest client capabilities.
-        preferred_supported = compatible[0]
+        # Selection order: the operator override, then the client/state format, then the
+        # hello supported_formats priority ("first is preferred"), which the client resends
+        # on every (re)connect.
+        # The operator override stays sticky across reconnects while still being validated
+        # against the latest client capabilities.
+        client_format = self._client_format
+        preferred_supported = next(
+            (fmt for fmt in compatible if client_format is not None and client_format.matches(fmt)),
+            compatible[0],
+        )
         state = self._state()
         persistent_format = state.preferred_format_override
         persistent_codec = state.preferred_codec_override

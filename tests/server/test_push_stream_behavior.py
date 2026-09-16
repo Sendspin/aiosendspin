@@ -14,15 +14,15 @@ from uuid import UUID
 import pytest
 
 from aiosendspin.models.core import (
+    ClientStatePayload,
     StreamClearMessage,
     StreamEndMessage,
-    StreamRequestFormatPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.player import (
     PLAYER_AUDIO_HEADER_SIZE,
     ClientHelloPlayerSupport,
-    StreamRequestFormatPlayer,
+    PlayerStatePayload,
     SupportedAudioFormat,
     pack_player_audio_header,
     unpack_player_audio_header,
@@ -2065,6 +2065,17 @@ def _make_connected_player_multi_format(
     return client, conn
 
 
+def _format_state(sample_rate: int) -> ClientStatePayload:
+    """Return a client/state preferring PCM stereo 16-bit at `sample_rate`."""
+    return ClientStatePayload(
+        player=PlayerStatePayload(
+            format=SupportedAudioFormat(
+                codec=AudioCodec.PCM, channels=2, sample_rate=sample_rate, bit_depth=16
+            )
+        )
+    )
+
+
 @pytest.mark.asyncio
 async def test_format_change_during_active_stream(mock_loop: Any) -> None:
     """Mid-stream format change sends stream/start (deferred) with no stream/clear.
@@ -2072,7 +2083,7 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
     Full PushStream flow:
     1. Create player with PCM 48kHz, start PushStream
     2. Commit audio N times
-    3. Trigger format change via on_stream_request_format during active playback
+    3. Trigger format change via a client/state format during active playback
     4. Commit more audio
     5. Assert: StreamStartMessage (with new format) in sent_json, NO StreamClearMessage
     6. Binary audio continues after format change
@@ -2108,17 +2119,9 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
     conn.sent_json.clear()
 
     # Trigger mid-stream format change: PCM 48kHz -> PCM 44.1kHz
-    request = StreamRequestFormatPayload(
-        player=StreamRequestFormatPlayer(
-            codec=AudioCodec.PCM,
-            sample_rate=44100,
-            channels=2,
-            bit_depth=16,
-        )
-    )
     role = client.role("player@v1")
     assert role is not None
-    role.on_stream_request_format(request)
+    role.on_client_state(_format_state(44100))
 
     # No stream/clear. The stream/start may already have gone out with the
     # first new-format catch-up chunk re-encoded by the join path.
@@ -2192,16 +2195,7 @@ async def test_format_flipflop_without_a_chunk_announces_the_return(mock_loop: A
     assert role is not None
 
     def request_format(sample_rate: int) -> None:
-        role.on_stream_request_format(
-            StreamRequestFormatPayload(
-                player=StreamRequestFormatPlayer(
-                    codec=AudioCodec.PCM,
-                    sample_rate=sample_rate,
-                    channels=2,
-                    bit_depth=16,
-                )
-            )
-        )
+        role.on_client_state(_format_state(sample_rate))
 
     for _ in range(20):
         stream.prepare_audio(
@@ -2290,16 +2284,7 @@ async def test_format_change_during_inflight_commit_aborts_old_format_delivery(
         nonlocal format_request_fired
         if not format_request_fired:
             format_request_fired = True
-            role.on_stream_request_format(
-                StreamRequestFormatPayload(
-                    player=StreamRequestFormatPlayer(
-                        codec=AudioCodec.PCM,
-                        sample_rate=44100,
-                        channels=2,
-                        bit_depth=16,
-                    )
-                )
-            )
+            role.on_client_state(_format_state(44100))
         return await original_resample(*args, **kwargs)
 
     monkeypatch.setattr(stream, "_resample_for_roles", resample_with_midflight_format_change)
@@ -2381,16 +2366,7 @@ async def test_format_change_preserves_peer_audio(
         nonlocal fired
         if not fired:
             fired = True
-            role_a.on_stream_request_format(
-                StreamRequestFormatPayload(
-                    player=StreamRequestFormatPlayer(
-                        codec=AudioCodec.PCM,
-                        sample_rate=44100,
-                        channels=2,
-                        bit_depth=16,
-                    )
-                )
-            )
+            role_a.on_client_state(_format_state(44100))
         return await original_resample(*args, **kwargs)
 
     monkeypatch.setattr(stream, "_resample_for_roles", resample_with_midflight_format_change)
