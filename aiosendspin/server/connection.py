@@ -63,6 +63,8 @@ from aiosendspin.models.core import (
     ServerCommandMessage,
     ServerHelloMessage,
     ServerHelloPayload,
+    ServerStateMessage,
+    ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
     StreamClearMessage,
@@ -112,6 +114,7 @@ from aiosendspin.models.types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
+    UndefinedField,
     replacement_for,
     role_family,
 )
@@ -202,6 +205,25 @@ _PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
         "pair/abort",
     }
 )
+
+
+def _schedules_over_current(
+    existing: ServerStatePayload, incoming: ServerStatePayload, now_us: int
+) -> bool:
+    """Whether `incoming` schedules a role object over one `existing` makes current."""
+    for old, new in (
+        (existing.metadata, incoming.metadata),
+        (existing.color, incoming.color),
+    ):
+        if (
+            not isinstance(old, UndefinedField)
+            and new is not None
+            and not isinstance(new, UndefinedField)
+            and new.timestamp > now_us
+            and (old is None or old.timestamp <= now_us)
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -744,6 +766,15 @@ class SendspinConnection:
         incoming: ServerMessage,
     ) -> ServerMessage | None:
         """Merge consecutive state-like messages where safe."""
+        # The client must apply the current state before it holds the scheduled one.
+        if (
+            isinstance(existing, ServerStateMessage)
+            and isinstance(incoming, ServerStateMessage)
+            and _schedules_over_current(
+                existing.payload, incoming.payload, self._server.clock.now_us()
+            )
+        ):
+            return None
         return existing.merge(incoming)
 
     def send_priority_message(self, message: ServerMessage | bytes) -> None:
