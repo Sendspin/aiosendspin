@@ -2042,7 +2042,7 @@ class SendspinConnection:
                     server_transmitted=self._server.clock.now_us(),
                 )
             )
-        elif isinstance(message, StreamStartMessage | StreamClearMessage | StreamEndMessage):
+        elif isinstance(message, StreamStartMessage | StreamClearMessage):
             # Stamp send time on the dequeued (send-once) payload.
             message.payload.server_transmitted = self._server.clock.now_us()
         await wsock.send_str(message.to_json())

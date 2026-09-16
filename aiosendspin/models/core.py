@@ -755,8 +755,6 @@ class StreamRequestFormatMessage(ClientMessage):
 class StreamEndPayload(SendspinModel):
     """Payload for stream/end message."""
 
-    server_transmitted: int = 0
-    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     roles: list[str] | None = None
     """Roles to end streams for. If omitted, ends all active streams."""
 
