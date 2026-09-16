@@ -420,6 +420,7 @@ class SendspinConnection:
         self._server_info = ServerInfo(
             server_id=self._server_id,
             name=hello.name,
+            languages=tuple(hello.languages or ()),
         )
         await self._send_client_hello()
         return await self._receive_server_activate()
@@ -764,18 +765,13 @@ class SendspinConnection:
             emissions.append(self._client.pairing_code_display(pairing_code))
         if self._client.pairing_code_speaker is not None:
             emissions.append(
-                self._client.pairing_code_speaker(
-                    pairing_code, languages=self._activation_languages()
-                )
+                self._client.pairing_code_speaker(pairing_code, languages=self._server_languages())
             )
         await asyncio.gather(*emissions)
 
-    def _activation_languages(self) -> tuple[str, ...]:
-        """Operator language preferences carried by the pairing activation."""
-        pairing = self._selected_pairing
-        if pairing is None or pairing.languages is None:
-            return ()
-        return tuple(pairing.languages)
+    def _server_languages(self) -> tuple[str, ...]:
+        """Operator language preferences declared in the server/hello."""
+        return self._server_info.languages if self._server_info is not None else ()
 
     async def _rehandshake(self, hs1_text: str | None = None) -> None:
         """Re-run the Noise handshake as responder and swap the session (None reads msg 1)."""

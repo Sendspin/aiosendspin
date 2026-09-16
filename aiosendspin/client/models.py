@@ -120,3 +120,5 @@ class ServerInfo:
 
     server_id: str
     name: str
+    languages: tuple[str, ...] = ()
+    """The operator's BCP 47 language preferences in descending order, empty when undeclared."""

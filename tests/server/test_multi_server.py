@@ -60,6 +60,7 @@ class _MockServer:
     clock: LoopClock
     id: str = "srv"
     name: str = "server"
+    languages: tuple[str, ...] | None = None
     allow_noncompliant_clients: bool = True
     pairing_store: ServerPairingStore = field(default_factory=InMemoryServerPairingStore)
     remove_client: AsyncMock = field(default_factory=AsyncMock)

@@ -124,33 +124,6 @@ def test_pairing_attempt_pairing_format_is_dynamic_only() -> None:
         )
 
 
-def test_pairing_attempt_languages_are_dynamic_pairing_code_only() -> None:
-    """The spoken-emission hint belongs to dynamic pairing code, the other methods reject it."""
-    assert PairingAttempt(
-        method=PairMethod.DYNAMIC_PAIRING_CODE,
-        pairing_code_provider=_code,
-        languages=("ca", "en"),
-        pairing_format=PairingCodeFormat.DIGITS,
-    ).languages == ("ca", "en")
-    with pytest.raises(ValueError, match="does not use languages"):
-        PairingAttempt(
-            method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=_code, languages=("en",)
-        )
-    with pytest.raises(ValueError, match="does not use languages"):
-        PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), languages=("en",))
-
-
-def test_pairing_attempt_rejects_a_blank_language_tag() -> None:
-    """A blank tag is not a BCP 47 value, so it must not reach the activation."""
-    with pytest.raises(ValueError, match="blank tag"):
-        PairingAttempt(
-            method=PairMethod.DYNAMIC_PAIRING_CODE,
-            pairing_code_provider=_code,
-            languages=("en", ""),
-            pairing_format=PairingCodeFormat.DIGITS,
-        )
-
-
 _paired_encrypted_ws = make_paired_encrypted_ws
 
 

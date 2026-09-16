@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -168,6 +168,7 @@ class SendspinServer:
         pairing_store: ServerPairingStore,
         allow_unencrypted: bool = False,
         allow_noncompliant_clients: bool = True,
+        languages: Sequence[str] | None = None,
         clock: Clock | None = None,
     ) -> None:
         """Initialize a Sendspin server instance.
@@ -185,12 +186,29 @@ class SendspinServer:
                 built against pre-1.0 spec drafts when True, reject the client when
                 False. Tolerance is transitional and will be removed in a future
                 version.
+            languages: BCP 47 tags in descending operator preference, sent to clients
+                in server/hello, or None to declare none.
             clock: Clock source, or None for the default monotonic clock.
+
+        Raises:
+            TypeError: If ``languages`` is a single string rather than a sequence of tags.
+            ValueError: If ``languages`` is empty or contains a blank tag.
         """
+        if languages is not None:
+            if isinstance(languages, str):
+                msg = "languages must be a sequence of tags, not a string"
+                raise TypeError(msg)
+            if not languages:
+                msg = "languages must not be empty"
+                raise ValueError(msg)
+            if not all(tag.strip() for tag in languages):
+                msg = "languages must not contain a blank tag"
+                raise ValueError(msg)
         self._loop = loop
         self._identity = identity
         self._id = identity.peer_id
         self._name = server_name
+        self._languages = tuple(languages) if languages is not None else None
         self._pairing_store = pairing_store
         self._allow_unencrypted = allow_unencrypted
         self._allow_noncompliant_clients = allow_noncompliant_clients
@@ -282,6 +300,11 @@ class SendspinServer:
     def name(self) -> str:
         """Return the human-readable server name."""
         return self._name
+
+    @property
+    def languages(self) -> tuple[str, ...] | None:
+        """Return the operator's BCP 47 language preferences, or None when undeclared."""
+        return self._languages
 
     @property
     def clients(self) -> list[SendspinClient]:

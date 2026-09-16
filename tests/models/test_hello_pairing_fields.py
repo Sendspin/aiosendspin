@@ -105,6 +105,14 @@ def test_unrecognized_activate_format_still_parses() -> None:
     assert payload.pairing.format == "holographic"
 
 
+def test_server_hello_languages_round_trip() -> None:
+    """server/hello carries the operator language preferences, or omits them."""
+    payload = ServerHelloPayload(name="Server", languages=["ca", "es", "en"])
+    assert ServerHelloPayload.from_json(payload.to_json()) == payload
+    assert "languages" not in orjson.loads(ServerHelloPayload(name="Server").to_json())
+
+
+# DEPRECATED(spec-pr-241): remove in aiosendspin <version>
 def test_activate_pairing_languages_round_trip() -> None:
     """The dynamic pairing object carries the spoken-emission language hint, or omits it."""
     payload = ServerActivatePayload(

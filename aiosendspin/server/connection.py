@@ -313,6 +313,9 @@ class SendspinConnection:
         self._client: SendspinClient | None = None
         self._trusted_unpaired = False
         self._credential_mismatch = False
+        # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+        # Set when the client/hello tripped the spec-pr-177 player commands tolerance.
+        self._legacy_hello = False
 
         self._declared_activities: list[Activity] | None = None
         self._client_event_unsub: Callable[[], None] | None = None
@@ -1022,8 +1025,14 @@ class SendspinConnection:
 
     async def _send_server_hello_and_recv(self, transport: Transport) -> bool:
         """Send ``server/hello`` and receive+ingest ``client/hello``."""
+        languages = self._server.languages
         await transport.send_str(
-            ServerHelloMessage(payload=ServerHelloPayload(name=self._server.name)).to_json()
+            ServerHelloMessage(
+                payload=ServerHelloPayload(
+                    name=self._server.name,
+                    languages=list(languages) if languages is not None else None,
+                )
+            ).to_json()
         )
         client_hello_text = await receive_text_frame(transport, what="client/hello")
         return await self._ingest_client_hello(client_hello_text)
@@ -1114,6 +1123,8 @@ class SendspinConnection:
             self._flag_noncompliance(
                 "client/hello declared player supported_commands, superseded by client/state"
             )
+            # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+            self._legacy_hello = True
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
                 "Client offered roles/versions this server does not implement: %s", unimplemented
@@ -1403,9 +1414,14 @@ class SendspinConnection:
             if method is PairMethod.DYNAMIC_PAIRING_CODE:
                 assert self._pairing_attempt is not None
                 pairing_format = self._negotiated_dynamic_pairing_format()
-                # The language hint applies to spoken emission, so only the digits format.
-                if pairing_format is PairingCodeFormat.DIGITS and self._pairing_attempt.languages:
-                    languages = list(self._pairing_attempt.languages)
+                # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+                # Clients predating server/hello languages read them from the digits activation.
+                if (
+                    pairing_format is PairingCodeFormat.DIGITS
+                    and self._legacy_hello
+                    and self._server.languages is not None
+                ):
+                    languages = list(self._server.languages)
             # No gate on the hello-advertised methods: the advertisement may lag the client's
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
