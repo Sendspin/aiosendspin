@@ -71,7 +71,7 @@ class SourceCapture:
         return self._codec
 
     async def start(self) -> None:
-        """Send ``client_stream/start`` to begin the capture stream."""
+        """Send ``client-stream/start`` to begin the capture stream."""
         if self._started:
             if self._connection.is_source_stream_active():
                 return
