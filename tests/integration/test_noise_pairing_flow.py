@@ -22,6 +22,7 @@ from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
+    ClientStatePayload,
     ServerActivateMessage,
     ServerActivatePayload,
     ServerHelloMessage,
@@ -1602,6 +1603,43 @@ async def test_end_pairing_racing_success_completes_pairing() -> None:
             assert client.connected
             assert client.noise_psk is not None
             assert client.noise_psk.category is PskCategory.LONG_TERM
+        finally:
+            release.set()
+            await client.disconnect()
+
+
+async def test_success_rehandshake_discards_client_messages_sent_before_message_1() -> None:
+    """Client messages in flight when the success re-handshake starts do not fail the pairing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async with _serve(server) as url:
+        client, attempt, release = await _paired_client_with_stalled_success_tail(
+            server, url, client_identity, client_store
+        )
+        try:
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            queue = conn._pairing_message_queue  # noqa: SLF001
+            assert queue is not None
+            client_ws = client._admitted_connection._ws  # noqa: SLF001
+            assert client_ws is not None
+            queued = queue.qsize()
+            await client_ws.send_str(
+                ClientStateMessage(payload=ClientStatePayload(available=True)).to_json()
+            )
+            await client_ws.send_bytes(b"\x04audio")
+            await _wait_until(lambda: queue.qsize() == queued + 2)
+            release.set()
+
+            await attempt
+            await _await_long_term_record(client_store, server.id)
+            await _await_left_pairing(client)
+            assert client.connected
+            assert client.noise_psk is not None
+            assert client.noise_psk.category is PskCategory.LONG_TERM
+            assert conn.psk_category is PskCategory.LONG_TERM
         finally:
             release.set()
             await client.disconnect()
