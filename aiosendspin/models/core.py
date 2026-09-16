@@ -213,8 +213,9 @@ class SupportedPairMethods(SendspinModel):
     """Recognized methods dropped for offering no value this implementation knows, recorded
     for the server to log. Not part of the wire schema (omitted when None)."""
     offered_both_pairing_code_methods: bool | None = None
-    """Whether the client offered both pairing-code methods, leaving neither the static one
-    nor an unusable dynamic one. Not part of the wire schema (omitted when None)."""
+    """Whether the client offered both pairing-code methods, recorded for the server to log.
+    The static one is dropped in favor of a usable dynamic one. Not part of the wire schema
+    (omitted when None)."""
 
     class Config(SendspinConfig):
         """Omit methods the client does not offer."""
@@ -223,7 +224,7 @@ class SupportedPairMethods(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Drop unrecognized methods and values, then degrade an over-broad advertisement."""
+        """Drop unrecognized methods and values, preferring dynamic over static pairing code."""
         normalized = {k: v for k, v in d.items() if k in _PAIR_METHOD_VALUE_FILTERS}
         ignored = sorted(set(d) - set(normalized) - _PAIR_METHOD_SIDECARS)
         for key, value_filters in _PAIR_METHOD_VALUE_FILTERS.items():
@@ -231,21 +232,18 @@ class SupportedPairMethods(SendspinModel):
             if not isinstance(descriptor, dict):
                 continue
             normalized[key] = _filter_descriptor_values(descriptor, value_filters)
-        # Offering both code methods is judged on the identifiers received, before any are
-        # dropped: the static descriptor is disregarded whether or not the dynamic one
-        # survives, so an over-broad advertisement degrades toward no code method at all.
         both = (
             PairMethod.STATIC_PAIRING_CODE.value in normalized
             and PairMethod.DYNAMIC_PAIRING_CODE.value in normalized
         )
-        if both:
-            del normalized[PairMethod.STATIC_PAIRING_CODE.value]
         dynamic = normalized.get(PairMethod.DYNAMIC_PAIRING_CODE.value)
         unusable = isinstance(dynamic, dict) and not (
             dynamic.get("formats") and dynamic.get("out_channels")
         )
         if unusable:
             del normalized[PairMethod.DYNAMIC_PAIRING_CODE.value]
+        elif both:
+            del normalized[PairMethod.STATIC_PAIRING_CODE.value]
         # Always overwrite so a client cannot spoof the records via the wire.
         normalized["ignored_methods"] = ignored or None
         normalized["unusable_methods"] = (

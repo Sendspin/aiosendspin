@@ -206,8 +206,8 @@ def test_unrecognized_pair_method_is_ignored_not_rejected() -> None:
     assert methods.ignored_methods == ["telepathy"]
 
 
-def test_both_pairing_code_methods_degrade_to_dynamic() -> None:
-    """Offering both code methods is a spec violation; the static one is disregarded."""
+def test_both_pairing_code_methods_prefer_dynamic() -> None:
+    """Offering both code methods is recorded, and the dynamic one is preferred."""
     raw = (
         '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
         '"supported_pair_methods":{"static_pairing_code":{},'
@@ -237,8 +237,8 @@ def test_dynamic_without_recognized_values_is_dropped() -> None:
     assert methods.ignored_methods is None
 
 
-def test_both_offered_disregards_static_even_when_dynamic_is_unusable() -> None:
-    """Receiving both identifiers disregards the static descriptor, whatever the dynamic holds."""
+def test_both_offered_keeps_static_when_dynamic_is_unusable() -> None:
+    """An unusable dynamic descriptor leaves static as the only code method to prefer."""
     raw = (
         '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
         '"supported_pair_methods":{"pairing_psk":{},"static_pairing_code":{},'
@@ -247,7 +247,7 @@ def test_both_offered_disregards_static_even_when_dynamic_is_unusable() -> None:
     methods = ClientHelloPayload.from_json(raw).supported_pair_methods
     assert methods is not None
     assert methods.offered_both_pairing_code_methods is True
-    assert methods.static_pairing_code is None
+    assert methods.static_pairing_code == PairMethodDescriptor()
     assert methods.dynamic_pairing_code is None
     assert methods.unusable_methods == ["dynamic_pairing_code"]
     assert methods.pairing_psk is not None

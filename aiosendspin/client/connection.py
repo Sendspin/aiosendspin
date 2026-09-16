@@ -729,14 +729,14 @@ class SendspinConnection:
         return tuple(methods)
 
     def _without_static_pairing_code(self, methods: list[PairMethod]) -> list[PairMethod]:
-        """Drop ``static_pairing_code``, which may not be offered alongside the dynamic one."""
+        """Drop ``static_pairing_code``, so only the dynamic pairing-code method is offered."""
         if PairMethod.STATIC_PAIRING_CODE not in methods:
             return methods
         if not self._logged_static_pairing_code_dropped:
             self._logged_static_pairing_code_dropped = True
             logger.info(
-                "Offering dynamic_pairing_code only: a client may not offer both pairing-code "
-                "methods, so the configured static pairing code goes unused"
+                "Offering dynamic_pairing_code only: a client should offer one pairing-code "
+                "method, so the configured static pairing code goes unused"
             )
         return [m for m in methods if m is not PairMethod.STATIC_PAIRING_CODE]
 

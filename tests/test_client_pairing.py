@@ -667,7 +667,7 @@ async def _connection_offering_both_code_methods() -> SendspinConnection:
 
 
 async def test_both_code_methods_wired_advertises_dynamic_only() -> None:
-    """A client may offer only one pairing-code method, and the per-session one wins."""
+    """The client offers only one pairing-code method, and the per-session one wins."""
     connection = await _connection_offering_both_code_methods()
 
     hello = await connection._build_client_hello()  # noqa: SLF001

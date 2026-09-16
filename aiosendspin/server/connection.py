@@ -1245,7 +1245,7 @@ class SendspinConnection:
         self._note_pair_method_wire(client_info)
 
     def _note_pair_method_wire(self, client_info: ClientHelloPayload) -> None:
-        """Flag pair-method deviations, and log identifiers this server does not know."""
+        """Flag the superseded pair-method shape, and log what the parse set aside."""
         # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
         if client_info.legacy_pair_methods_list_used:
             self._flag_noncompliance("client/hello sent supported_pair_methods as a list")
@@ -1253,9 +1253,7 @@ class SendspinConnection:
         if methods is None:
             return
         if methods.offered_both_pairing_code_methods:
-            self._flag_noncompliance(
-                "client/hello offered both pairing-code methods; disregarding static_pairing_code"
-            )
+            self._logger.info("client/hello offered both pairing-code methods")
         if methods.ignored_methods:
             # Offering a method this server does not know is conformant: the client speaks a
             # newer revision of the spec. Worth noticing, but not a compliance failure.

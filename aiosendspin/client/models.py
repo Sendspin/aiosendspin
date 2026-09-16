@@ -37,8 +37,8 @@ class PairingSupport:
     The gesture itself is reported by calling ``SendspinClient.open_pairing_window``.
     Its presence enables offering ``static_pairing_code``, unless
     ``offer_static_pairing_code`` declines it. Any pairing-code out-channel enables
-    ``dynamic_pairing_code``, which supersedes ``static_pairing_code``: a client may
-    offer only one pairing-code method.
+    ``dynamic_pairing_code``, which supersedes ``static_pairing_code``: the client offers
+    only one pairing-code method.
     """
 
     gesture_prompt: Callable[[bool], Awaitable[None]] | None = None

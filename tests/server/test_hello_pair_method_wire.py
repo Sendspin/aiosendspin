@@ -15,7 +15,6 @@ from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server import SendspinServer
 from aiosendspin.server.clock import LoopClock
-from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 
 
@@ -68,8 +67,10 @@ async def test_superseded_list_shape_is_flagged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_offering_both_pairing_code_methods_is_flagged() -> None:
-    """Offering both code methods breaks a MUST NOT, so it is a compliance failure."""
+async def test_offering_both_pairing_code_methods_is_logged_but_not_flagged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Offering both code methods is conformant, so the server only notes it."""
     conn, client = _conn_with_client()
     hello = _hello(
         {
@@ -77,9 +78,10 @@ async def test_offering_both_pairing_code_methods_is_flagged() -> None:
             "dynamic_pairing_code": {"formats": ["digits"], "out_channels": ["display"]},
         }
     )
-    conn._note_client_hello_wire(hello)  # noqa: SLF001
-    client.flag_noncompliance.assert_called_once()
-    assert "both pairing-code methods" in client.flag_noncompliance.call_args.args[0]
+    with caplog.at_level(logging.INFO):
+        conn._note_client_hello_wire(hello)  # noqa: SLF001
+    client.flag_noncompliance.assert_not_called()
+    assert "both pairing-code methods" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -130,8 +132,8 @@ def _strict_server() -> SendspinServer:
 
 
 @pytest.mark.asyncio
-async def test_strict_server_rejects_a_client_offering_both_code_methods() -> None:
-    """The flag is not cosmetic: a strict server turns the MUST NOT breach into a rejection."""
+async def test_strict_server_admits_a_client_offering_both_code_methods() -> None:
+    """A strict server admits a client offering both code methods, preferring the dynamic one."""
     server = _strict_server()
     conn = SendspinConnection(server, wsock_client=MagicMock())
     conn._client = server.get_or_create_client("dev")  # noqa: SLF001
@@ -142,8 +144,12 @@ async def test_strict_server_rejects_a_client_offering_both_code_methods() -> No
         }
     )
 
-    with pytest.raises(ClientComplianceError, match="both pairing-code methods"):
-        conn._note_client_hello_wire(hello)  # noqa: SLF001
+    conn._note_client_hello_wire(hello)  # noqa: SLF001
+
+    methods = hello.supported_pair_methods
+    assert methods is not None
+    assert methods.dynamic_pairing_code is not None
+    assert methods.static_pairing_code is None
 
 
 @pytest.mark.asyncio
