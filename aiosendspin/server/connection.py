@@ -264,6 +264,8 @@ class SendspinConnection:
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_messages_started = False
         self._pairing_index = 0
+        # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+        self._sent_psk_pair_init = False
         self._connection_done = asyncio.Event()
         self._transport: Transport | None = None
         self._pending_first_text: str | None = None  # legacy first frame held for the loop
@@ -1001,6 +1003,9 @@ class SendspinConnection:
                 try:
                     if not await self._pair(transport):
                         return False
+                except ClientComplianceError:
+                    await self.disconnect(retry_connection=False)
+                    return False
                 except PairingTimeoutError as exc:
                     # Timeout waiting for client; the connection stays open for a retry.
                     self._logger.debug("Initial-connect pairing timed out: %s", exc)
@@ -1475,9 +1480,14 @@ class SendspinConnection:
             attempt = self._pairing_attempt
             return await run_pairing_psk_server(
                 transport,
+                pairing_index=pairing_index,
                 client_id=self._client_id,
                 store=self._server.pairing_store,
                 owner=attempt.owner if attempt is not None else None,
+                on_pair_init=self._note_psk_pair_init,
+                on_legacy_finalize=(
+                    None if self._sent_psk_pair_init else self._flag_legacy_psk_finalize
+                ),
             )
         assert self._pairing_attempt is not None
         assert self._pairing_attempt.pairing_code_provider is not None
@@ -1511,6 +1521,16 @@ class SendspinConnection:
             on_pair_pending=self._pairing_attempt.on_pair_pending,
             owner=self._pairing_attempt.owner,
         )
+
+    # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+    def _note_psk_pair_init(self) -> None:
+        """Record that the client speaks the Pairing PSK flow that starts with pair-init."""
+        self._sent_psk_pair_init = True
+
+    # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+    def _flag_legacy_psk_finalize(self) -> None:
+        """Flag a Pairing PSK attempt started by client/pair-finalize; raises when strict."""
+        self._flag_noncompliance("Pairing PSK client/pair-finalize sent without client/pair-init")
 
     def _negotiated_dynamic_pairing_format(self) -> PairingCodeFormat:
         """Return the attempt's emission format, checked against the advertised descriptor."""

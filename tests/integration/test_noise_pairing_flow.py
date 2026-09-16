@@ -6,12 +6,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestServer
 
+from aiosendspin.client import connection as client_connection_module
 from aiosendspin.client.client import SendspinClient as SdkClient
 from aiosendspin.client.connection import SendspinConnection as SdkConnection
 from aiosendspin.client.models import PairingSupport
@@ -37,6 +39,7 @@ from aiosendspin.models.types import (
     ServerMessage,
     TrustLevel,
 )
+from aiosendspin.noise import pairing as pairing_module
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.pairing import (
     PairingAbortError,
@@ -56,6 +59,7 @@ from aiosendspin.noise.trust_store import (
 )
 from aiosendspin.server import connection as connection_module
 from aiosendspin.server.client import SendspinClient
+from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import (
     ClientCredentialMismatchEvent,
@@ -64,12 +68,17 @@ from aiosendspin.server.server import (
 )
 from tests.conftest import make_sdk_client
 
+if TYPE_CHECKING:
+    from aiosendspin.noise.trust_store import ClientPairingStore
+    from aiosendspin.noise.wire import EncryptedWebSocket
+
 
 def _make_server(
     store: InMemoryServerPairingStore,
     *,
     allow_unencrypted: bool = False,
     languages: tuple[str, ...] | None = None,
+    allow_noncompliant_clients: bool = True,
 ) -> SendspinServer:
     return SendspinServer(
         loop=asyncio.get_running_loop(),
@@ -78,6 +87,7 @@ def _make_server(
         pairing_store=store,
         allow_unencrypted=allow_unencrypted,
         languages=languages,
+        allow_noncompliant_clients=allow_noncompliant_clients,
     )
 
 
@@ -1521,6 +1531,197 @@ async def test_live_pairing_pairing_psk() -> None:
             assert client_record is not None
             assert server_record is not None
             assert client_record.psk == server_record.psk
+        finally:
+            await client.disconnect()
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+async def _legacy_pairing_psk_client(
+    ws: EncryptedWebSocket,
+    *,
+    pairing_index: int,  # noqa: ARG001
+    server_id: str,
+    store: ClientPairingStore,
+) -> str | None:
+    """Pairing PSK client that goes straight to client/pair-finalize."""
+    return await pairing_module._finalize_client(  # noqa: SLF001
+        ws, server_id=server_id, store=store
+    )
+
+
+async def _staged_pairing_psk_stores(
+    client_identity: Identity,
+) -> tuple[InMemoryServerPairingStore, InMemoryClientPairingStore]:
+    server_store = InMemoryServerPairingStore()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    psk_id = psk_id_for(pairing)
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id, psk=pairing))
+    await server_store.stage_pairing_psk(
+        client_identity.peer_id, StagedPairingPsk(psk_id=psk_id, psk=pairing)
+    )
+    return server_store, client_store
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+async def test_legacy_pairing_psk_client_pairs_and_is_flagged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A finalize-first Pairing PSK client still pairs, flagged as non-compliant."""
+    client_identity = Identity.generate()
+    server_store, client_store = await _staged_pairing_psk_stores(client_identity)
+    server = _make_server(server_store)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            with patch.object(
+                client_connection_module, "run_pairing_psk_client", _legacy_pairing_psk_client
+            ):
+                await client.connect(url)
+            assert client.noise_psk is not None
+            assert client.noise_psk.category is PskCategory.LONG_TERM
+            client_record = await client_store.record_by_server_id(server.id)
+            server_record = await server_store.record_by_client_id(client_identity.peer_id)
+            assert client_record is not None
+            assert server_record is not None
+            assert client_record.psk == server_record.psk
+        finally:
+            await client.disconnect()
+    assert (
+        "non-compliant client: Pairing PSK client/pair-finalize sent without client/pair-init"
+        in caplog.messages
+    )
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+async def test_strict_server_rejects_legacy_pairing_psk_client_on_connect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A strict server drops a finalize-first client for good, persisting nothing."""
+    client_identity = Identity.generate()
+    server_store, client_store = await _staged_pairing_psk_stores(client_identity)
+    server = _make_server(server_store, allow_noncompliant_clients=False)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            with (
+                patch.object(
+                    client_connection_module,
+                    "run_pairing_psk_client",
+                    _legacy_pairing_psk_client,
+                ),
+                patch.object(
+                    SendspinConnection,
+                    "disconnect",
+                    autospec=True,
+                    side_effect=SendspinConnection.disconnect,
+                ) as disconnect,
+            ):
+                with pytest.raises(PairingError, match="connection closed"):
+                    await client.connect(url)
+                async with asyncio.timeout(5):
+                    while server._pending_connections:  # noqa: SLF001, ASYNC110
+                        await asyncio.sleep(0.01)
+            assert disconnect.await_args_list[0].kwargs == {"retry_connection": False}
+            assert await server_store.record_by_client_id(client_identity.peer_id) is None
+            assert (
+                "rejecting non-compliant client: "
+                "Pairing PSK client/pair-finalize sent without client/pair-init"
+            ) in caplog.messages
+        finally:
+            await client.disconnect()
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+async def test_strict_server_rejects_legacy_pairing_psk_client_live() -> None:
+    """A strict server's live Pairing PSK attempt rejects a finalize-first client."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store, allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            with (
+                patch.object(
+                    client_connection_module,
+                    "run_pairing_psk_client",
+                    _legacy_pairing_psk_client,
+                ),
+                pytest.raises(ClientComplianceError),
+            ):
+                await server.initiate_pairing(
+                    client_identity.peer_id,
+                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing),
+                )
+            assert await server_store.record_by_client_id(client_identity.peer_id) is None
+            async with asyncio.timeout(5):
+                while server._pending_connections:  # noqa: SLF001, ASYNC110
+                    await asyncio.sleep(0.01)
+        finally:
+            await client.disconnect()
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+async def test_finalize_first_is_discarded_after_a_pairing_psk_pair_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a connection has sent a Pairing PSK pair-init, a leading finalize is a leftover."""
+    monkeypatch.setattr(pairing_module, "SERVER_FIRST_MESSAGE_TIMEOUT_S", 0.2)
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    attempt = PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await conn.initiate_pairing(attempt)
+            first = await server_store.record_by_client_id(client_identity.peer_id)
+            assert first is not None
+
+            with (
+                patch.object(
+                    client_connection_module,
+                    "run_pairing_psk_client",
+                    _legacy_pairing_psk_client,
+                ),
+                pytest.raises(PairingTimeoutError, match="client/pair-init"),
+            ):
+                await conn.initiate_pairing(attempt)
+            assert await server_store.record_by_client_id(client_identity.peer_id) == first
         finally:
             await client.disconnect()
 

@@ -158,6 +158,7 @@ if TYPE_CHECKING:
 async def run_pairing_psk_client(
     ws: EncryptedWebSocket,
     *,
+    pairing_index: int,
     server_id: str,
     store: ClientPairingStore,
 ) -> str | None:
@@ -166,20 +167,75 @@ async def run_pairing_psk_client(
     Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
     """
     async with _client_timeout(ws):
+        await ws.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(pairing_index=pairing_index),
+            ).to_json(),
+        )
         return await _finalize_client(ws, server_id=server_id, store=store)
 
 
 async def run_pairing_psk_server(
     ws: EncryptedWebSocket,
     *,
+    pairing_index: int,
     client_id: str,
     store: ServerPairingStore,
     owner: str | None = None,
+    on_pair_init: Callable[[], None] | None = None,
+    # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+    on_legacy_finalize: Callable[[], None] | None = None,
 ) -> ServerPairingRecord:
-    """Run the server side of the Pairing PSK flow."""
-    async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-finalize"):
+    """Run the server side of the Pairing PSK flow.
+
+    ``on_pair_init`` is called for every ``client/pair-init`` received, whatever its index.
+    ``client/pair-finalize`` messages preceding the matching ``client/pair-init`` are discarded
+    as leftovers, except that with ``on_legacy_finalize`` set, a ``long_term_psk`` finalize
+    arriving before any ``client/pair-init`` is accepted as this attempt's unless it raises.
+    """
+    finalize: ClientPairFinalizeMessage | None = None
+    pair_init_seen = False
+    async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
+        while True:
+            message = await _receive_pairing(
+                ws, (ClientPairInitMessage, ClientPairPendingMessage, ClientPairFinalizeMessage)
+            )
+            if isinstance(message, ClientPairFinalizeMessage):
+                # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+                if (
+                    on_legacy_finalize is not None
+                    and not pair_init_seen
+                    and message.payload.long_term_psk is not None
+                ):
+                    on_legacy_finalize()
+                    finalize = message
+                    break
+                # A leftover from a cancelled attempt: discard silently.
+                continue
+            if isinstance(message, ClientPairInitMessage):
+                pair_init_seen = True
+                if on_pair_init is not None:
+                    on_pair_init()
+            if message.payload.pairing_index > pairing_index:
+                raise PairingError(
+                    f"{type(message).__name__} pairing_index is ahead of the server's count"
+                )
+            if message.payload.pairing_index < pairing_index:
+                # A leftover from a superseded pairing server/activate: discard silently.
+                continue
+            if isinstance(message, ClientPairPendingMessage):
+                raise PairingError("client/pair-pending is not part of the Pairing PSK flow")
+            if message.payload.commit_B is not None:
+                raise PairingError("client/pair-init carries commit_B for Pairing PSK")
+            break
+    async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
         record = await _finalize_server(
-            ws, client_id=client_id, store=store, method=PairMethod.PAIRING_PSK, owner=owner
+            ws,
+            client_id=client_id,
+            store=store,
+            method=PairMethod.PAIRING_PSK,
+            owner=owner,
+            finalize=finalize,
         )
     assert record is not None
     return record
@@ -552,9 +608,14 @@ async def _finalize_server(
     verify: bool = False,
     wrap_key: bytes | None = None,
     owner: str | None = None,
+    finalize: ClientPairFinalizeMessage | None = None,
 ) -> ServerPairingRecord | None:
-    """Consume ``client/pair-finalize``: finalize a record, or re-verify (returns ``None``)."""
-    finalize = await _receive_pairing(ws, ClientPairFinalizeMessage)
+    """Consume ``client/pair-finalize``: finalize a record, or re-verify (returns ``None``).
+
+    A ``finalize`` already received is consumed instead of reading the next frame.
+    """
+    if finalize is None:
+        finalize = await _receive_pairing(ws, ClientPairFinalizeMessage)
     existing = await store.record_by_client_id(client_id)
     record = existing.with_method(method) if existing is not None else None
     if not verify:
@@ -651,6 +712,12 @@ async def _receive_pairing_frame[T: PairingMessage, U: PairingMessage](
 ) -> T | U | str: ...
 
 
+@overload
+async def _receive_pairing_frame[T: PairingMessage, U: PairingMessage, V: PairingMessage](
+    ws: EncryptedWebSocket, expected: tuple[type[T], type[U], type[V]]
+) -> T | U | V | str: ...
+
+
 async def _receive_pairing_frame(
     ws: EncryptedWebSocket, expected: type[PairingMessage] | tuple[type[PairingMessage], ...]
 ) -> PairingMessage | str:
@@ -684,9 +751,17 @@ async def _receive_pairing[T: PairingMessage, U: PairingMessage](
 ) -> T | U: ...
 
 
+@overload
+async def _receive_pairing[T: PairingMessage, U: PairingMessage, V: PairingMessage](
+    ws: EncryptedWebSocket, expected: tuple[type[T], type[U], type[V]]
+) -> T | U | V: ...
+
+
 async def _receive_pairing(
     ws: EncryptedWebSocket,
-    expected: type[PairingMessage] | tuple[type[PairingMessage], type[PairingMessage]],
+    expected: type[PairingMessage]
+    | tuple[type[PairingMessage], type[PairingMessage]]
+    | tuple[type[PairingMessage], type[PairingMessage], type[PairingMessage]],
 ) -> PairingMessage:
     """Receive the next pairing frame, requiring it to be of an ``expected`` type."""
     message = await _receive_pairing_frame(ws, expected)
