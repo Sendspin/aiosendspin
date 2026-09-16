@@ -689,6 +689,36 @@ async def test_set_active_roles_notifies_group_of_stream_membership() -> None:
 
 
 @pytest.mark.asyncio
+async def test_join_active_stream_requires_connected_active_role() -> None:
+    """join_active_stream joins only an active role of a connected client."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = SendspinClient(server, client_id="player-1")
+    group = SendspinGroup(server, client)
+
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=_player_hello("player-1"),
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
+    role = client.role(Roles.PLAYER.value)
+    assert role is not None
+
+    with patch.object(group, "on_role_activated") as activated:
+        client.join_active_stream(role)
+        activated.assert_not_called()
+
+        client.mark_connected()
+        client.join_active_stream(role)
+        activated.assert_called_once_with(role)
+
+        client.set_active_roles([])
+        client.join_active_stream(role)
+        activated.assert_called_once_with(role)
+
+
+@pytest.mark.asyncio
 async def test_active_roles_kept_in_canonical_family_order() -> None:
     """Attach and set_active_roles order roles by family (player before controller)."""
     loop = asyncio.get_running_loop()

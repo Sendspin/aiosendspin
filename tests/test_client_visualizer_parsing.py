@@ -13,6 +13,7 @@ from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
     VisualizerFrame,
+    VisualizerStatePayload,
 )
 
 from .conftest import make_sdk_client
@@ -172,13 +173,11 @@ def test_parse_pitch_rejects_wrong_length() -> None:
 
 
 def _connection_with_visualizer_callback() -> tuple[SendspinConnection, list[VisualizerFrame]]:
-    support = ClientHelloVisualizerSupport(
-        types=["loudness", "beat"], buffer_capacity=65536, rate_max=30
-    )
     client = make_sdk_client(
         client_name="x",
         roles=[Roles.VISUALIZER],
-        visualizer_support=support,
+        visualizer_support=ClientHelloVisualizerSupport(buffer_capacity=65536),
+        visualizer_state=VisualizerStatePayload(types=["loudness", "beat"], rate_max=30),
     )
     received: list[VisualizerFrame] = []
 

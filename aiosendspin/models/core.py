@@ -55,6 +55,7 @@ from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
     StreamStartVisualizer,
+    VisualizerStatePayload,
 )
 from .visualizer_draft_r1 import (
     ClientHelloVisualizerSupport as ClientHelloVisualizerSupportDraftR1,
@@ -459,6 +460,8 @@ class ClientStatePayload(SendspinModel):
     """Source state."""
     artwork: ClientStateArtwork | None = None
     """Artwork channel configuration - only if client has artwork role."""
+    visualizer: VisualizerStatePayload | None = None
+    """Visualizer stream configuration - only if client has visualizer role."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
@@ -906,8 +909,9 @@ class StreamRequestFormatPayload(SendspinModel):
     """Pre-#195 player format request, superseded by the client/state player `format`."""
     artwork: StreamRequestFormatArtwork | None = None
     """Artwork format request (only for clients with artwork role)."""
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     visualizer: StreamRequestFormatVisualizer | None = None
-    """Visualizer format request (only for clients with visualizer role)."""
+    """Pre-#195 visualizer format request, superseded by the client/state visualizer object."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

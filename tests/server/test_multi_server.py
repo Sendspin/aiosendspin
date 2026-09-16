@@ -388,6 +388,61 @@ class TestEncryptedActivities:
         assert await conn._exchange_hellos() is False  # noqa: SLF001
         assert "client-1" not in strict_server._clients  # noqa: SLF001
 
+    @staticmethod
+    def _visualizer_hello(**support_extra: object) -> str:
+        return orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "client-1",
+                    "supported_roles": ["visualizer@v1"],
+                    "visualizer@v1_support": {"buffer_capacity": 65_536, **support_extra},
+                },
+            }
+        ).decode()
+
+    @pytest.mark.asyncio
+    async def test_strict_server_admits_visualizer_hello_without_stream_config(self) -> None:
+        """A visualizer hello carrying only buffer_capacity is admitted by a strict server."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = self._long_term_connection(strict_server, self._visualizer_hello())
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "visualizer@v1" in conn._negotiated_roles  # noqa: SLF001
+
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_hello_visualizer_stream_config_is_flagged(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A hello still carrying visualizer stream configuration is admitted and flagged."""
+        conn = self._long_term_connection(
+            mock_server, self._visualizer_hello(types=["loudness"], rate_max=30)
+        )
+
+        with caplog.at_level("WARNING"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "declared visualizer stream configuration" in caplog.text
+        support = mock_server._clients["client-1"].info.visualizer_support  # noqa: SLF001
+        assert support is not None
+        assert support.types == ["loudness"]
+
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_strict_server_rejects_hello_visualizer_stream_config(self) -> None:
+        """When noncompliance is disallowed, a hello with visualizer stream config is rejected."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = self._long_term_connection(strict_server, self._visualizer_hello(rate_max=30))
+
+        assert await conn._exchange_hellos() is False  # noqa: SLF001
+        assert "client-1" not in strict_server._clients  # noqa: SLF001
+
     @pytest.mark.asyncio
     async def test_strict_server_excludes_draft_visualizer_without_rejecting(self) -> None:
         """Strict mode does not activate the legacy draft wire, but admits the client."""

@@ -25,10 +25,15 @@ from aiosendspin.models.core import (
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
 from aiosendspin.models.player import PlayerStatePayload, StreamRequestFormatPlayer
 from aiosendspin.models.types import ArtworkSource, ManagementResult
-from aiosendspin.models.visualizer import StreamRequestFormatVisualizer
+from aiosendspin.models.visualizer import (
+    ClientHelloVisualizerSupport,
+    StreamRequestFormatVisualizer,
+    VisualizerStatePayload,
+)
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
 
 
 @dataclass(slots=True)
@@ -287,22 +292,110 @@ async def test_strict_rejection_of_player_request_format_skips_roles() -> None:
     role.on_stream_request_format.assert_not_called()
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 @pytest.mark.asyncio
-async def test_visualizer_request_format_is_not_flagged_as_player_request() -> None:
-    """A request without a player object is not flagged by the player deprecation."""
+async def test_visualizer_request_format_is_flagged_and_still_routed() -> None:
+    """A pre-#195 visualizer format request is flagged, then handed to the roles."""
     conn, client = _conn_with_client()
-    client.active_roles = [_role("visualizer")]
+    role = _role("visualizer")
+    client.active_roles = [role]
+    payload = StreamRequestFormatPayload(visualizer=StreamRequestFormatVisualizer(rate_max=15))
 
     await conn._handle_message(  # noqa: SLF001
-        StreamRequestFormatMessage(
-            payload=StreamRequestFormatPayload(
-                visualizer=StreamRequestFormatVisualizer(rate_max=15)
-            )
-        ),
+        StreamRequestFormatMessage(payload=payload), timestamp_us=0
+    )
+
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert flagged == [
+        (
+            "sent a stream/request-format visualizer object, "
+            "superseded by the client/state visualizer object"
+        )
+    ]
+    role.on_stream_request_format.assert_called_once_with(payload)
+
+
+_VISUALIZER_STATE = VisualizerStatePayload(types=["loudness", "spectrum"], rate_max=30)
+
+
+@pytest.mark.asyncio
+async def test_client_state_visualizer_object_for_inactive_role_is_flagged() -> None:
+    """A visualizer state object with no active visualizer role is flagged."""
+    conn, client = _conn_with_client()
+    client.active_roles = [_role("controller")]
+    conn._initial_state_received = True  # noqa: SLF001
+    client.available = None
+    await conn._handle_message(  # noqa: SLF001
+        ClientStateMessage(payload=ClientStatePayload(visualizer=_VISUALIZER_STATE)),
+        timestamp_us=0,
+    )
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert flagged == ["client/state carried a visualizer object for an inactive role"]
+
+
+def _visualizer_client(conn: SendspinConnection, client: MagicMock) -> VisualizerV1Role:
+    client.info.visualizer_support = ClientHelloVisualizerSupport(buffer_capacity=65_536)
+    client.available = None
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    client.active_roles = [role]
+    conn._initial_state_received = True  # noqa: SLF001
+    return role
+
+
+@pytest.mark.asyncio
+async def test_strict_rejects_visualizer_spectrum_without_config() -> None:
+    """Requesting `spectrum` without its configuration rejects a strict client."""
+    conn, client = _conn_with_client()
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    role = _visualizer_client(conn, client)
+
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_message(  # noqa: SLF001
+            ClientStateMessage(payload=ClientStatePayload(visualizer=_VISUALIZER_STATE)),
+            timestamp_us=0,
+        )
+    client.join_active_stream.assert_not_called()
+    role.on_stream_start()
+    client.send_role_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lenient_keeps_client_but_omits_spectrum_without_config() -> None:
+    """A lenient server flags the missing configuration and streams the other types."""
+    conn, client = _conn_with_client()
+    role = _visualizer_client(conn, client)
+
+    await conn._handle_message(  # noqa: SLF001
+        ClientStateMessage(payload=ClientStatePayload(visualizer=_VISUALIZER_STATE)),
         timestamp_us=0,
     )
 
-    client.flag_noncompliance.assert_not_called()
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert flagged == [
+        "client/state requested visualizer 'spectrum' without a spectrum configuration"
+    ]
+    role.on_stream_start()
+    start = client.send_role_message.call_args.args[1]
+    assert start.payload.visualizer.types == ("loudness",)
+
+
+@pytest.mark.asyncio
+async def test_strict_rejects_nonpositive_visualizer_rate_max() -> None:
+    """A non-positive visualizer rate_max rejects a strict client."""
+    conn, client = _conn_with_client()
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    _visualizer_client(conn, client)
+
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_message(  # noqa: SLF001
+            ClientStateMessage(
+                payload=ClientStatePayload(
+                    visualizer=VisualizerStatePayload(types=["loudness"], rate_max=0)
+                )
+            ),
+            timestamp_us=0,
+        )
 
 
 @pytest.mark.asyncio

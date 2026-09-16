@@ -571,6 +571,14 @@ class SendspinClient:
 
         self._rebuild_binary_handling_cache()
 
+    def join_active_stream(self, role: Role) -> None:
+        """Join an active role to its group's running stream, once the client is connected.
+
+        For a role whose stream waits on client/state it received after connecting.
+        """
+        if self._connected and self._roles.get(role.role_id) is role:
+            self.group.on_role_activated(role)
+
     def refresh_identity_from_hello(
         self, client_info: ClientHelloPayload, *, negotiated_roles: list[str]
     ) -> None:
