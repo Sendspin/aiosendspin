@@ -2507,9 +2507,17 @@ class SendspinConnection:
             heapq.heappush(self._ready_roles, (head_sort_ts, head_seq, role))
 
     def _discard_role_queue(self, role: str) -> None:
-        """Drop everything still queued or held for a role."""
+        """Drop everything still queued or held for a role, except a stream/end it still owes."""
         if role_queue := self._role_queues.pop(role, None):
             self._queue_size = max(self._queue_size - len(role_queue), 0)
+            lifecycle = [
+                entry.json_message
+                for _, _, entry in sorted(role_queue)
+                if isinstance(entry.json_message, StreamStartMessage | StreamEndMessage)
+            ]
+            if lifecycle and isinstance(lifecycle[-1], StreamEndMessage):
+                # The role considers this stream ended and will not send the end again.
+                self.send_priority_message(lifecycle[-1])
         # Commands are control messages, keyed in their payload by role family.
         commands = [
             message

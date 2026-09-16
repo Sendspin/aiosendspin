@@ -471,3 +471,17 @@ async def test_reactivated_source_is_not_held() -> None:
         )
     flag.assert_not_called()
     assert conn._activation_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_unsent_stream_end_still_precedes_server_activate() -> None:
+    """A stream/end still queued for a removed role is sent, not discarded with its queue."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value]))
+    player = _client(conn).role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._stream_started = True  # noqa: SLF001
+    player.on_stream_end()
+
+    await _set_trusted(conn, trusted=False)
+
+    assert await _drain_priority(conn, fake) == ["stream/end", "server/activate"]
