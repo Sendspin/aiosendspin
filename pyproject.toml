@@ -126,6 +126,9 @@ line-ending = "lf"
 [tool.pytest.ini_options]
 addopts = "--cov -n auto --timeout=10"
 asyncio_mode = "auto"
+# A Noise handshake must never warn: the library warns on a pre-set ephemeral, which only
+# the credential-mismatch fork does, and only where reusing one replays a single exchange.
+filterwarnings = ["error::UserWarning:noise.noise_protocol"]
 
 [tool.ruff.lint]
 ignore = [
