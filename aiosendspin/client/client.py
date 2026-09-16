@@ -32,7 +32,11 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
 )
-from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, VisualizerFrame
+from aiosendspin.models.visualizer import (
+    ClientHelloVisualizerSupport,
+    VisualizerFrame,
+    VisualizerStatePayload,
+)
 from aiosendspin.noise.driver import HandshakeAbortedError
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingError
@@ -140,6 +144,8 @@ class SendspinClient:
     """Artwork channels reported via client/state (only set if ARTWORK role is supported)."""
     _visualizer_support: ClientHelloVisualizerSupport | None
     """Visualizer capabilities (only set if VISUALIZER role is supported)."""
+    _visualizer_state: VisualizerStatePayload | None
+    """Visualizer stream configuration reported via client/state."""
     _source_support: ClientHelloSourceSupport | None
     """Source capabilities."""
     _session: ClientSession | None
@@ -225,6 +231,7 @@ class SendspinClient:
         player_support: ClientHelloPlayerSupport | None = None,
         artwork_channels: Sequence[ArtworkChannel] | None = None,
         visualizer_support: ClientHelloVisualizerSupport | None = None,
+        visualizer_state: VisualizerStatePayload | None = None,
         source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
         output_delay_ms: float = 0.0,
@@ -265,13 +272,22 @@ class SendspinClient:
         else:
             self._artwork_state = None
 
-        # Validate and store visualizer support
+        # Validate and store visualizer support and requested configuration
         if Roles.VISUALIZER in self._roles:
             if visualizer_support is None:
                 raise ValueError("visualizer_support is required when VISUALIZER role is specified")
+            if visualizer_support.has_stream_config:
+                raise ValueError(
+                    "visualizer types, rate_max and spectrum belong in visualizer_state, "
+                    "not visualizer_support"
+                )
+            if visualizer_state is None:
+                raise ValueError("visualizer_state is required when VISUALIZER role is specified")
             self._visualizer_support = visualizer_support
+            self._visualizer_state = visualizer_state
         else:
             self._visualizer_support = None
+            self._visualizer_state = None
 
         if Roles.SOURCE in self._roles:
             if source_support is None:
@@ -355,6 +371,11 @@ class SendspinClient:
     def visualizer_support(self) -> ClientHelloVisualizerSupport | None:
         """Visualizer capabilities (only set if VISUALIZER role is supported)."""
         return self._visualizer_support
+
+    @property
+    def visualizer_state(self) -> VisualizerStatePayload | None:
+        """Visualizer stream configuration reported via client/state."""
+        return self._visualizer_state
 
     @property
     def source_support(self) -> ClientHelloSourceSupport | None:
@@ -640,6 +661,21 @@ class SendspinClient:
         connection = self._admitted_connection
         if connection is not None and connection.connected:
             await connection.send_artwork_state()
+
+    async def set_visualizer_state(self, state: VisualizerStatePayload) -> None:
+        """Set the requested visualizer stream configuration and report it to the server.
+
+        The server applies it to the current visualizer stream, or to the next one
+        when none is active. `rate_max` caps periodic types only.
+
+        Raises ValueError when this client does not have the VISUALIZER role.
+        """
+        if Roles.VISUALIZER not in self._roles:
+            raise ValueError("visualizer_state requires the VISUALIZER role")
+        self._visualizer_state = state
+        connection = self._admitted_connection
+        if connection is not None and connection.connected:
+            await connection.send_visualizer_state()
 
     # --- Connection lifecycle ---
 

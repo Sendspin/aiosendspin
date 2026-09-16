@@ -1246,6 +1246,12 @@ class SendspinConnection:
                 "superseded by the client/state artwork object"
             )
             self._flag_legacy_artwork_wire(client_info.artwork_support)
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        visualizer_support = client_info.visualizer_support
+        if visualizer_support is not None and visualizer_support.has_stream_config:
+            self._flag_noncompliance(
+                "client/hello declared visualizer stream configuration, superseded by client/state"
+            )
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         player_support = client_info.player_support
         if player_support is not None and player_support.supported_commands is not None:
@@ -2054,6 +2060,12 @@ class SendspinConnection:
                     "sent a stream/request-format artwork object, "
                     "superseded by the client/state artwork object"
                 )
+            if fmt.visualizer is not None:
+                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+                self._flag_noncompliance(
+                    "sent a stream/request-format visualizer object, "
+                    "superseded by the client/state visualizer object"
+                )
             self._flag_inactive_role_payloads(
                 "stream/request-format",
                 {"player": fmt.player, "artwork": fmt.artwork, "visualizer": fmt.visualizer},
@@ -2121,7 +2133,12 @@ class SendspinConnection:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
         self._flag_inactive_role_payloads(
             "client/state",
-            {"player": payload.player, "source": payload.source, "artwork": payload.artwork},
+            {
+                "player": payload.player,
+                "source": payload.source,
+                "artwork": payload.artwork,
+                "visualizer": payload.visualizer,
+            },
         )
         for role in self._client.active_roles:
             for reason in role.client_state_deviations(payload):

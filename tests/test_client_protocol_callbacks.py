@@ -48,7 +48,12 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
 )
-from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, VisualizerFrame
+from aiosendspin.models.visualizer import (
+    ClientHelloVisualizerSpectrum,
+    ClientHelloVisualizerSupport,
+    VisualizerFrame,
+    VisualizerStatePayload,
+)
 from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
     InMemoryClientPairingStore,
@@ -132,18 +137,19 @@ async def test_server_hello_records_accepted_source_codecs(
 
 
 async def _connection(
-    category: PskCategory, *, unpaired_access: bool = False
+    category: PskCategory, *, unpaired_access: bool = False, **client_kwargs: Any
 ) -> SendspinConnection:
     store = InMemoryClientPairingStore()
     await store.store_pairing_config(
         replace(await store.get_pairing_config(), unpaired_access_enabled=unpaired_access)
     )
+    client_kwargs.setdefault("roles", [Roles.PLAYER, Roles.ARTWORK])
     client = make_sdk_client(
         client_name="Test Client",
-        roles=[Roles.PLAYER, Roles.ARTWORK],
         player_support=_player_support(),
         artwork_channels=_artwork_channels(),
         pairing_store=store,
+        **client_kwargs,
     )
     connection = SendspinConnection(client)
     psk = generate_psk()
@@ -336,11 +342,10 @@ def _artwork_channels() -> list[ArtworkChannel]:
 
 
 def _visualizer_support() -> ClientHelloVisualizerSupport:
-    return ClientHelloVisualizerSupport(
-        buffer_capacity=4096,
-        rate_max=30,
-        types=["loudness"],
-    )
+    return ClientHelloVisualizerSupport(buffer_capacity=4096)
+
+
+_VISUALIZER_STATE = VisualizerStatePayload(types=["loudness"], rate_max=30)
 
 
 def _stream_start_player() -> StreamStartPlayer:
@@ -472,6 +477,7 @@ async def test_visualizer_binary_dropped_when_only_player_stream_active() -> Non
         roles=[Roles.PLAYER, Roles.VISUALIZER],
         player_support=_player_support(),
         visualizer_support=_visualizer_support(),
+        visualizer_state=_VISUALIZER_STATE,
     )
     captured: list[list[VisualizerFrame]] = []
     client.add_visualizer_listener(captured.append)
@@ -852,10 +858,10 @@ class _FakeTimeFilter:
 
 
 async def _state_connection(
-    active_roles: list[str],
+    active_roles: list[str], **client_kwargs: Any
 ) -> tuple[SendspinConnection, list[dict[str, Any]]]:
     """Return a connected, unsynchronized connection and the client/state payloads it sends."""
-    connection = await _connection(PskCategory.LONG_TERM)
+    connection = await _connection(PskCategory.LONG_TERM, **client_kwargs)
     sent: list[dict[str, Any]] = []
 
     async def _capture(payload: str) -> None:
@@ -924,7 +930,7 @@ async def test_player_available_withheld_until_clock_synchronizes(
     assert sent[-1]["available"] is True
 
 
-@pytest.mark.parametrize("role", [Roles.CONTROLLER, Roles.METADATA, Roles.VISUALIZER])
+@pytest.mark.parametrize("role", [Roles.CONTROLLER, Roles.METADATA])
 async def test_stateless_roles_send_initial_state(role: Roles) -> None:
     """A client with only stateless roles active still sends its initial client/state."""
     connection, sent = await _state_connection([role.value])
@@ -1065,3 +1071,124 @@ async def test_build_client_hello_omits_artwork_support() -> None:
 
     assert hello["payload"]["supported_roles"] == [Roles.ARTWORK.value]
     assert "artwork@v1_support" not in hello["payload"]
+
+
+# ---------------------------------------------------------------------------
+# Visualizer stream configuration in client/state
+# ---------------------------------------------------------------------------
+
+_VISUALIZER_CLIENT = {
+    "roles": [Roles.PLAYER, Roles.VISUALIZER],
+    "visualizer_support": _visualizer_support(),
+    "visualizer_state": _VISUALIZER_STATE,
+}
+
+
+async def test_build_client_hello_visualizer_support_carries_only_buffer_capacity() -> None:
+    """The visualizer hello support object carries only buffer_capacity."""
+    connection = SendspinConnection(
+        make_sdk_client(client_name="c", player_support=_player_support(), **_VISUALIZER_CLIENT)
+    )
+
+    hello = (await connection._build_client_hello()).to_dict()  # noqa: SLF001
+
+    assert hello["payload"]["visualizer@v1_support"] == {"buffer_capacity": 4096}
+
+
+def test_visualizer_client_requires_state_without_hello_stream_config() -> None:
+    """The constructor requires visualizer_state and rejects stream config on the support."""
+    with pytest.raises(ValueError, match="visualizer_state is required"):
+        make_sdk_client(
+            client_name="c", roles=[Roles.VISUALIZER], visualizer_support=_visualizer_support()
+        )
+    with pytest.raises(ValueError, match="belong in visualizer_state"):
+        make_sdk_client(
+            client_name="c",
+            roles=[Roles.VISUALIZER],
+            visualizer_support=ClientHelloVisualizerSupport(buffer_capacity=4096, rate_max=30),
+            visualizer_state=_VISUALIZER_STATE,
+        )
+
+
+async def test_visualizer_only_initial_state_carries_visualizer_object() -> None:
+    """A visualizer-only activation sends one initial client/state with the visualizer object."""
+    connection, sent = await _state_connection([Roles.VISUALIZER.value], **_VISUALIZER_CLIENT)
+
+    await connection.start()
+
+    assert sent == [{"available": True, "visualizer": _VISUALIZER_STATE.to_dict()}]
+
+
+async def test_player_initial_state_carries_visualizer_object() -> None:
+    """With player and visualizer active, the player state also carries the visualizer object."""
+    connection, sent = await _state_connection(
+        [Roles.PLAYER.value, Roles.VISUALIZER.value], **_VISUALIZER_CLIENT
+    )
+
+    await connection.start()
+
+    assert len(sent) == 1
+    assert "player" in sent[0]
+    assert sent[0]["visualizer"] == _VISUALIZER_STATE.to_dict()
+
+
+async def test_visualizer_object_omitted_while_role_inactive() -> None:
+    """No visualizer object is sent while the server has not activated the role."""
+    connection, sent = await _state_connection([Roles.PLAYER.value], **_VISUALIZER_CLIENT)
+
+    await connection.start()
+
+    assert "visualizer" not in sent[0]
+
+
+async def test_visualizer_activation_resends_state_with_visualizer_object() -> None:
+    """Activating the visualizer role sends a client/state carrying its object."""
+    connection, sent = await _state_connection([Roles.PLAYER.value], **_VISUALIZER_CLIENT)
+    await connection.start()
+    sent.clear()
+
+    await connection._handle_server_activate(  # noqa: SLF001
+        ServerActivatePayload(
+            activities=[], active_roles=[Roles.PLAYER.value, Roles.VISUALIZER.value]
+        )
+    )
+
+    assert len(sent) == 1
+    assert sent[0]["visualizer"] == _VISUALIZER_STATE.to_dict()
+
+
+async def test_set_visualizer_state_sends_client_state() -> None:
+    """Changing the requested visualizer configuration reports it via client/state."""
+    connection, sent = await _state_connection([Roles.VISUALIZER.value], **_VISUALIZER_CLIENT)
+    client = connection._client  # noqa: SLF001
+    client._admitted_connection = connection  # noqa: SLF001
+    spectrum = ClientHelloVisualizerSpectrum(n_disp_bins=16, scale="mel", f_min=20, f_max=16_000)
+    state = VisualizerStatePayload(types=["spectrum", "beat"], rate_max=15, spectrum=spectrum)
+
+    await client.set_visualizer_state(state)
+
+    assert client.visualizer_state == state
+    assert sent == [{"available": True, "visualizer": state.to_dict()}]
+
+
+async def test_set_visualizer_state_skips_send_without_active_role() -> None:
+    """Without an active visualizer role the configuration is stored but not sent."""
+    connection, sent = await _state_connection([Roles.PLAYER.value], **_VISUALIZER_CLIENT)
+    client = connection._client  # noqa: SLF001
+    client._admitted_connection = connection  # noqa: SLF001
+    state = VisualizerStatePayload(types=[], rate_max=10)
+
+    await client.set_visualizer_state(state)
+
+    assert sent == []
+    assert client.visualizer_state == state
+
+
+async def test_set_visualizer_state_requires_visualizer_role() -> None:
+    """A client without the visualizer role cannot set a visualizer configuration."""
+    client = make_sdk_client(
+        client_name="c", roles=[Roles.PLAYER], player_support=_player_support()
+    )
+
+    with pytest.raises(ValueError, match="VISUALIZER role"):
+        await client.set_visualizer_state(_VISUALIZER_STATE)

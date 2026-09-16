@@ -55,6 +55,7 @@ from .visualizer import (
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
     StreamStartVisualizer,
+    VisualizerStatePayload,
 )
 from .visualizer_draft_r1 import (
     ClientHelloVisualizerSupport as ClientHelloVisualizerSupportDraftR1,
@@ -459,6 +460,8 @@ class ClientStatePayload(SendspinModel):
     """Source state."""
     artwork: ClientStateArtwork | None = None
     """Artwork channel configuration - only if client has artwork role."""
+    visualizer: VisualizerStatePayload | None = None
+    """Visualizer stream configuration - only if client has visualizer role."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:

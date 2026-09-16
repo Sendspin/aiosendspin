@@ -555,12 +555,7 @@ class SendspinConnection:
             self._initial_state_sent = True
         if player_active or source_active or not self._active_roles:
             return
-        message = ClientStateMessage(
-            payload=ClientStatePayload(
-                available=self._wire_available(), artwork=self._active_artwork_state()
-            )
-        )
-        await self._send_message(message.to_json())
+        await self._send_message(self._client_state_message().to_json())
         self._initial_state_sent = True
 
     async def _pair(self) -> None:
@@ -928,20 +923,16 @@ class SendspinConnection:
         self._reported_volume = volume
         self._reported_muted = muted
         self._reported_supported_commands = frozenset(self._client.state_supported_commands)
-        message = ClientStateMessage(
-            payload=ClientStatePayload(
-                available=self._wire_available(),
-                player=PlayerStatePayload(
-                    volume=volume,
-                    muted=muted,
-                    output_delay_ms=round(self._output_delay_us / 1_000),
-                    required_lead_time_ms=round(self._client.required_lead_time_ms),
-                    min_buffer_ms=round(self._client.min_buffer_ms),
-                    supported_commands=list(self._client.state_supported_commands),
-                    format=self._client.preferred_format,
-                ),
-                artwork=self._active_artwork_state(),
-            )
+        message = self._client_state_message(
+            player=PlayerStatePayload(
+                volume=volume,
+                muted=muted,
+                output_delay_ms=round(self._output_delay_us / 1_000),
+                required_lead_time_ms=round(self._client.required_lead_time_ms),
+                min_buffer_ms=round(self._client.min_buffer_ms),
+                supported_commands=list(self._client.state_supported_commands),
+                format=self._client.preferred_format,
+            ),
         )
         await self._send_message(message.to_json())
 
@@ -955,12 +946,7 @@ class SendspinConnection:
                 return
             await self._send_source_state()
             return
-        message = ClientStateMessage(
-            payload=ClientStatePayload(
-                available=self._wire_available(), artwork=self._active_artwork_state()
-            )
-        )
-        await self._send_message(message.to_json())
+        await self._send_message(self._client_state_message().to_json())
 
     async def send_artwork_state(self) -> None:
         """
@@ -971,6 +957,34 @@ class SendspinConnection:
         """
         if self._is_role_active("artwork"):
             await self.send_available(available=self._reported_available)
+
+    async def send_visualizer_state(self) -> None:
+        """
+        Report the requested visualizer configuration when the visualizer role is active.
+
+        An active source withholds client/state until its clock synchronizes; the
+        configuration is then reported with that state.
+        """
+        if self._is_role_active("visualizer"):
+            await self.send_available(available=self._reported_available)
+
+    def _client_state_message(
+        self,
+        *,
+        player: PlayerStatePayload | None = None,
+        source: SourceStatePayload | None = None,
+    ) -> ClientStateMessage:
+        """Build a client/state with availability and the objects of the active roles."""
+        visualizer = self._client.visualizer_state if self._is_role_active("visualizer") else None
+        return ClientStateMessage(
+            payload=ClientStatePayload(
+                available=self._wire_available(),
+                player=player,
+                source=source,
+                artwork=self._active_artwork_state(),
+                visualizer=visualizer,
+            )
+        )
 
     def _active_artwork_state(self) -> ClientStateArtwork | None:
         """Return the artwork object every client/state carries while the role is active."""
@@ -1075,12 +1089,8 @@ class SendspinConnection:
 
     async def _send_source_state(self) -> None:
         """Send current source state."""
-        message = ClientStateMessage(
-            payload=ClientStatePayload(
-                available=self._wire_available(),
-                source=SourceStatePayload(signal=self._reported_source_signal),
-                artwork=self._active_artwork_state(),
-            )
+        message = self._client_state_message(
+            source=SourceStatePayload(signal=self._reported_source_signal)
         )
         await self._send_message(message.to_json())
 
@@ -1322,6 +1332,7 @@ class SendspinConnection:
         was_player_active = self._is_role_active("player")
         was_source_active = self._is_role_active("source")
         was_artwork_active = self._is_role_active("artwork")
+        was_visualizer_active = self._is_role_active("visualizer")
         if (reason := await self._apply_activation(payload)) is not None:
             await self._goodbye_and_disconnect(reason)
             return
@@ -1332,8 +1343,16 @@ class SendspinConnection:
         player_activated = not was_player_active and self._is_role_active("player")
         source_activated = not was_source_active and self._is_role_active("source")
         artwork_activated = not was_artwork_active and self._is_role_active("artwork")
+        visualizer_activated = not was_visualizer_active and self._is_role_active("visualizer")
         initial_state_due = bool(self._active_roles) and not self._initial_state_sent
-        if resync or player_activated or source_activated or artwork_activated or initial_state_due:
+        if (
+            resync
+            or player_activated
+            or source_activated
+            or artwork_activated
+            or visualizer_activated
+            or initial_state_due
+        ):
             await self._send_full_client_state()
 
     async def _pause_time_sync(self) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from .base import SendspinConfig, SendspinModel
 
@@ -68,41 +68,79 @@ class ClientHelloVisualizerSpectrum(SendspinModel):
         omit_none = True
 
 
+def _supported_types(raw_types: object) -> object:
+    """Drop duplicate and unknown entries from a raw `types` list, keeping order."""
+    if not isinstance(raw_types, list):
+        return raw_types
+    deduped: list[str] = []
+    for value in raw_types:
+        if isinstance(value, str) and value in _SUPPORTED_TYPES and value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
 @dataclass
 class ClientHelloVisualizerSupport(SendspinModel):
     """Visualizer support payload for client/hello visualizer negotiation."""
 
     buffer_capacity: int
-    rate_max: int
-    types: list[str]
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # Stream configuration sent in the hello by clients predating its move to client/state.
+    rate_max: int | None = None
+    types: list[SupportedVisualizerType] | None = None
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
     @classmethod
     def __pre_deserialize__(cls, payload: dict[str, Any]) -> dict[str, Any]:
         """Normalize incoming support payload before dataclass construction."""
-        raw_types = payload.get("types")
-        if isinstance(raw_types, list):
-            deduped: list[str] = []
-            for value in raw_types:
-                if isinstance(value, str) and value in _SUPPORTED_TYPES and value not in deduped:
-                    deduped.append(value)
+        if "types" in payload:
             payload = dict(payload)
-            payload["types"] = deduped
+            payload["types"] = _supported_types(payload["types"])
         return payload
 
     def __post_init__(self) -> None:
         """Validate support object constraints."""
-        if not self.types:
-            raise ValueError(
-                "visualizer support 'types' must contain at least one supported type "
-                f"(supported: {list(_SUPPORTED_TYPES)})"
-            )
         if self.buffer_capacity <= 0:
             raise ValueError(f"buffer_capacity must be > 0, got {self.buffer_capacity}")
-        if self.rate_max <= 0:
+        if self.rate_max is not None and self.rate_max <= 0:
             raise ValueError(f"rate_max must be > 0, got {self.rate_max}")
-        if "spectrum" in self.types and self.spectrum is None:
-            raise ValueError("visualizer support must include 'spectrum' object")
+
+    @property
+    def has_stream_config(self) -> bool:
+        """Whether the hello carried stream configuration that belongs in client/state."""
+        return self.types is not None or self.rate_max is not None or self.spectrum is not None
+
+    class Config(SendspinConfig):
+        """Config for json serialization."""
+
+        omit_none = True
+
+
+# Client -> Server: client/state visualizer object
+@dataclass
+class VisualizerStatePayload(SendspinModel):
+    """Visualizer object in client/state: the stream configuration the client requests.
+
+    `rate_max` caps periodic types (`loudness`, `f_peak`, `spectrum`) only; it does not
+    apply to `beat` or `peak` events. `spectrum` is required when `types` includes
+    `spectrum`. Neither rule is enforced on parse: the server reports violations
+    through its compliance checks.
+    """
+
+    types: list[SupportedVisualizerType]
+    """Requested visualization data types, possibly empty."""
+    rate_max: int
+    """Maximum periodic frames per second per type."""
+    spectrum: ClientHelloVisualizerSpectrum | None = None
+    """Spectrum configuration, required when `types` includes `spectrum`."""
+
+    @classmethod
+    def __pre_deserialize__(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        """Drop duplicate and unknown types, which a newer client may send."""
+        if "types" in payload:
+            payload = dict(payload)
+            payload["types"] = _supported_types(payload["types"])
+        return payload
 
     class Config(SendspinConfig):
         """Config for json serialization."""
@@ -113,7 +151,10 @@ class ClientHelloVisualizerSupport(SendspinModel):
 # Server -> Client: stream/start visualizer object
 @dataclass(frozen=True)
 class StreamStartVisualizer(SendspinModel):
-    """Negotiated visualizer stream config returned in stream/start."""
+    """Negotiated visualizer stream config returned in stream/start.
+
+    `rate_max` caps periodic types (`loudness`, `f_peak`, `spectrum`) only.
+    """
 
     types: tuple[SupportedVisualizerType, ...]
     rate_max: int
@@ -121,27 +162,25 @@ class StreamStartVisualizer(SendspinModel):
     spectrum: ClientHelloVisualizerSpectrum | None = None
 
     @classmethod
-    def from_support(
+    def from_request(
         cls,
-        support: ClientHelloVisualizerSupport,
+        request: VisualizerStatePayload,
         *,
         tracks_downbeats: bool | None = None,
     ) -> StreamStartVisualizer:
-        """Create server stream config from validated client support data."""
-        stream_types = cast(
-            "tuple[SupportedVisualizerType, ...]",
-            tuple(typed for typed in support.types if typed in _SUPPORTED_TYPES),
-        )
-        if not stream_types:
-            raise ValueError("visualizer stream must contain at least one supported type")
+        """Create server stream config from the client's requested configuration.
+
+        `types` may be empty; `rate_max` caps periodic types only.
+        """
+        stream_types = tuple(typed for typed in request.types if typed in _SUPPORTED_TYPES)
         # tracks_downbeats is only meaningful when beat is in types. Preserve
         # the caller's tri-state (None = not declared) instead of coercing to
         # False so an "unknown" stays omitted on the wire.
         effective_tracks_downbeats = tracks_downbeats if "beat" in stream_types else None
         return cls(
             types=stream_types,
-            rate_max=support.rate_max,
-            spectrum=support.spectrum,
+            rate_max=request.rate_max,
+            spectrum=request.spectrum if "spectrum" in stream_types else None,
             tracks_downbeats=effective_tracks_downbeats,
         )
 
