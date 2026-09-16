@@ -75,11 +75,11 @@ class ArtworkGroupRole(GroupRole):
         channel_config: ArtworkChannel,
     ) -> None:
         """Send artwork to a specific role channel."""
-        # ArtworkChannel requires these for every source but none, which is never sent.
-        assert channel_config.width is not None
-        assert channel_config.height is not None
-        assert channel_config.format is not None
         try:
+            # ArtworkChannel requires these for every source but none, which is never sent.
+            assert channel_config.width is not None
+            assert channel_config.height is not None
+            assert channel_config.format is not None
             timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
             img_data = await asyncio.to_thread(
                 self._process_and_encode_image,

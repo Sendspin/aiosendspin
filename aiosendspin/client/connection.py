@@ -963,7 +963,12 @@ class SendspinConnection:
         await self._send_message(message.to_json())
 
     async def send_artwork_state(self) -> None:
-        """Report the artwork channel configuration when the artwork role is active."""
+        """
+        Report the artwork channel configuration when the artwork role is active.
+
+        An active source withholds client/state until its clock synchronizes; the
+        configuration is then reported with that state.
+        """
         if self._is_role_active("artwork"):
             await self.send_available(available=self._reported_available)
 
