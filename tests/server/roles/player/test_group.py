@@ -164,8 +164,8 @@ def test_player_group_role_muted_one_unmuted() -> None:
     assert pgr.muted is False
 
 
-def test_player_group_role_muted_none_returns_false() -> None:
-    """Return False when any player returns None for muted."""
+def test_player_group_role_muted_ignores_unsupported_players() -> None:
+    """Return True when every mute-supporting player is muted, ignoring players without mute."""
     group = MagicMock()
     pgr = PlayerGroupRole(group)
 
@@ -175,7 +175,35 @@ def test_player_group_role_muted_none_returns_false() -> None:
     p2.get_player_muted.return_value = None
     pgr._members = [p1, p2]  # noqa: SLF001
 
+    assert pgr.muted is True
+
+
+def test_player_group_role_unsupported_when_no_player_supports() -> None:
+    """Report no group volume/mute when no player supports them, falling back to 100/False."""
+    group = MagicMock()
+    pgr = PlayerGroupRole(group)
+
+    player = MagicMock()
+    player.get_player_volume.return_value = None
+    player.get_player_muted.return_value = None
+    pgr._members = [player]  # noqa: SLF001
+
+    assert pgr.get_group_volume() is None
+    assert pgr.get_group_muted() is None
+    assert pgr.volume == 100
     assert pgr.muted is False
+
+
+def test_player_group_role_volume_zero() -> None:
+    """Report a group volume of 0 as 0."""
+    group = MagicMock()
+    pgr = PlayerGroupRole(group)
+
+    player = MagicMock()
+    player.get_player_volume.return_value = 0
+    pgr._members = [player]  # noqa: SLF001
+
+    assert pgr.volume == 0
 
 
 def test_player_group_role_set_volume_empty() -> None:
@@ -359,6 +387,70 @@ def test_player_group_role_set_volume_skips_none() -> None:
 
     p1.set_player_volume.assert_called_once_with(75)
     p2.set_player_volume.assert_not_called()
+
+
+def test_player_group_role_set_volume_redistributes_without_pass_limit() -> None:
+    """Redistribution keeps going until all delta is applied, past any fixed pass count."""
+    group = MagicMock()
+    pgr = PlayerGroupRole(group)
+
+    # Reaching 2 from these volumes takes six passes, each clamping more players at 0.
+    volumes = [90, 69, 68, 65, 62, 49, 45, 23, 20, 8]
+    players = []
+    for volume in volumes:
+        player = MagicMock()
+        player.get_player_volume.return_value = volume
+        players.append(player)
+    pgr._members = players  # noqa: SLF001
+
+    pgr.set_volume(2)
+
+    players[0].set_player_volume.assert_called_once_with(20)
+    for player in players[1:]:
+        player.set_player_volume.assert_called_once_with(0)
+
+
+def test_player_group_role_set_mute_skips_none() -> None:
+    """Skip players that return None for muted."""
+    group = MagicMock()
+    pgr = PlayerGroupRole(group)
+
+    p1 = MagicMock()
+    p1.get_player_muted.return_value = False
+    p2 = MagicMock()
+    p2.get_player_muted.return_value = None
+    pgr._members = [p1, p2]  # noqa: SLF001
+
+    pgr.set_mute(muted=True)
+
+    p1.set_player_mute.assert_called_once_with(True)  # noqa: FBT003
+    p2.set_player_mute.assert_not_called()
+
+
+def test_player_group_role_emits_on_member_join_and_leave() -> None:
+    """Group volume/mute events reflect the membership after a join or leave."""
+    p1 = _PlayerStub(_ClientStub(), volume=100, muted=True)
+    p2 = _PlayerStub(_ClientStub(), volume=50, muted=False)
+    pgr, group = _build(p1)
+
+    pgr.subscribe(p2)  # type: ignore[arg-type]
+
+    assert group._signal_event.call_args_list[-2].args[0] == PlayerGroupVolumeChangedEvent(  # noqa: SLF001
+        previous_volume=100, volume=75
+    )
+    assert group._signal_event.call_args_list[-1].args[0] == PlayerGroupMuteChangedEvent(  # noqa: SLF001
+        previous_muted=True, muted=False
+    )
+
+    group._signal_event.reset_mock()  # noqa: SLF001
+    pgr.unsubscribe(p2)  # type: ignore[arg-type]
+
+    assert group._signal_event.call_args_list[0].args[0] == PlayerGroupVolumeChangedEvent(  # noqa: SLF001
+        previous_volume=75, volume=100
+    )
+    assert group._signal_event.call_args_list[1].args[0] == PlayerGroupMuteChangedEvent(  # noqa: SLF001
+        previous_muted=False, muted=True
+    )
 
 
 def test_player_group_role_set_volume_no_change_no_event() -> None:

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from unittest.mock import MagicMock
 
 import pytest
 
-from aiosendspin.models.controller import ControllerCommandPayload
-from aiosendspin.models.core import ServerStateMessage
-from aiosendspin.models.types import MediaCommand, RepeatMode
+from aiosendspin.models.controller import ControllerCommandPayload, ControllerStatePayload
+from aiosendspin.models.core import ClientStatePayload, ServerStateMessage
+from aiosendspin.models.player import PlayerStatePayload
+from aiosendspin.models.types import MediaCommand, PlayerCommand, RepeatMode
 from aiosendspin.server.roles.controller.events import (
     ControllerMuteEvent,
     ControllerNextEvent,
@@ -24,6 +26,8 @@ from aiosendspin.server.roles.controller.events import (
     ControllerVolumeEvent,
 )
 from aiosendspin.server.roles.controller.group import ControllerGroupRole
+from aiosendspin.server.roles.player.group import PlayerGroupRole
+from aiosendspin.server.roles.player.v1 import PlayerPersistentState, PlayerV1Role
 
 
 def _make_group_stub() -> MagicMock:
@@ -31,6 +35,54 @@ def _make_group_stub() -> MagicMock:
     group = MagicMock()
     group.group_role.return_value = None
     return group
+
+
+def _wire_group() -> tuple[MagicMock, PlayerGroupRole, ControllerGroupRole]:
+    """Create a group stub that resolves real player and controller group roles."""
+    group = MagicMock()
+    group_roles: dict[str, object] = {}
+    group.group_role.side_effect = group_roles.get
+    player_group_role = PlayerGroupRole(group)
+    controller_group_role = ControllerGroupRole(group)
+    group_roles.update(player=player_group_role, controller=controller_group_role)
+    return group, player_group_role, controller_group_role
+
+
+def _make_player(
+    group: MagicMock,
+    controller_group_role: ControllerGroupRole,
+    commands: list[PlayerCommand],
+) -> PlayerV1Role:
+    """Create a player role whose client events reach the controller group role."""
+    client = MagicMock()
+    client.negotiated_role_ids = ["player@v1"]
+    client.info.player_support = None
+    client.group = group
+    client.get_or_create_role_state.return_value = PlayerPersistentState()
+    listeners: list[Callable[..., None]] = []
+
+    def add_event_listener(callback: Callable[..., None]) -> Callable[[], None]:
+        listeners.append(callback)
+        return lambda: listeners.remove(callback)
+
+    client.add_event_listener.side_effect = add_event_listener
+    client._signal_event.side_effect = lambda event: [cb(client, event) for cb in listeners]  # noqa: SLF001
+    controller_group_role.on_client_added(client)
+
+    role = PlayerV1Role(client=client)
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(volume=40, muted=True, supported_commands=commands)
+        )
+    )
+    return role
+
+
+def _last_controller_state(member: MagicMock) -> ControllerStatePayload:
+    message = member.send_message.call_args.args[0]
+    assert isinstance(message, ServerStateMessage)
+    assert message.payload.controller is not None
+    return message.payload.controller
 
 
 def test_controller_group_role_family() -> None:
@@ -109,15 +161,39 @@ def test_controller_group_role_set_mute_delegates() -> None:
 
 
 def test_controller_group_role_supported_commands_default() -> None:
-    """Default supported commands include VOLUME, MUTE, SWITCH."""
+    """Default supported commands include VOLUME, MUTE, SWITCH when players support them."""
     group = _make_group_stub()
+    player_group_role = MagicMock()
+    player_group_role.get_group_volume.return_value = 100
+    player_group_role.get_group_muted.return_value = False
+    group.group_role.return_value = player_group_role
     cgr = ControllerGroupRole(group)
 
     commands = cgr._get_supported_commands()  # noqa: SLF001
 
-    assert MediaCommand.VOLUME in commands
-    assert MediaCommand.MUTE in commands
-    assert MediaCommand.SWITCH in commands
+    assert commands == [MediaCommand.VOLUME, MediaCommand.MUTE, MediaCommand.SWITCH]
+
+
+def test_controller_group_role_supported_commands_without_player_group_role() -> None:
+    """VOLUME and MUTE are dropped when the group has no player group role."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    cgr.set_supported_commands([MediaCommand.VOLUME, MediaCommand.MUTE])
+
+    assert cgr._get_supported_commands() == [MediaCommand.SWITCH]  # noqa: SLF001
+    assert (cgr.volume, cgr.muted) == (100, False)
+
+
+def test_controller_group_role_supported_commands_follow_enum_order() -> None:
+    """Supported commands are listed in MediaCommand order regardless of input order."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    cgr.set_supported_commands([MediaCommand.UNSHUFFLE, MediaCommand.SHUFFLE, MediaCommand.PLAY])
+
+    assert cgr._get_supported_commands() == [  # noqa: SLF001
+        MediaCommand.PLAY,
+        MediaCommand.SHUFFLE,
+        MediaCommand.UNSHUFFLE,
+        MediaCommand.SWITCH,
+    ]
 
 
 def test_controller_group_role_set_supported_commands() -> None:
@@ -129,7 +205,7 @@ def test_controller_group_role_set_supported_commands() -> None:
     commands = cgr._get_supported_commands()  # noqa: SLF001
 
     # Should have both protocol and app commands
-    assert MediaCommand.VOLUME in commands
+    assert MediaCommand.SWITCH in commands
     assert MediaCommand.PLAY in commands
     assert MediaCommand.PAUSE in commands
 
@@ -517,3 +593,91 @@ def test_set_seek_max_ms_rejects_negative() -> None:
     cgr = ControllerGroupRole(_make_group_stub())
     with pytest.raises(ValueError, match="non-negative"):
         cgr.set_seek_max_ms(-1)
+
+
+def test_controller_state_drops_volume_and_mute_without_supporting_player() -> None:
+    """With no volume/mute-supporting player, state reports 100/False without those commands."""
+    group, player_group_role, controller_group_role = _wire_group()
+    player_group_role.subscribe(_make_player(group, controller_group_role, []))
+
+    member = MagicMock()
+    controller_group_role.subscribe(member)
+
+    state = _last_controller_state(member)
+    assert state.supported_commands == [MediaCommand.SWITCH]
+    assert (state.volume, state.muted) == (100, False)
+
+
+def test_controller_state_pushed_when_player_support_changes() -> None:
+    """A player's client/state adding or removing volume/mute support pushes controller state."""
+    group, player_group_role, controller_group_role = _wire_group()
+    player = _make_player(group, controller_group_role, [])
+    player_group_role.subscribe(player)
+    member = MagicMock()
+    controller_group_role.subscribe(member)
+    member.reset_mock()
+
+    player.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE])
+        )
+    )
+
+    state = _last_controller_state(member)
+    assert state.supported_commands == [
+        MediaCommand.VOLUME,
+        MediaCommand.MUTE,
+        MediaCommand.SWITCH,
+    ]
+    assert (state.volume, state.muted) == (40, True)
+
+    member.reset_mock()
+    player.on_client_state(
+        ClientStatePayload(player=PlayerStatePayload(supported_commands=[PlayerCommand.MUTE]))
+    )
+
+    state = _last_controller_state(member)
+    assert state.supported_commands == [MediaCommand.MUTE, MediaCommand.SWITCH]
+    assert (state.volume, state.muted) == (100, True)
+
+
+def test_controller_state_pushed_on_player_join_and_leave() -> None:
+    """Player membership changes push controller state computed from the new membership."""
+    group, player_group_role, controller_group_role = _wire_group()
+    member = MagicMock()
+    controller_group_role.subscribe(member)
+    member.reset_mock()
+    player = _make_player(group, controller_group_role, [PlayerCommand.VOLUME])
+
+    player_group_role.subscribe(player)
+
+    state = _last_controller_state(member)
+    assert state.supported_commands == [MediaCommand.VOLUME, MediaCommand.SWITCH]
+    assert (state.volume, state.muted) == (40, False)
+
+    member.reset_mock()
+    player_group_role.unsubscribe(player)
+
+    state = _last_controller_state(member)
+    assert state.supported_commands == [MediaCommand.SWITCH]
+    assert (state.volume, state.muted) == (100, False)
+
+
+def test_volume_and_mute_commands_ignored_without_supporting_player() -> None:
+    """Volume and mute commands are ignored while no player supports them."""
+    group, player_group_role, controller_group_role = _wire_group()
+    player = _make_player(group, controller_group_role, [])
+    player_group_role.subscribe(player)
+
+    controller_group_role.handle_command(
+        ControllerCommandPayload(command=MediaCommand.VOLUME, volume=10)
+    )
+    controller_group_role.handle_command(
+        ControllerCommandPayload(command=MediaCommand.MUTE, mute=False)
+    )
+
+    player._client.send_message.assert_not_called()  # noqa: SLF001
+    assert not any(
+        isinstance(call.args[0], ControllerVolumeEvent | ControllerMuteEvent)
+        for call in group._signal_event.call_args_list  # noqa: SLF001
+    )

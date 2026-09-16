@@ -144,28 +144,35 @@ class ControllerGroupRole(GroupRole):
         self._seek_max_ms = value
         self._push_state_to_members()
 
+    def push_state(self) -> None:
+        """Push controller state to all members if it changed since the last push."""
+        self._push_state_to_members()
+
     def on_member_join(self, role: Role) -> None:
         """Send current controller state to newly joined member."""
         self._send_state_to_role(role)
 
     def _get_supported_commands(self) -> list[MediaCommand]:
         """Get list of commands supported by protocol + application."""
-        protocol_commands = [
+        commands = {
             MediaCommand.VOLUME,
             MediaCommand.MUTE,
             MediaCommand.SWITCH,
-        ]
+            *self._supported_commands,
+        }
 
-        if self._supported_commands:
-            commands = set(protocol_commands) | set(self._supported_commands)
-        else:
-            commands = set(protocol_commands)
+        # Group volume and mute exist only while some player in the group supports them.
+        player_group_role = self._group.group_role("player")
+        if player_group_role is None or player_group_role.get_group_volume() is None:
+            commands.discard(MediaCommand.VOLUME)
+        if player_group_role is None or player_group_role.get_group_muted() is None:
+            commands.discard(MediaCommand.MUTE)
 
         # Absolute seek needs a known upper bound to advertise.
         if self._seek_max_ms is None:
             commands.discard(MediaCommand.SEEK)
 
-        return list(commands)
+        return [command for command in MediaCommand if command in commands]
 
     def _send_state_to_role(self, role: Role) -> None:
         """Send current controller state to a single role."""

@@ -1226,6 +1226,71 @@ def test_on_connect_resets_supported_commands() -> None:
     assert role.state_supported_commands == []
 
 
+def test_on_connect_clears_supported_commands_before_joining_group() -> None:
+    """The group recomputes on join without the previous connection's commands."""
+    client = _make_client_stub()
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role = PlayerV1Role(client=client)
+    role.state_supported_commands = [PlayerCommand.VOLUME, PlayerCommand.MUTE]
+    seen_on_join: list[tuple[int | None, bool | None]] = []
+    group_role = client.group.group_role.return_value
+    group_role.subscribe.side_effect = lambda r: seen_on_join.append(
+        (r.get_player_volume(), r.get_player_muted())
+    )
+
+    role.on_connect()
+
+    assert seen_on_join == [(None, None)]
+
+
+def test_player_volume_and_muted_require_supported_commands() -> None:
+    """Reported volume/mute count for the group only while their commands are supported."""
+    role = PlayerV1Role(client=_make_client_stub())
+
+    role.on_client_state(
+        ClientStatePayload(player=PlayerStatePayload(volume=40, muted=True, supported_commands=[]))
+    )
+    assert (role.volume, role.muted) == (40, True)
+    assert role.get_player_volume() is None
+    assert role.get_player_muted() is None
+
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE])
+        )
+    )
+    assert role.get_player_volume() == 40
+    assert role.get_player_muted() is True
+
+
+def test_supported_commands_change_emits_volume_event() -> None:
+    """Adding or removing volume/mute support emits VolumeChangedEvent with unchanged values."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(
+        ClientStatePayload(player=PlayerStatePayload(volume=40, supported_commands=[]))
+    )
+
+    for commands in ([PlayerCommand.VOLUME], [PlayerCommand.VOLUME, PlayerCommand.MUTE], []):
+        client._signal_event.reset_mock()  # noqa: SLF001
+        role.on_client_state(
+            ClientStatePayload(player=PlayerStatePayload(supported_commands=commands))
+        )
+        client._signal_event.assert_called_once_with(  # noqa: SLF001
+            VolumeChangedEvent(volume=40, muted=False)
+        )
+
+    client._signal_event.reset_mock()  # noqa: SLF001
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(supported_commands=[PlayerCommand.SET_OUTPUT_DELAY])
+        )
+    )
+    client._signal_event.assert_not_called()  # noqa: SLF001
+
+
 # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
 def test_legacy_hello_commands_apply_from_first_state() -> None:
     """A pre-#177 hello's commands apply once a client/state arrives, even one without a list."""
