@@ -960,6 +960,68 @@ async def test_dynamic_pairing_code_qr_round_trip() -> None:
     assert client_record.psk == server_record.psk
 
 
+async def test_code_server_discards_a_superseded_attempts_pair_retry() -> None:
+    """A client/pair-retry still in flight from a superseded attempt does not fail the next one."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def emit(pairing_code: str) -> None:
+        shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown
+
+    await client_ews.send_str(ClientPairRetryMessage().to_json())
+
+    _client_ret, server_record = await asyncio.gather(
+        run_dynamic_pairing_code_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_emitter=emit,
+            server_id="server-X",
+            store=client_store,
+        ),
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=server_store,
+        ),
+    )
+    assert server_record is not None
+    assert await server_store.record_by_client_id("client-A") == server_record
+
+
+async def test_pairing_psk_server_discards_a_superseded_attempts_pair_retry() -> None:
+    """A client/pair-retry in flight from a dynamic attempt does not fail a Pairing PSK attempt."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    await client_ews.send_str(ClientPairRetryMessage().to_json())
+
+    _client_ret, server_record = await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews, pairing_index=1, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews,
+            pairing_index=1,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            on_legacy_finalize=_unexpected_legacy_finalize,
+        ),
+    )
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert server_record.psk == client_record.psk
+
+
 async def test_dynamic_pairing_code_server_discards_stale_pair_init() -> None:
     """A pair-init left over from a superseded activate is discarded; the fresh one pairs."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()

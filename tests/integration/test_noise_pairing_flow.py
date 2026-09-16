@@ -1297,6 +1297,59 @@ async def test_live_pairing_invalid_operator_input_leaves_pairing() -> None:
             await client.disconnect()
 
 
+async def test_pair_retry_in_flight_does_not_fail_the_next_attempt() -> None:
+    """A retry sent before the client saw a leave does not fail an attempt started right after."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def display(pairing_code: str | None) -> None:
+        if pairing_code is not None:
+            shown.put_nowait(pairing_code)
+
+    async def provide() -> str:
+        return await shown.get()
+
+    run_client = client_connection_module.run_dynamic_pairing_code_client
+
+    async def client_with_retry_in_flight(ws: EncryptedWebSocket, **kwargs: Any) -> str | None:
+        # The previous attempt's retry reaches the server after its next pairing activate.
+        await ws.send_str(ClientPairRetryMessage().to_json())
+        return await run_client(ws, **kwargs)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with patch.object(
+                client_connection_module,
+                "run_dynamic_pairing_code_client",
+                client_with_retry_in_flight,
+            ):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+            await _await_long_term_record(client_store, server.id)
+            assert client.connected
+            assert client.noise_psk is not None
+            assert client.noise_psk.category is PskCategory.LONG_TERM
+        finally:
+            await client.disconnect()
+
+
 # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
 async def _send_list_form_hello(self: SdkConnection) -> None:
     """Send client/hello with supported_pair_methods in the superseded list form."""
