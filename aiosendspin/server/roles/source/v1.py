@@ -70,7 +70,7 @@ class SourceV1Role(Role):
 
     @staticmethod
     def accepted_codecs() -> list[AudioCodec]:
-        """Codecs accepted in client_stream/start, as listed in server/hello."""
+        """Codecs accepted in client-stream/start, as listed in server/hello."""
         codecs = [AudioCodec.FLAC, AudioCodec.PCM]
         if opus_available():
             codecs.append(AudioCodec.OPUS)
@@ -130,7 +130,7 @@ class SourceV1Role(Role):
 
         if source.codec not in self.accepted_codecs():
             self._client.flag_noncompliance(
-                f"client_stream/start announced codec {source.codec.value!r}, "
+                f"client-stream/start announced codec {source.codec.value!r}, "
                 "which server/hello did not list"
             )
             return
