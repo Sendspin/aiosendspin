@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from io import BytesIO
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -121,6 +123,19 @@ def _image(red: int) -> Image.Image:
     return Image.new("RGB", (2, 2), (red, 0, 0))
 
 
+def _gate_encoding(agr: ArtworkGroupRole, monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Hold every image encode until the returned event is set."""
+    release = threading.Event()
+    encode = agr._process_and_encode_image  # noqa: SLF001
+
+    def _gated(*args: Any) -> bytes:
+        release.wait(5)
+        return encode(*args)
+
+    monkeypatch.setattr(agr, "_process_and_encode_image", _gated)
+    return release
+
+
 async def _settle() -> None:
     for _ in range(20):
         await asyncio.sleep(0.01)
@@ -198,7 +213,9 @@ async def test_artwork_set_during_replay_is_sent_after_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_warm_reconnect_replay_waits_for_send_in_progress() -> None:
+async def test_warm_reconnect_replay_waits_for_send_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A member rejoining while a send to it is encoding gets the replay after that send."""
     group, _clock = _make_scheduling_group()
     agr = ArtworkGroupRole(group)
@@ -206,6 +223,7 @@ async def test_warm_reconnect_replay_waits_for_send_in_progress() -> None:
     member = _Member()
     agr.subscribe(member)  # type: ignore[arg-type]
     await _settle()
+    release = _gate_encoding(agr, monkeypatch)
 
     send = asyncio.create_task(agr.set_album_artwork(_image(2), timestamp_us=1_500_000))
     lock = agr._send_lock(member, 0)  # type: ignore[arg-type]  # noqa: SLF001
@@ -213,6 +231,7 @@ async def test_warm_reconnect_replay_waits_for_send_in_progress() -> None:
         await asyncio.sleep(0)
     agr.unsubscribe(member)  # type: ignore[arg-type]
     agr.subscribe(member)  # type: ignore[arg-type]
+    release.set()
     await send
     await _settle()
 
@@ -220,15 +239,17 @@ async def test_warm_reconnect_replay_waits_for_send_in_progress() -> None:
 
 
 @pytest.mark.asyncio
-async def test_member_leave_stops_its_replay() -> None:
+async def test_member_leave_stops_its_replay(monkeypatch: pytest.MonkeyPatch) -> None:
     """A replay still encoding when the member leaves sends nothing."""
     group, _clock = _make_scheduling_group()
     agr = ArtworkGroupRole(group)
     await agr.set_album_artwork(_image(1))
     member = _Member()
+    release = _gate_encoding(agr, monkeypatch)
 
     agr.subscribe(member)  # type: ignore[arg-type]
     agr.unsubscribe(member)  # type: ignore[arg-type]
+    release.set()
     await _settle()
 
     assert member.sent == []
