@@ -696,6 +696,18 @@ class PlayerV1Role(Role):
                 self._client.handle_availability_change(available=state.state != "external_source")
             )
 
+        # Applied before any event so listeners gate commands on this state.
+        commands = state.supported_commands
+        legacy_commands = self._legacy_hello_commands()
+        if legacy_commands is not None:
+            # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+            # A pre-#177 state list carries only delay commands, so it extends the
+            # hello's volume/mute rather than replacing them, from the first state on.
+            current = self.state_supported_commands if commands is None else commands
+            commands = list(dict.fromkeys([*legacy_commands, *current]))
+        if commands is not None:
+            self.state_supported_commands = list(commands)
+
         # Reported volume and mute apply even when not settable: supported_commands
         # only governs which commands the server may send.
         changed = False
@@ -710,17 +722,6 @@ class PlayerV1Role(Role):
 
         if changed:
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
-
-        commands = state.supported_commands
-        legacy_commands = self._legacy_hello_commands()
-        if legacy_commands is not None:
-            # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
-            # A pre-#177 state list carries only delay commands, so it extends the
-            # hello's volume/mute rather than replacing them, from the first state on.
-            current = self.state_supported_commands if commands is None else commands
-            commands = list(dict.fromkeys([*legacy_commands, *current]))
-        if commands is not None:
-            self.state_supported_commands = list(commands)
 
         if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
             self.output_delay_ms = state.output_delay_ms

@@ -1197,6 +1197,21 @@ def test_volume_and_mute_commands_follow_latest_state_list() -> None:
     client.send_message.assert_called_once()
 
 
+def test_volume_event_listener_sees_same_state_commands() -> None:
+    """A listener reacting to VolumeChangedEvent gates on the commands from the same state."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    client._signal_event.side_effect = lambda _event: role.set_volume(20)  # noqa: SLF001
+
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(volume=50, supported_commands=[PlayerCommand.VOLUME])
+        )
+    )
+
+    client.send_message.assert_called_once()
+
+
 def test_on_connect_resets_supported_commands() -> None:
     """A reconnecting player starts with no commands until its client/state declares them."""
     client = _make_client_stub()
