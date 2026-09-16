@@ -925,6 +925,45 @@ async def test_live_pairing_unusable_advertised_formats() -> None:
             await client.disconnect()
 
 
+async def test_live_pairing_dropped_unusable_descriptor_is_refused() -> None:
+    """A dynamic descriptor the parse dropped as unusable is not selected.
+
+    The parse result is set directly, as the SDK client only advertises usable values.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=lambda _code: asyncio.sleep(0)),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert conn._client_info is not None  # noqa: SLF001
+            methods = conn._client_info.supported_pair_methods  # noqa: SLF001
+            assert methods is not None
+            methods.dynamic_pairing_code = None
+            methods.unusable_methods = [PairMethod.DYNAMIC_PAIRING_CODE.value]
+
+            with pytest.raises(PairingError, match="no usable dynamic_pairing_code"):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=lambda: asyncio.sleep(0),
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+        finally:
+            await client.disconnect()
+
+
 async def test_live_pairing_unoffered_format_fails_before_activation() -> None:
     """Requesting qr_code from a digits-only client fails server-side, before any attempt."""
     server_store = InMemoryServerPairingStore()

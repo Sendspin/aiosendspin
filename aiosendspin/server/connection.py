@@ -1632,6 +1632,10 @@ class SendspinConnection:
         assert requested is not None
         methods = self._client_info.supported_pair_methods
         descriptor = methods.dynamic_pairing_code if methods is not None else None
+        if methods is not None and PairMethod.DYNAMIC_PAIRING_CODE.value in (
+            methods.unusable_methods or ()
+        ):
+            raise PairingError("client offers no usable dynamic_pairing_code format or channel")
         if descriptor is None:
             # The advertisement lags a management enable; the client arbitrates.
             return requested
