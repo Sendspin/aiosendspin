@@ -235,29 +235,26 @@ class ArtworkV1Role(Role):
             )
 
     def _apply_channels(self, channels: list[ArtworkChannel]) -> None:
-        """Stream `channels`, re-announcing and refreshing only what changed on an active stream."""
+        """Stream `channels`, re-announcing the stream when its configuration changed."""
         new_configs = _stream_configs(channels)
-        if not self._stream_started:
-            changed = list(range(MAX_ARTWORK_CHANNELS))
-        else:
+        if self._stream_started:
             old_configs = _stream_configs(self._channels)
-            changed = [
-                channel_num
-                for channel_num in range(MAX_ARTWORK_CHANNELS)
-                if old_configs[channel_num] != new_configs[channel_num]
-            ]
-            if not changed:
+            if old_configs == new_configs:
+                self._channels = channels
                 return
+            # Queued images may be encoded for the old configuration; the current image of
+            # every streamed channel is re-sent below.
+            self._client.drop_pending_binary([self.role_family])
             # A channel must be cleared before the stream/start that stops streaming it.
             now_us = self._client._server.clock.now_us()  # noqa: SLF001
-            for channel_num in changed:
-                if new_configs[channel_num].source is ArtworkSource.NONE:
+            for channel_num, config in enumerate(new_configs):
+                if config.source is ArtworkSource.NONE and old_configs[channel_num] != config:
                     self.send_artwork_cleared(channel_num, now_us)
 
         self._channels = channels
         self._send_stream_start(new_configs)
         if self._group_role is not None:
-            self._group_role.send_current_artwork(self, changed)
+            self._group_role.send_current_artwork(self)
 
     def _send_stream_start(self, configs: list[StreamArtworkChannelConfig]) -> None:
         """Send stream/start with `configs` truncated after the last streamed channel."""

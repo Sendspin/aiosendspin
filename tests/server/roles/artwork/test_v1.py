@@ -91,6 +91,7 @@ def _record(client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
     client.send_role_message.side_effect = _message
     client.send_binary.side_effect = _binary
+    client.drop_pending_binary.side_effect = lambda roles: events.append(("drop", roles))
     monkeypatch.setattr(group_role, "_schedule_send_artwork", _schedule)
     return events
 
@@ -179,6 +180,31 @@ async def test_artwork_update_before_state_sends_nothing(monkeypatch: pytest.Mon
     assert [event[:2] for event in events] == [("binary", 0)]
 
 
+@pytest.mark.asyncio
+async def test_artwork_encoded_for_old_configuration_is_discarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image whose encode finishes after its channel was reconfigured is not sent."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    group_role = client.group.group_role.return_value
+    role.on_client_state(_state(_ALBUM))
+    png_album = ArtworkChannel(
+        source=ArtworkSource.ALBUM, format=PictureFormat.PNG, width=300, height=300
+    )
+    role.on_client_state(_state(png_album))
+    events.clear()
+    image = Image.new("RGB", (10, 10))
+
+    await group_role._send_artwork_to_role_channel(role, image, 0, _ALBUM)  # noqa: SLF001
+    assert events == []
+
+    await group_role._send_artwork_to_role_channel(role, image, 0, png_album)  # noqa: SLF001
+    assert [event[:2] for event in events] == [("binary", 0)]
+
+
 @pytest.mark.parametrize(
     ("channels", "expected"),
     [
@@ -242,10 +268,10 @@ def test_artwork_unchanged_state_sends_nothing(monkeypatch: pytest.MonkeyPatch) 
     assert events == []
 
 
-def test_artwork_state_change_clears_restarts_and_resends_changed(
+def test_artwork_state_change_drops_clears_restarts_and_resends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A changed state clears disabled channels first and re-sends only changed channels."""
+    """A changed state drops queued images, clears disabled channels, then re-sends images."""
     client = _make_client_stub()
     events = _record(client, monkeypatch)
     role = ArtworkV1Role(client=client)
@@ -256,16 +282,18 @@ def test_artwork_state_change_clears_restarts_and_resends_changed(
     role.on_client_state(_state(_NONE, _ARTIST, _ARTIST))
 
     assert events == [
+        ("drop", ["artwork"]),
         ("binary", 0, 9),
         ("start", [_NONE_WIRE, _ARTIST_WIRE, _ARTIST_WIRE]),
         ("image", 1),
+        ("image", 2),
     ]
 
 
-def test_artwork_state_format_change_resends_that_channel(
+def test_artwork_state_format_change_restarts_and_resends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Changing one channel's format re-announces the stream and re-sends that channel only."""
+    """Changing one channel's format re-announces the stream and re-sends every image."""
     client = _make_client_stub()
     events = _record(client, monkeypatch)
     role = ArtworkV1Role(client=client)
@@ -279,8 +307,10 @@ def test_artwork_state_format_change_resends_that_channel(
     role.on_client_state(_state(png_album, _ARTIST))
 
     assert events == [
+        ("drop", ["artwork"]),
         ("start", [{**_ALBUM_WIRE, "format": "png"}, _ARTIST_WIRE]),
         ("image", 0),
+        ("image", 1),
     ]
 
 
@@ -297,8 +327,10 @@ def test_artwork_all_none_state_keeps_stream_active(monkeypatch: pytest.MonkeyPa
     role.on_client_state(_state(_ALBUM))
 
     assert events == [
+        ("drop", ["artwork"]),
         ("binary", 0, 9),
         ("start", [_NONE_WIRE]),
+        ("drop", ["artwork"]),
         ("start", [_ALBUM_WIRE]),
         ("image", 0),
     ]
@@ -473,6 +505,7 @@ def test_legacy_state_replaces_hello_channels(monkeypatch: pytest.MonkeyPatch) -
     role.on_client_state(_state(_NONE, _ARTIST))
 
     assert events == [
+        ("drop", ["artwork"]),
         ("binary", 0, 9),
         ("start", [_NONE_WIRE, _ARTIST_WIRE]),
         ("image", 1),
@@ -481,10 +514,10 @@ def test_legacy_state_replaces_hello_channels(monkeypatch: pytest.MonkeyPatch) -
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-def test_legacy_request_format_resends_changed_channel_only(
+def test_legacy_request_format_restarts_stream_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stream/request-format re-announces the stream and re-sends only its channel."""
+    """A stream/request-format re-announces the stream; repeating it sends nothing."""
     client = _make_legacy_client_stub(_ALBUM, _ARTIST)
     events = _record(client, monkeypatch)
     role = ArtworkV1Role(client=client)
@@ -499,7 +532,9 @@ def test_legacy_request_format_resends_changed_channel_only(
     )
 
     assert events == [
+        ("drop", ["artwork"]),
         ("start", [_ALBUM_WIRE, {**_ARTIST_WIRE, "width": 800}]),
+        ("image", 0),
         ("image", 1),
     ]
 
@@ -526,9 +561,38 @@ def test_legacy_request_format_enables_declared_none_channel(
     )
 
     assert events == [
+        ("drop", ["artwork"]),
         ("start", [_ALBUM_WIRE, {"source": "artist", "format": "png", "width": 64, "height": 64}]),
+        ("image", 0),
         ("image", 1),
     ]
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_legacy_request_format_keeps_size_set_on_none_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A size requested for a none channel applies once a later request enables it."""
+    declared_none = ArtworkChannel(
+        source=ArtworkSource.NONE, format=PictureFormat.PNG, width=64, height=64
+    )
+    client = _make_legacy_client_stub(_ALBUM, declared_none)
+    events = _record(client, monkeypatch)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    events.clear()
+
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=1, width=128))
+    )
+    assert events == []
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            artwork=StreamRequestFormatArtwork(channel=1, source=ArtworkSource.ARTIST)
+        )
+    )
+
+    assert role.get_channel_configs()[1].width == 128
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
