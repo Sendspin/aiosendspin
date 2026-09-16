@@ -202,7 +202,12 @@ class _InitiatorRebuild:
 
 
 def _ephemeral_private_bytes(conn: NoiseConnection) -> bytes:
-    """Return the ephemeral private key the library generated for ``conn``."""
+    """Return the ephemeral private key the library generated for ``conn``.
+
+    Reaches into ``noiseprotocol``'s handshake state, which it does not expose. A version
+    that moves it is caught by ``fork_at_message_2``'s replay check rather than silently
+    keying the fork on a different ephemeral.
+    """
     keypair = conn.noise_protocol.handshake_state.e
     return cast("bytes", keypair.private.private_bytes_raw())
 

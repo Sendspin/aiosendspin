@@ -1428,6 +1428,7 @@ class SendspinConnection:
             )
             return True
         self._logger.info("Paired with client %s via %s", self._client_id, method.value)
+        self.forget_credential_mismatch()
         # The client finalized, so the attempt has succeeded and both sides hold the record:
         # a late cancel must not abort it or corrupt the re-handshake. Complete the tail and
         # report the success; the one absorbed cancel ends with the pairing in effect.
@@ -1550,7 +1551,6 @@ class SendspinConnection:
             psk=psk,
         )
         self._noise_psk = result.psk
-        self._credential_mismatch = result.credential_mismatch
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         return await self._send_server_hello_and_recv(transport)
@@ -1653,8 +1653,9 @@ class SendspinConnection:
     def forget_credential_mismatch(self) -> None:
         """Release the hold a credential mismatch placed on playback.
 
-        Called once this server's pairing record is gone: the mismatch says the client
-        cannot use that record, so without it what remains is an ordinary unpaired client.
+        Called once this server's pairing record is gone or replaced: the mismatch says the
+        client cannot use that record, so without it what remains is an ordinary unpaired
+        client, and a record the two have just agreed on is one the client can use.
         """
         self._credential_mismatch = False
 

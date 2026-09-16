@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 from aiohttp import ClientSession, WSMsgType, web
@@ -52,6 +53,7 @@ from aiosendspin.noise.trust_store import (
     StagedPairingPsk,
     TrustedUnpairedClient,
 )
+from aiosendspin.server import connection as connection_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import (
@@ -2488,5 +2490,158 @@ async def test_forgetting_a_mismatched_client_reactivates_it_in_place() -> None:
             assert conn._roles_to_activate == ["controller@v1"]  # noqa: SLF001
             # Announced, not merely permitted: unpair awaits the re-activation.
             assert _server_active_role_count(server, identity.peer_id) == 1
+        finally:
+            await client.disconnect()
+
+
+async def test_moving_onto_a_pairing_psk_keeps_the_playback_hold() -> None:
+    """The hold must outlive the re-handshake an attempt makes to reach its own PSK.
+
+    A pairing-PSK attempt moves the session off the Sentinel before its exchange runs.
+    Nothing has been agreed at that point and the record the client could not use is
+    still there, so the constraint has to stand until the pairing actually replaces it.
+
+    ``test_pairing_attempts_that_abort_never_admit_playback`` covers what a lifted hold
+    would let through once such an attempt lands the session back on the Sentinel.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = await _unpaired_enabled_store()
+
+    psk = generate_psk()
+    await server_store.store_record(
+        ServerPairingRecord(
+            psk_id=psk_id_for(psk), psk=psk, client_id=identity.peer_id, pair_methods=[]
+        )
+    )
+    # The client kept a Pairing PSK but not the record, so it can answer a pairing-PSK
+    # attempt while still being unable to use the credential the server references.
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    real_exchange = connection_module.run_pairing_psk_server
+    during: dict[str, object] = {}
+
+    async def _observe_then_run(*args: object, **kwargs: object) -> ServerPairingRecord | None:
+        """Capture the hold as it stands once the re-handshake is done, then pair for real."""
+        during["mismatch"] = conn._credential_mismatch  # noqa: SLF001
+        during["category"] = conn._noise_psk.category  # noqa: SLF001
+        during["record"] = await server_store.record_by_client_id(identity.peer_id)
+        return await real_exchange(*args, **kwargs)  # type: ignore[operator, no-any-return]
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            # Granted for an ordinary unpaired client and never revoked; it must not
+            # become the thing that admits playback once the hold is lost.
+            await server.trust_unpaired(identity.peer_id)
+            assert conn._credential_mismatch is True  # noqa: SLF001
+
+            with patch.object(connection_module, "run_pairing_psk_server", _observe_then_run):
+                await conn.initiate_pairing(
+                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                )
+
+            # Mid-attempt: off the Sentinel, but nothing agreed and the old record intact.
+            assert during["category"] is PskCategory.PAIRING
+            assert during["record"] is not None
+            assert during["mismatch"] is True
+
+            # Only the finalized pairing releases it, by replacing what the client lost.
+            assert conn._noise_psk is not None  # noqa: SLF001
+            assert conn._noise_psk.category is PskCategory.LONG_TERM  # noqa: SLF001
+            assert conn._credential_mismatch is False  # noqa: SLF001
+            assert conn._roles_to_activate == ["controller@v1"]  # noqa: SLF001
+        finally:
+            await client.disconnect()
+
+
+async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
+    """The user-visible half: attempts that agree nothing must not unblock the session.
+
+    Two attempts of different methods walk the session onto a Pairing PSK and back to the
+    Sentinel without replacing the record. Landing back on the Sentinel with a standing
+    trusted-unpaired grant is where a lost hold would show up as playback.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+
+    # Holds the Pairing PSK so the re-handshake onto it lands, but offers neither method,
+    # so each attempt is aborted by the client once it sees the activation.
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(
+        replace(
+            config,
+            unpaired_access_enabled=True,
+            pairing_psk_enabled=False,
+            dynamic_pairing_code_enabled=False,
+        )
+    )
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    psk = generate_psk()
+    await server_store.store_record(
+        ServerPairingRecord(
+            psk_id=psk_id_for(psk), psk=psk, client_id=identity.peer_id, pair_methods=[]
+        )
+    )
+
+    async def display(_pairing_code: str | None) -> None:
+        """Offer a dynamic out-channel; the attempt aborts before a code is emitted."""
+        return
+
+    async def provide() -> str:
+        return "000000"
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            await server.trust_unpaired(identity.peer_id)
+            assert conn._credential_mismatch is True  # noqa: SLF001
+
+            with pytest.raises(PairingAbortError):
+                await conn.initiate_pairing(
+                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                )
+            assert conn._noise_psk is not None  # noqa: SLF001
+            assert conn._noise_psk.category is PskCategory.PAIRING  # noqa: SLF001
+
+            with pytest.raises(PairingAbortError):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+            await conn.end_pairing()
+
+            # Back where trusted-unpaired admits playback, with the record still unusable.
+            assert conn._noise_psk.category is PskCategory.SENTINEL  # noqa: SLF001
+            assert conn._trusted_unpaired is True  # noqa: SLF001
+            assert await server_store.record_by_client_id(identity.peer_id) is not None
+            assert conn._playback_capable is False  # noqa: SLF001
+            assert conn._roles_to_activate == []  # noqa: SLF001
+            assert _server_active_role_count(server, identity.peer_id) == 0
+            assert conn._credential_mismatch is True  # noqa: SLF001
         finally:
             await client.disconnect()
