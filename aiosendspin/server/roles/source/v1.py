@@ -113,7 +113,7 @@ class SourceV1Role(Role):
         if not self._start_requested:
             # Let server compliance policy decide whether to disconnect.
             self._client.flag_noncompliance(
-                "client_stream/start sent without a preceding source start command"
+                "client-stream/start sent without a preceding source start command"
             )
             return
         source = payload.source
@@ -133,7 +133,7 @@ class SourceV1Role(Role):
                 header = base64.b64decode(source.codec_header, validate=True)
             except (binascii.Error, ValueError):
                 self._client.flag_noncompliance(
-                    "client_stream/start codec_header is not valid Base64"
+                    "client-stream/start codec_header is not valid Base64"
                 )
                 return
         if source.codec is AudioCodec.FLAC and (
@@ -144,7 +144,7 @@ class SourceV1Role(Role):
             or int.from_bytes(header[5:8], "big") != 34
         ):
             self._client.flag_noncompliance(
-                "client_stream/start FLAC codec_header must contain STREAMINFO"
+                "client-stream/start FLAC codec_header must contain STREAMINFO"
             )
             return
         try:

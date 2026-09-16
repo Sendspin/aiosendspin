@@ -102,6 +102,7 @@ from aiosendspin.models.types import (
     PlaybackStateType,
     Roles,
     ServerMessage,
+    replacement_for,
     role_family,
 )
 from aiosendspin.noise.constants import SENTINEL_PSK
@@ -489,7 +490,7 @@ class SendspinConnection:
             return
 
         now_us = self._server.clock.now_us()
-        # buffer_end_time_us already carries the role's static delay, which shifts the
+        # buffer_end_time_us already carries the role's output delay, which shifts the
         # deadline earlier than the raw timestamp. Fall back to the raw span only when
         # a caller does not supply it.
         deadline_us = (
@@ -533,7 +534,7 @@ class SendspinConnection:
             cached = self._client.get_binary_handling_cached(message_type)
         if cached is None or not cached[0].drop_late:
             return
-        behind_by_us = now_us - (timestamp_us - cached[1].get_static_delay_us())
+        behind_by_us = now_us - (timestamp_us - cached[1].get_output_delay_us())
         self._late_at_enqueue_count[role] = self._late_at_enqueue_count.get(role, 0) + 1
         now_s = time.monotonic()
         if now_s - self._last_late_at_enqueue_log_s.get(role, 0.0) < _WARN_INTERVAL_S:
@@ -1149,6 +1150,12 @@ class SendspinConnection:
             # Raised here rather than at the handshake, so a listener handed the client_id
             # can resolve the client it names.
             self._server._signal_credential_mismatch(client_id)  # noqa: SLF001
+
+    def _flag_superseded_message_type(self, message_type: str) -> None:
+        """Flag a message that arrived under the name the spec replaced."""
+        current = replacement_for(message_type)
+        if current is not None:
+            self._flag_noncompliance(f"client sent {message_type}, superseded by {current}")
 
     def _flag_legacy_artwork_wire(self, support: ClientHelloArtworkSupport) -> None:
         """Flag artwork channels declared on the wire the spec superseded."""
@@ -1876,6 +1883,7 @@ class SendspinConnection:
         if isinstance(message, ClientStreamStartMessage):
             if self._client is None:
                 return
+            self._flag_superseded_message_type(message.type)
             for role in self._client.active_roles:
                 role.on_client_stream_start(message.payload)
             return
@@ -1883,6 +1891,7 @@ class SendspinConnection:
         if isinstance(message, ClientStreamEndMessage):
             if self._client is None:
                 return
+            self._flag_superseded_message_type(message.type)
             for role in self._client.active_roles:
                 role.on_client_stream_end()
             return
@@ -1947,7 +1956,7 @@ class SendspinConnection:
         if entry.enqueued_at_us:
             # Same effective play time the late-drop decision uses, so this field and
             # late_by_us in the surrounding line share one basis.
-            effective_ts_us = entry.timestamp_us - role.get_static_delay_us()
+            effective_ts_us = entry.timestamp_us - role.get_output_delay_us()
             fields.append(f"enq_lead_ms={(effective_ts_us - entry.enqueued_at_us) / 1000:.0f}")
             fields.append(f"queue_age_ms={(now_us - entry.enqueued_at_us) / 1000:.0f}")
         if (tracker := role.get_buffer_tracker()) is not None:
@@ -1979,7 +1988,7 @@ class SendspinConnection:
             role._stream_start_time_us = now  # noqa: SLF001
         elapsed = now - role._stream_start_time_us  # noqa: SLF001
         in_grace_period = elapsed < handling.grace_period_us
-        late_by_us = now - (timestamp_us - role.get_static_delay_us())
+        late_by_us = now - (timestamp_us - role.get_output_delay_us())
 
         if late_by_us > 0 and not in_grace_period:
             role._late_skips_since_log += 1  # noqa: SLF001

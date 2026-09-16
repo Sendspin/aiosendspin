@@ -72,7 +72,7 @@ async def test_opus_timestamps_lead_capture_by_the_encoder_pre_skip() -> None:
 
 
 async def test_start_announces_client_stream_only() -> None:
-    """start() sends client_stream/start and nothing else (framing is the lifecycle)."""
+    """start() sends client-stream/start and nothing else (framing is the lifecycle)."""
     conn = _FakeConnection()
     capture = SourceCapture(_FakeClient(), conn, _pcm_format())  # type: ignore[arg-type]
     await capture.start()
@@ -166,10 +166,10 @@ async def test_stop_discards_buffer_after_connection_ends_stream() -> None:
     assert [timestamp for timestamp, _ in conn.chunks] == [2_000_000]
 
 
-def test_compute_source_timestamp_excludes_static_delay() -> None:
-    """Capture timestamps skip the static delay that playback conversion applies."""
+def test_compute_source_timestamp_excludes_output_delay() -> None:
+    """Capture timestamps skip the output delay that playback conversion applies."""
     conn = SendspinConnection.__new__(SendspinConnection)
-    conn._static_delay_us = 250_000  # noqa: SLF001
+    conn._output_delay_us = 250_000  # noqa: SLF001
 
     class _IdentityFilter:
         def compute_server_time(self, client_time: int) -> int:

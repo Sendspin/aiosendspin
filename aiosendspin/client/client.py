@@ -144,8 +144,8 @@ class SendspinClient:
     _owns_session: bool
     """Whether this client owns and should close the session."""
 
-    _static_delay_us: int = 0
-    """Default static playback delay seeding new connections, in microseconds."""
+    _output_delay_us: int = 0
+    """Default output delay seeding new connections, in microseconds."""
     _required_lead_time_us: int = 250_000
     """Reported startup lead time in microseconds."""
     _min_buffer_us: int = 250_000
@@ -217,7 +217,7 @@ class SendspinClient:
         visualizer_support: ClientHelloVisualizerSupport | None = None,
         source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
-        static_delay_ms: float = 0.0,
+        output_delay_ms: float = 0.0,
         required_lead_time_ms: float = 250.0,
         min_buffer_ms: float = 250.0,
         initial_volume: int = 100,
@@ -274,7 +274,7 @@ class SendspinClient:
         self._loop = asyncio.get_running_loop()
         self._initial_volume = initial_volume
         self._initial_muted = initial_muted
-        self.set_static_delay_ms(static_delay_ms)
+        self.set_output_delay_ms(output_delay_ms)
         self.set_required_lead_time_ms(required_lead_time_ms)
         self.set_min_buffer_ms(min_buffer_ms)
         self._state_supported_commands: list[PlayerCommand] = list(state_supported_commands or [])
@@ -485,9 +485,9 @@ class SendspinClient:
         return self._clock
 
     @property
-    def static_delay_us(self) -> int:
-        """Default static playback delay seeding new connections, in microseconds."""
-        return self._static_delay_us
+    def output_delay_us(self) -> int:
+        """Default output delay seeding new connections, in microseconds."""
+        return self._output_delay_us
 
     # --- Connection state ---
 
@@ -518,22 +518,22 @@ class SendspinClient:
         return self._admitted_connection.activities
 
     @property
-    def static_delay_ms(self) -> float:
-        """Return the currently configured static playback delay in milliseconds."""
+    def output_delay_ms(self) -> float:
+        """Return the currently configured output delay in milliseconds."""
         if self._admitted_connection is not None:
-            return self._admitted_connection.static_delay_ms
-        return self._static_delay_us / 1_000.0
+            return self._admitted_connection.output_delay_ms
+        return self._output_delay_us / 1_000.0
 
-    def set_static_delay_ms(self, delay_ms: float) -> None:
-        """Update the static playback delay applied after clock synchronisation."""
+    def set_output_delay_ms(self, delay_ms: float) -> None:
+        """Update the output delay applied after clock synchronisation."""
         delay_ms = max(0.0, min(5000.0, delay_ms))
         delay_us = round(delay_ms * 1_000.0)
         if self._admitted_connection is not None:
-            self._admitted_connection.set_static_delay_ms(delay_ms)
-        if delay_us == self._static_delay_us:
+            self._admitted_connection.set_output_delay_ms(delay_ms)
+        if delay_us == self._output_delay_us:
             return
-        self._static_delay_us = delay_us
-        logger.info("Set static playback delay to %.1f ms", self.static_delay_ms)
+        self._output_delay_us = delay_us
+        logger.info("Set output delay to %.1f ms", self.output_delay_ms)
 
     @property
     def required_lead_time_ms(self) -> float:
@@ -815,15 +815,15 @@ class SendspinClient:
         return self._admitted_connection.is_time_synchronized()
 
     def compute_play_time(self, server_timestamp_us: int) -> int:
-        """Convert a server timestamp to client play time, with static delay applied."""
+        """Convert a server timestamp to client play time, with output delay applied."""
         if self._admitted_connection is None:
-            return self.now_us() + UNSYNCED_PLAY_LEAD_US - self._static_delay_us
+            return self.now_us() + UNSYNCED_PLAY_LEAD_US - self._output_delay_us
         return self._admitted_connection.compute_play_time(server_timestamp_us)
 
     def compute_server_time(self, client_timestamp_us: int) -> int:
-        """Convert a client timestamp to a server timestamp, with static delay removed."""
+        """Convert a client timestamp to a server timestamp, with output delay removed."""
         if self._admitted_connection is None:
-            return client_timestamp_us + self._static_delay_us
+            return client_timestamp_us + self._output_delay_us
         return self._admitted_connection.compute_server_time(client_timestamp_us)
 
     def now_us(self) -> int:
@@ -931,7 +931,7 @@ class SendspinClient:
 
         To convert server timestamps to client play time (monotonic client clock),
         use the compute_play_time() and compute_server_time() methods provided
-        by this client instance. These handle time synchronization and static delay
+        by this client instance. These handle time synchronization and output delay
         automatically.
 
         Returns:

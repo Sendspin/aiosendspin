@@ -297,7 +297,7 @@ class Role(ABC):
         """Return the role-owned buffer tracker, if any."""
         return self._buffer_tracker
 
-    def get_static_delay_us(self) -> int:
+    def get_output_delay_us(self) -> int:
         """Return transport delay in microseconds applied by this role (default: 0)."""
         return 0
 
@@ -468,7 +468,7 @@ class Role(ABC):
         """
 
     def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:  # noqa: B027
-        """Handle client_stream/start."""
+        """Handle client-stream/start."""
 
     def on_client_stream_end(self) -> None:  # noqa: B027
-        """Handle client_stream/end."""
+        """Handle client-stream/end."""

@@ -46,6 +46,11 @@ class _DummyGroup:
         self.group_id = group_id
         self.transformer_pool = TransformerPool()
 
+    group_name = "dummy group"
+
+    def _publish_if_name_changed(self, previous: str) -> None:  # noqa: ARG002
+        return
+
     def on_client_connected(self, client: Any) -> None:  # noqa: ARG002
         return
 

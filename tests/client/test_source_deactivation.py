@@ -78,13 +78,13 @@ def _connection(
 
 
 async def test_source_dropped_from_active_roles_ends_client_stream() -> None:
-    """Removing source@v1 from active_roles auto-sends client_stream/end."""
+    """Removing source@v1 from active_roles auto-sends client-stream/end."""
     ws = _FakeWs()
     conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=True)
     await conn._apply_activation(  # noqa: SLF001
         ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[])
     )
-    assert any("client_stream/end" in m for m in ws.sent)
+    assert any("client-stream/end" in m for m in ws.sent)
     assert conn._source_stream_active is False  # noqa: SLF001
 
 
@@ -95,7 +95,7 @@ async def test_no_client_stream_end_when_source_retained() -> None:
     await conn._apply_activation(  # noqa: SLF001
         ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[Roles.SOURCE.value])
     )
-    assert not any("client_stream/end" in m for m in ws.sent)
+    assert not any("client-stream/end" in m for m in ws.sent)
     assert conn._source_stream_active is True  # noqa: SLF001
 
 
@@ -192,7 +192,7 @@ async def test_source_unavailable_ends_stream_before_state() -> None:
 
     messages = [orjson.loads(message) for message in ws.sent]
     assert [message["type"] for message in messages] == [
-        "client_stream/end",
+        "client-stream/end",
         "client/state",
     ]
     assert messages[-1]["payload"] == {"available": False, "source": {}}
