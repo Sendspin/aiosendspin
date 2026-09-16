@@ -1819,10 +1819,7 @@ class SendspinConnection:
         if not self._initial_state_received:
             return  # The initial client/state releases every role, under its own timeout.
         if self._held_roles():
-            self._cancel_activation_state_timeout()
-            self._activation_state_timeout_handle = self._server.loop.call_later(
-                _CLIENT_STATE_TIMEOUT_S, self._activation_state_timeout_callback
-            )
+            self._arm_activation_state_timeout()
 
     def _held_roles(self) -> list[Role]:
         """Active roles still waiting for their client/state object."""
@@ -1832,6 +1829,12 @@ class SendspinConnection:
             for role in self._client.active_roles
             if self._client.awaits_role_state(role.role_family)
         ]
+
+    def _arm_activation_state_timeout(self) -> None:
+        self._cancel_activation_state_timeout()
+        self._activation_state_timeout_handle = self._server.loop.call_later(
+            _CLIENT_STATE_TIMEOUT_S, self._activation_state_timeout_callback
+        )
 
     def _cancel_activation_state_timeout(self) -> None:
         if self._activation_state_timeout_handle is not None:
@@ -2286,6 +2289,9 @@ class SendspinConnection:
             self._flush_pending_binary()
         else:
             released = self._apply_activation_state(payload)
+            if released:
+                # Their state is here: the timeout must not start them during the dispatch.
+                self._cancel_activation_state_timeout()
 
         if payload.available is not None and payload.available != self._client.available:
             await self._client.handle_availability_change(available=payload.available)
@@ -2319,11 +2325,23 @@ class SendspinConnection:
         return released
 
     def _release_roles(self, roles: list[Role]) -> None:
-        """Stop holding ``roles``, send their held binary and join them to the running stream."""
+        """Stop holding ``roles``, send their held binary and join them to the running stream.
+
+        Roles no longer active or already released are skipped; any other held role keeps a
+        running timeout.
+        """
         assert self._client is not None
+        roles = [
+            role
+            for role in roles
+            if role in self._client.active_roles
+            and self._client.awaits_role_state(role.role_family)
+        ]
         for role in roles:
             self._client.release_role_hold(role.role_family)
-        if not self._held_roles():
+        if self._held_roles():
+            self._arm_activation_state_timeout()
+        else:
             self._cancel_activation_state_timeout()
         self._flush_pending_binary()
         for role in roles:

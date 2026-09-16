@@ -485,3 +485,27 @@ async def test_unsent_stream_end_still_precedes_server_activate() -> None:
     await _set_trusted(conn, trusted=False)
 
     assert await _drain_priority(conn, fake) == ["stream/end", "server/activate"]
+
+
+@pytest.mark.asyncio
+async def test_activation_timeout_does_not_run_while_the_releasing_state_is_applied() -> None:
+    """The timeout is off while a releasing client/state is dispatched, so the join runs once."""
+    conn, client = await _reactivated_player()
+    role = client.role(Roles.PLAYER.value)
+    handles_during_dispatch: list[object] = []
+
+    async def record_handle(*, available: bool) -> None:  # noqa: ARG001
+        handles_during_dispatch.append(conn._activation_state_timeout_handle)  # noqa: SLF001
+
+    with (
+        patch.object(client, "handle_availability_change", side_effect=record_handle),
+        patch.object(client.group, "on_role_activated") as activated,
+    ):
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=False, player=_PLAYER_STATE)
+        )
+        conn._release_roles([role])  # noqa: SLF001
+
+    assert handles_during_dispatch == [None]
+    activated.assert_called_once_with(role)
+    assert conn._activation_state_timeout_handle is None  # noqa: SLF001
