@@ -843,6 +843,16 @@ class SendspinClient:
             raise RuntimeError("Client is not connected")
         await self._admitted_connection.send_available(available=available)
 
+    async def send_leave(self) -> None:
+        """Leave the current group, stopping playback on this client.
+
+        The client stays available and lands in a solo group; a subsequent ``switch``
+        group command rejoins the group it left.
+        """
+        if self._admitted_connection is None:
+            raise RuntimeError("Client is not connected")
+        await self._admitted_connection.send_leave()
+
     async def send_group_command(
         self,
         command: MediaCommand,

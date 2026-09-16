@@ -526,6 +526,14 @@ class ClientGoodbyeMessage(ClientMessage):
     type: Literal["client/goodbye"] = "client/goodbye"
 
 
+# Client -> Server: client/leave
+@dataclass
+class ClientLeaveMessage(ClientMessage):
+    """Message sent by the client to leave its current group."""
+
+    type: Literal["client/leave"] = "client/leave"
+
+
 # Server -> Client: server/hello
 @dataclass
 class ServerHelloPayload(SendspinModel):

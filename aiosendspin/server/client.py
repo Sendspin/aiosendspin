@@ -124,11 +124,11 @@ class SendspinClient:
         # Client-level availability (reported by client/state). Persists across reconnects.
         self._available: bool = True
 
-        # External-source recovery state (persists across reconnects).
+        # Previous-group recovery state (persists across reconnects).
         self._previous_group_id: str | None = None
-        """Group ID to rejoin after external_source ends."""
-        self._external_source_solo_group_id: str | None = None
-        """Solo group ID created when entering external_source."""
+        """Group ID a switch rejoins after the client became unavailable or left."""
+        self._leave_solo_group_id: str | None = None
+        """Solo group ID the client was moved to on becoming unavailable or leaving."""
         self._switch_lock: asyncio.Lock = asyncio.Lock()
 
         # Role-owned persistent state (per role family).
@@ -295,21 +295,25 @@ class SendspinClient:
                 await coro
 
         if not available:
-            await self._handle_external_source_transition()
+            await self._leave_to_solo_group()
 
-    async def _handle_external_source_transition(self) -> None:
-        """Move the client out of any shared group when it switches to external_source.
+    async def handle_leave(self) -> None:
+        """Handle `client/leave`: move to a stopped solo group, keeping availability."""
+        await self._leave_to_solo_group()
+
+    async def _leave_to_solo_group(self) -> None:
+        """Move the client out of any shared group when it becomes unavailable or leaves.
 
         - Multi-client group: remember the previous group and move to a solo group.
         - Solo group: stop playback so the client is no longer streaming.
         """
         previous_group_id = await self.quiesce_to_solo_stopped()
         if previous_group_id is None:
-            self._logger.debug("Client already in solo group, stopped playback for external_source")
+            self._logger.debug("Client already in solo group, stopped playback")
             return
         self._previous_group_id = previous_group_id
-        self._external_source_solo_group_id = self.group.group_id
-        self._logger.debug("Stored previous group %s for external_source", previous_group_id)
+        self._leave_solo_group_id = self.group.group_id
+        self._logger.debug("Stored previous group %s", previous_group_id)
 
     async def handle_switch_command(self) -> None:
         """Cycle this client through available groups."""
@@ -325,7 +329,7 @@ class SendspinClient:
             self._logger.debug("Ignoring switch command while client is in external_source state")
             return
 
-        # External-source recovery takes priority over the normal cycle.
+        # Previous-group recovery takes priority over the normal cycle.
         if await self._try_rejoin_previous_group():
             return
 
@@ -404,15 +408,15 @@ class SendspinClient:
         return [*multi_client_playing, *single_client]
 
     def _should_rejoin_previous_group(self) -> bool:
-        """Return True when switch should rejoin the pre-external-source group.
+        """Return True when switch should rejoin the group the client was moved out of.
 
-        Per spec: if the client is still in the solo group created by its
-        ``external_source`` transition, switch prioritizes rejoining that group.
+        Per spec: if the client is still in the solo group it was moved to on becoming
+        unavailable or on ``client/leave``, switch prioritizes rejoining that group.
         """
         return (
             self._previous_group_id is not None
             and self._available
-            and self._external_source_solo_group_id == self.group.group_id
+            and self._leave_solo_group_id == self.group.group_id
             and len(self.group.clients) == 1
         )
 
@@ -421,15 +425,13 @@ class SendspinClient:
             return False
 
         previous_group_id = self._previous_group_id
-        # Clear external_source tracking after attempt, regardless of outcome.
+        # Clear previous-group tracking after attempt, regardless of outcome.
         self._previous_group_id = None
-        self._external_source_solo_group_id = None
+        self._leave_solo_group_id = None
 
         previous_group = self._find_group_by_id(previous_group_id)
         if previous_group is not None and previous_group != self.group:
-            self._logger.info(
-                "Rejoining previous group %s after external_source", previous_group_id
-            )
+            self._logger.info("Rejoining previous group %s", previous_group_id)
             await self.group.remove_client(self)
             await previous_group.add_client(self)
             return True

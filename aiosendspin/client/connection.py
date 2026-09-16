@@ -29,6 +29,7 @@ from aiosendspin.models.core import (
     ClientGoodbyePayload,
     ClientHelloMessage,
     ClientHelloPayload,
+    ClientLeaveMessage,
     ClientStateMessage,
     ClientStatePayload,
     ClientTimeMessage,
@@ -956,6 +957,12 @@ class SendspinConnection:
         if not available and self._source_stream_active:
             await self.send_client_stream_end()
         self._reported_available = available
+
+    async def send_leave(self) -> None:
+        """Send client/leave to leave the current group."""
+        if not self.connected:
+            raise RuntimeError("Client is not connected")
+        await self._send_message(ClientLeaveMessage().to_json())
 
     def _wire_available(self) -> bool:
         """Return the availability to report; an active player is unavailable until synced."""
