@@ -10,6 +10,7 @@ from aiosendspin.models.core import (
     StreamEndPayload,
     StreamStartPayload,
 )
+from aiosendspin.models.types import ServerMessage
 
 
 @pytest.mark.parametrize(
@@ -28,3 +29,11 @@ def test_stream_end_omits_server_transmitted() -> None:
     assert "server_transmitted" not in StreamEndPayload().to_dict()
     message = StreamEndMessage(payload=StreamEndPayload(roles=["player"]))
     assert "server_transmitted" not in message.to_json()
+
+
+def test_stream_end_with_legacy_server_transmitted_still_parses() -> None:
+    """A stream/end from an older server that still sends server_transmitted is understood."""
+    legacy = '{"type":"stream/end","payload":{"server_transmitted":5000000,"roles":["player"]}}'
+    message = ServerMessage.from_json(legacy)
+    assert isinstance(message, StreamEndMessage)
+    assert message.payload.roles == ["player"]
