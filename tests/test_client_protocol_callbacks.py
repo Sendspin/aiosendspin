@@ -15,11 +15,12 @@ import pytest
 from aiosendspin.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.models import AudioFormat
-from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.artwork import (
     ArtworkChannel,
     StreamArtworkChannelConfig,
     StreamStartArtwork,
+    pack_artwork_announce,
+    pack_artwork_parts,
 )
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -447,9 +448,8 @@ async def test_artwork_listener_receives_binary_frames_after_artwork_stream_star
     )
 
     payload = b"artwork-bytes"
-    connection._handle_binary_message(  # noqa: SLF001
-        pack_binary_header_raw(BinaryMessageType.ARTWORK_CHANNEL_0.value, 123_456) + payload
-    )
+    connection._handle_binary_message(pack_artwork_announce(0, 123_456, len(payload)))  # noqa: SLF001
+    connection._handle_binary_message(next(pack_artwork_parts(0, payload)))  # noqa: SLF001
 
     assert captured == [(0, payload)]
 
@@ -515,9 +515,8 @@ async def test_artwork_binary_dropped_when_only_player_stream_active() -> None:
         StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
     )
 
-    connection._handle_binary_message(  # noqa: SLF001
-        pack_binary_header_raw(BinaryMessageType.ARTWORK_CHANNEL_0.value, 123_456) + b"art"
-    )
+    connection._handle_binary_message(pack_artwork_announce(0, 123_456, 3))  # noqa: SLF001
+    connection._handle_binary_message(next(pack_artwork_parts(0, b"art")))  # noqa: SLF001
 
     assert captured == []
 
@@ -637,9 +636,8 @@ async def test_artwork_binary_dispatched_when_artwork_stream_active() -> None:
     await connection._handle_stream_start(_artwork_stream_start())  # noqa: SLF001
 
     payload = b"artwork-bytes-2"
-    connection._handle_binary_message(  # noqa: SLF001
-        pack_binary_header_raw(BinaryMessageType.ARTWORK_CHANNEL_1.value, 234_567) + payload
-    )
+    connection._handle_binary_message(pack_artwork_announce(1, 234_567, len(payload)))  # noqa: SLF001
+    connection._handle_binary_message(next(pack_artwork_parts(1, payload)))  # noqa: SLF001
 
     assert captured == [(1, payload)]
 

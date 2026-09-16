@@ -845,12 +845,15 @@ class SendspinClient:
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
         player_audio_header: bool = False,
+        epoch_exempt: bool = False,
     ) -> None:
         """
         Enqueue a binary message for this client, or no-op when disconnected.
 
         `data` is the full frame, or only the audio payload when `player_audio_header`
         is set; the connection then prepends the player audio header at send time.
+        An `epoch_exempt` message is sent even after a stream boundary drops the
+        role's other queued binary.
         """
         if self._connection is None:
             return
@@ -863,7 +866,14 @@ class SendspinClient:
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
             player_audio_header=player_audio_header,
+            epoch_exempt=epoch_exempt,
         )
+
+    async def wait_role_drained(self, role_family: str) -> None:
+        """Return once nothing is queued for `role_family`, or at once when disconnected."""
+        if self._connection is None:
+            return
+        await self._connection.wait_role_drained(role_family)
 
     def drop_pending_binary(self, roles: list[str] | None) -> None:
         """Drop queued binary payloads for the given role families, if connected."""

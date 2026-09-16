@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from aiosendspin.models import pack_binary_header_raw
+from aiosendspin.models.artwork import pack_artwork_cancel, pack_artwork_parts
 from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
@@ -1127,3 +1128,123 @@ async def test_writer_wait_returns_once_a_stop_is_requested() -> None:
 
     async with asyncio.timeout(1):
         await conn._wait_for_writer_work(0)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_epoch_exempt_binary_survives_stream_end() -> None:
+    """A cancel queued before stream/end is sent ahead of it; the other queued binary drops."""
+    loop = asyncio.get_running_loop()
+    sent: list[str | bytes] = []
+
+    async def _record(payload: str | bytes) -> None:
+        sent.append(payload)
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=_record)
+    wsock.send_bytes = AsyncMock(side_effect=_record)
+    conn = SendspinConnection(
+        _DummyServer(loop=loop, clock=ManualClock(now_us_value=1_000_000)), wsock_client=wsock
+    )
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+    message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value
+
+    conn.send_binary(
+        next(pack_artwork_parts(0, b"part")),
+        role="artwork",
+        timestamp_us=0,
+        message_type=message_type,
+    )
+    conn.send_binary(
+        pack_artwork_cancel(0),
+        role="artwork",
+        timestamp_us=0,
+        message_type=message_type,
+        epoch_exempt=True,
+    )
+    conn.send_role_message("artwork", StreamEndMessage(payload=StreamEndPayload(roles=["artwork"])))
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+    for _ in range(50):
+        if len(sent) >= 2:
+            break
+        await asyncio.sleep(0)
+
+    assert sent[0] == pack_artwork_cancel(0)
+    assert isinstance(sent[1], str)
+    assert json.loads(sent[1])["type"] == "stream/end"
+    assert len(sent) == 2
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_wait_role_drained_returns_once_the_role_queue_is_empty() -> None:
+    """wait_role_drained() blocks while the role has queued messages."""
+    conn, sent = await _start_recording_connection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=1_000_000))
+    )
+    await asyncio.wait_for(conn.wait_role_drained("artwork"), 1)
+    message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value
+    conn.send_binary(b"\x08\x00part", role="artwork", timestamp_us=0, message_type=message_type)
+
+    waiter = asyncio.create_task(conn.wait_role_drained("artwork"))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    await _drain_one(conn, sent)
+    await asyncio.wait_for(waiter, 1)
+    assert sent == [b"\x08\x00part"]
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_paced_artwork_parts_interleave_with_queued_audio() -> None:
+    """Parts queued one at a time after the previous is sent alternate with ready audio."""
+    loop = asyncio.get_running_loop()
+    sent: list[bytes] = []
+
+    async def _slow_send(payload: bytes) -> None:
+        # A congested transport: every write yields to the event loop.
+        await asyncio.sleep(0)
+        sent.append(payload)
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock()
+    wsock.send_bytes = AsyncMock(side_effect=_slow_send)
+    conn = SendspinConnection(
+        _DummyServer(loop=loop, clock=ManualClock(now_us_value=1_000_000)), wsock_client=wsock
+    )
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+    for i in range(3):
+        _send_player_audio(conn, b"audio", 2_000_000 + i)
+    parts = pack_artwork_parts(0, bytes(3 * 65_517))
+
+    async def _transfer() -> None:
+        for part in parts:
+            await conn.wait_role_drained("artwork")
+            conn.send_binary(
+                part,
+                role="artwork",
+                timestamp_us=0,
+                message_type=BinaryMessageType.ARTWORK_CHANNEL_0.value,
+            )
+        await conn.wait_role_drained("artwork")
+
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+    await asyncio.wait_for(_transfer(), 1)
+    for _ in range(50):
+        if len(sent) >= 6:
+            break
+        await asyncio.sleep(0)
+
+    kinds = [
+        "part" if frame[0] == BinaryMessageType.ARTWORK_CHANNEL_0.value else "audio"
+        for frame in sent
+    ]
+    assert kinds == ["part", "audio", "part", "audio", "part", "audio"]
+
+    await conn.disconnect(retry_connection=False)

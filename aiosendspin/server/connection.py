@@ -214,6 +214,8 @@ class _BinaryData:
     duration_us: int | None = None
     # data is a player audio payload; the header is built at send time.
     player_audio_header: bool = False
+    # Sent even after a stream boundary bumped the role's epoch.
+    epoch_exempt: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +289,8 @@ class SendspinConnection:
         self._queue_sequence: int = 0  # FIFO tie-breaker across all queues
         self._queue_size: int = 0
         # Outgoing message queues
-        self._priority_messages: deque[ServerMessage] = deque()
+        # Messages sent before every other queue; bytes are prepacked binary frames.
+        self._priority_messages: deque[ServerMessage | bytes] = deque()
         self._normal_messages: deque[ServerMessage] = deque()
         # Role queues: per role min-heap of (sort_ts, seq, entry)
         # Both binary and JSON messages for a role go through the same heap.
@@ -295,6 +298,10 @@ class SendspinConnection:
         self._max_pending_msg_by_role: defaultdict[str, int] = defaultdict(lambda: MAX_PENDING_MSG)
         # Last timestamp per role for JSON inheritance (JSON gets previous message's timestamp)
         self._last_enqueued_ts_by_role: dict[str, int] = {}
+        # Set once a role's last queued message has been sent, for wait_role_drained()
+        self._role_drained: dict[str, asyncio.Event] = {}
+        # Role whose dequeued message the writer is sending
+        self._sending_role: str | None = None
         # Rate-limit state for already-late-at-enqueue and slow-send warnings
         self._late_at_enqueue_count: dict[str, int] = {}
         self._last_late_at_enqueue_log_s: dict[str, float] = {}
@@ -346,7 +353,7 @@ class SendspinConnection:
         # The spec forbids sending binary before it; flushed once the state arrives.
         # Each entry carries the role's epoch at buffer time so a stream boundary
         # in the meantime (which bumps the epoch) discards it instead of replaying.
-        self._pending_binary: list[tuple[str, int, Callable[[], None]]] = []
+        self._pending_binary: list[tuple[str, int, bool, Callable[[], None]]] = []
         # Role families being removed by the activation in progress; their teardown
         # goes out ahead of that server/activate.
         self._retiring_roles: set[str] = set()
@@ -424,10 +431,10 @@ class SendspinConnection:
     def _flush_pending_binary(self) -> None:
         """Enqueue held binary whose role is no longer held, dropping stale entries."""
         pending, self._pending_binary = self._pending_binary, []
-        for role, epoch, send in pending:
+        for role, epoch, epoch_exempt, send in pending:
             # A stream boundary during the wait bumped the epoch; that data is stale.
             # A role that is still held puts its entry back.
-            if epoch == self._epoch_by_role[role]:
+            if epoch_exempt or epoch == self._epoch_by_role[role]:
                 send()
 
     def _flag_initial_state_deviations(self, payload: ClientStatePayload) -> None:
@@ -468,6 +475,11 @@ class SendspinConnection:
                 self._schedule_role_head(role)
         self._wake_writer()
 
+    async def wait_role_drained(self, role: str) -> None:
+        """Return once every message queued for `role` has been sent or discarded."""
+        while self._role_queues.get(role) or self._sending_role == role:
+            await self._role_drained.setdefault(role, asyncio.Event()).wait()
+
     def send_binary(
         self,
         data: bytes,
@@ -479,6 +491,7 @@ class SendspinConnection:
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
         player_audio_header: bool = False,
+        epoch_exempt: bool = False,
     ) -> None:
         """Enqueue a binary message.
 
@@ -493,7 +506,13 @@ class SendspinConnection:
             duration_us: Duration for buffer tracking.
             player_audio_header: Prepend the player audio header, stamped with
                 send_ahead immediately before transmission.
+            epoch_exempt: Send the message even when a later stream boundary
+                invalidates the role's other queued binary.
         """
+        if epoch_exempt and role in self._retiring_roles:
+            # Must precede the removed role's teardown, which goes out ahead of server/activate.
+            self.send_priority_message(data)
+            return
         if (self._client is not None and self._client.awaits_role_state(role)) or (
             self.requires_initial_state() and not self._initial_state_received
         ):
@@ -503,6 +522,7 @@ class SendspinConnection:
                 (
                     role,
                     self._epoch_by_role[role],
+                    epoch_exempt,
                     partial(
                         self.send_binary,
                         data,
@@ -513,6 +533,7 @@ class SendspinConnection:
                         buffer_byte_count=buffer_byte_count,
                         duration_us=duration_us,
                         player_audio_header=player_audio_header,
+                        epoch_exempt=epoch_exempt,
                     ),
                 )
             )
@@ -551,6 +572,7 @@ class SendspinConnection:
                 buffer_byte_count=buffer_byte_count,
                 duration_us=duration_us,
                 player_audio_header=player_audio_header,
+                epoch_exempt=epoch_exempt,
             ),
             enqueued_at_us=now_us,
         )
@@ -692,8 +714,8 @@ class SendspinConnection:
         """Merge consecutive state-like messages where safe."""
         return existing.merge(incoming)
 
-    def send_priority_message(self, message: ServerMessage) -> None:
-        """Enqueue a high-priority message (processed before regular queue)."""
+    def send_priority_message(self, message: ServerMessage | bytes) -> None:
+        """Enqueue a high-priority message or binary frame (processed before regular queue)."""
         if len(self._priority_messages) >= MAX_PENDING_MSG:
             self._disconnect_due_to_queue_overflow("Priority message queue full, client too slow")
             return
@@ -2604,7 +2626,10 @@ class SendspinConnection:
             return False
         message = self._priority_messages.popleft()
         self._queue_size = max(self._queue_size - 1, 0)
-        await self._send_message(wsock, message)
+        if isinstance(message, bytes):
+            await wsock.send_bytes(message)
+        else:
+            await self._send_message(wsock, message)
         return True
 
     async def _process_normal_messages(
@@ -2798,7 +2823,11 @@ class SendspinConnection:
 
         # Binary entries with a stale epoch are discarded (stream was cleared/ended).
         # JSON entries skip this check - they are always delivered.
-        if entry.binary is not None and entry.epoch != self._epoch_by_role[role]:
+        if (
+            entry.binary is not None
+            and not entry.binary.epoch_exempt
+            and entry.epoch != self._epoch_by_role[role]
+        ):
             self._discard_role_head(role)
             self._schedule_role_head(role)
             return False, now_us
@@ -2824,6 +2853,22 @@ class SendspinConnection:
             return True, self._server.clock.now_us()
 
         return await self._process_binary_role_messages(wsock, role, entry, now_us)
+
+    async def _send_role_entry(
+        self,
+        wsock: Transport,
+        ready_entry: tuple[str, _RoleQueueEntry, int, int],
+        now_us: int,
+    ) -> tuple[bool, int]:
+        """Process one ready role entry, waking wait_role_drained() once the role is done."""
+        role = ready_entry[0]
+        self._sending_role = role
+        try:
+            return await self._process_role_messages(wsock, ready_entry, now_us)
+        finally:
+            self._sending_role = None
+            if role not in self._role_queues and (drained := self._role_drained.pop(role, None)):
+                drained.set()
 
     async def _wait_for_writer_work(self, now_us: int) -> None:
         """Sleep until new work arrives or next delayed role becomes ready."""
@@ -2890,7 +2935,7 @@ class SendspinConnection:
                     continue
 
                 assert ready_entry is not None
-                sent, now_us = await self._process_role_messages(wsock, ready_entry, now_us)
+                sent, now_us = await self._send_role_entry(wsock, ready_entry, now_us)
                 if sent:
                     iterations_since_yield = 0
                     continue
