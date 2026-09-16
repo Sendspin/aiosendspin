@@ -277,6 +277,7 @@ class SendspinClient:
         self.set_output_delay_ms(output_delay_ms)
         self.set_required_lead_time_ms(required_lead_time_ms)
         self.set_min_buffer_ms(min_buffer_ms)
+        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         # Commands an embedder declared on player_support are sent in client/state instead.
         hello_commands = player_support.supported_commands if player_support else None
         self._state_supported_commands: list[PlayerCommand] = list(

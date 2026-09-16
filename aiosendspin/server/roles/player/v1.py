@@ -212,7 +212,8 @@ class PlayerV1Role(Role):
             state.buffer_tracker.reset()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
-        # Commands are declared per connection; none carry over from a previous one.
+        # Commands are declared per connection; only a pre-#177 hello's carry into it.
+        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         state.state_supported_commands = list(self._legacy_hello_commands() or [])
 
     def on_deactivate(self) -> None:

@@ -1022,6 +1022,7 @@ class SendspinConnection:
     async def _build_client_hello(self) -> ClientHelloMessage:
         player_support = self._client.player_support
         if player_support is not None:
+            # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
             # Player commands are declared in client/state, never in the hello.
             player_support = replace(player_support, supported_commands=None)
         payload = ClientHelloPayload(
