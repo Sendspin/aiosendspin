@@ -17,7 +17,6 @@ from aiosendspin.client.models import AudioFormat
 from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.artwork import (
     ArtworkChannel,
-    ClientHelloArtworkSupport,
     StreamArtworkChannelConfig,
     StreamStartArtwork,
 )
@@ -141,8 +140,9 @@ async def _connection(
     )
     client = make_sdk_client(
         client_name="Test Client",
-        roles=[Roles.PLAYER],
+        roles=[Roles.PLAYER, Roles.ARTWORK],
         player_support=_player_support(),
+        artwork_channels=_artwork_channels(),
         pairing_store=store,
     )
     connection = SendspinConnection(client)
@@ -293,16 +293,7 @@ async def test_artwork_listener_receives_binary_frames_after_artwork_stream_star
     client = make_sdk_client(
         client_name="Test Client",
         roles=[Roles.ARTWORK],
-        artwork_support=ClientHelloArtworkSupport(
-            channels=[
-                ArtworkChannel(
-                    source=ArtworkSource.ALBUM,
-                    format=PictureFormat.JPEG,
-                    width=256,
-                    height=256,
-                )
-            ]
-        ),
+        artwork_channels=_artwork_channels(),
     )
     captured: list[tuple[int, bytes]] = []
     client.add_artwork_listener(lambda channel, data: captured.append((channel, data)))
@@ -333,17 +324,15 @@ async def test_artwork_listener_receives_binary_frames_after_artwork_stream_star
     assert captured == [(0, payload)]
 
 
-def _artwork_support() -> ClientHelloArtworkSupport:
-    return ClientHelloArtworkSupport(
-        channels=[
-            ArtworkChannel(
-                source=ArtworkSource.ALBUM,
-                format=PictureFormat.JPEG,
-                width=256,
-                height=256,
-            )
-        ]
-    )
+def _artwork_channels() -> list[ArtworkChannel]:
+    return [
+        ArtworkChannel(
+            source=ArtworkSource.ALBUM,
+            format=PictureFormat.JPEG,
+            width=256,
+            height=256,
+        )
+    ]
 
 
 def _visualizer_support() -> ClientHelloVisualizerSupport:
@@ -387,7 +376,7 @@ async def test_artwork_binary_dropped_when_only_player_stream_active() -> None:
         client_name="Test Client",
         roles=[Roles.PLAYER, Roles.ARTWORK],
         player_support=_player_support(),
-        artwork_support=_artwork_support(),
+        artwork_channels=_artwork_channels(),
     )
     captured: list[tuple[int, bytes]] = []
     client.add_artwork_listener(lambda channel, data: captured.append((channel, data)))
@@ -411,7 +400,7 @@ async def test_audio_binary_dropped_when_only_artwork_stream_active() -> None:
         client_name="Test Client",
         roles=[Roles.PLAYER, Roles.ARTWORK],
         player_support=_player_support(),
-        artwork_support=_artwork_support(),
+        artwork_channels=_artwork_channels(),
     )
     captured: list[tuple[int, bytes, AudioFormat, int]] = []
     client.add_audio_chunk_listener(
@@ -509,7 +498,7 @@ async def test_artwork_binary_dispatched_when_artwork_stream_active() -> None:
     client = make_sdk_client(
         client_name="Test Client",
         roles=[Roles.ARTWORK],
-        artwork_support=_artwork_support(),
+        artwork_channels=_artwork_channels(),
     )
     captured: list[tuple[int, bytes]] = []
     client.add_artwork_listener(lambda channel, data: captured.append((channel, data)))
@@ -935,9 +924,7 @@ async def test_player_available_withheld_until_clock_synchronizes(
     assert sent[-1]["available"] is True
 
 
-@pytest.mark.parametrize(
-    "role", [Roles.CONTROLLER, Roles.METADATA, Roles.ARTWORK, Roles.VISUALIZER]
-)
+@pytest.mark.parametrize("role", [Roles.CONTROLLER, Roles.METADATA, Roles.VISUALIZER])
 async def test_stateless_roles_send_initial_state(role: Roles) -> None:
     """A client with only stateless roles active still sends its initial client/state."""
     connection, sent = await _state_connection([role.value])
@@ -966,3 +953,115 @@ async def test_initial_state_sent_once_when_roles_first_activate() -> None:
 
     assert counts == [0, 1, 1, 1, 1]
     assert sent == [{"available": True}]
+
+
+_ARTWORK_STATE = {"channels": [{"source": "album", "format": "jpeg", "width": 256, "height": 256}]}
+
+
+async def test_artwork_initial_state_carries_artwork_object() -> None:
+    """An active artwork role declares its channels in the initial client/state."""
+    connection, sent = await _state_connection([Roles.ARTWORK.value])
+
+    await connection.start()
+
+    assert sent == [{"available": True, "artwork": _ARTWORK_STATE}]
+
+
+async def test_player_and_artwork_initial_state_is_one_message() -> None:
+    """The initial client/state carries the player and artwork objects together."""
+    connection, sent = await _state_connection([Roles.PLAYER.value, Roles.ARTWORK.value])
+
+    await connection.start()
+
+    assert len(sent) == 1
+    assert "player" in sent[0]
+    assert sent[0]["artwork"] == _ARTWORK_STATE
+
+
+async def test_artwork_activation_sends_artwork_object() -> None:
+    """Activating the artwork role after the initial state sends the artwork object."""
+    connection, sent = await _state_connection([Roles.PLAYER.value])
+    await connection.start()
+
+    await connection._handle_server_activate(  # noqa: SLF001
+        ServerActivatePayload(activities=[], active_roles=[Roles.PLAYER.value, Roles.ARTWORK.value])
+    )
+
+    assert "artwork" not in sent[0]
+    assert sent[-1]["artwork"] == _ARTWORK_STATE
+
+
+async def test_set_artwork_channels_reports_new_channels() -> None:
+    """set_artwork_channels sends the full artwork object in a client/state."""
+    connection, sent = await _state_connection([Roles.ARTWORK.value])
+    client = connection._client  # noqa: SLF001
+    client._admitted_connection = connection  # noqa: SLF001
+
+    await client.set_artwork_channels(
+        [
+            ArtworkChannel(source=ArtworkSource.NONE),
+            ArtworkChannel(
+                source=ArtworkSource.ARTIST, format=PictureFormat.PNG, width=64, height=32
+            ),
+        ]
+    )
+
+    assert sent == [
+        {
+            "available": True,
+            "artwork": {
+                "channels": [
+                    {"source": "none"},
+                    {"source": "artist", "format": "png", "width": 64, "height": 32},
+                ]
+            },
+        }
+    ]
+
+
+async def test_set_artwork_channels_skipped_while_role_inactive() -> None:
+    """set_artwork_channels stores the channels but sends nothing while artwork is inactive."""
+    connection, sent = await _state_connection([Roles.PLAYER.value])
+    client = connection._client  # noqa: SLF001
+    client._admitted_connection = connection  # noqa: SLF001
+    channels = [ArtworkChannel(source=ArtworkSource.NONE)]
+
+    await client.set_artwork_channels(channels)
+
+    assert sent == []
+    assert client.artwork_state is not None
+    assert client.artwork_state.channels == channels
+
+
+@pytest.mark.parametrize("count", [0, 5])
+async def test_set_artwork_channels_rejects_invalid_length(count: int) -> None:
+    """set_artwork_channels accepts only 1-4 channels."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.ARTWORK],
+        artwork_channels=_artwork_channels(),
+    )
+
+    with pytest.raises(ValueError, match="1-4"):
+        await client.set_artwork_channels(_artwork_channels() * count)
+
+
+async def test_artwork_role_requires_artwork_channels() -> None:
+    """The ARTWORK role cannot be declared without its channels."""
+    with pytest.raises(ValueError, match="artwork_channels"):
+        make_sdk_client(client_name="Test Client", roles=[Roles.ARTWORK])
+
+
+async def test_build_client_hello_omits_artwork_support() -> None:
+    """The hello lists artwork@v1 without a support object."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.ARTWORK],
+        artwork_channels=_artwork_channels(),
+    )
+    connection = SendspinConnection(client)
+
+    hello = (await connection._build_client_hello()).to_dict()  # noqa: SLF001
+
+    assert hello["payload"]["supported_roles"] == [Roles.ARTWORK.value]
+    assert "artwork@v1_support" not in hello["payload"]

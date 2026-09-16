@@ -20,6 +20,7 @@ from aiosendspin.models import (
     pack_binary_header_raw,
     unpack_binary_header,
 )
+from aiosendspin.models.artwork import ClientStateArtwork
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -553,7 +554,11 @@ class SendspinConnection:
             self._initial_state_sent = True
         if player_active or source_active or not self._active_roles:
             return
-        message = ClientStateMessage(payload=ClientStatePayload(available=self._wire_available()))
+        message = ClientStateMessage(
+            payload=ClientStatePayload(
+                available=self._wire_available(), artwork=self._active_artwork_state()
+            )
+        )
         await self._send_message(message.to_json())
         self._initial_state_sent = True
 
@@ -935,6 +940,7 @@ class SendspinConnection:
                     supported_commands=list(self._client.state_supported_commands),
                     format=self._client.preferred_format,
                 ),
+                artwork=self._active_artwork_state(),
             )
         )
         await self._send_message(message.to_json())
@@ -949,8 +955,21 @@ class SendspinConnection:
                 return
             await self._send_source_state()
             return
-        message = ClientStateMessage(payload=ClientStatePayload(available=self._wire_available()))
+        message = ClientStateMessage(
+            payload=ClientStatePayload(
+                available=self._wire_available(), artwork=self._active_artwork_state()
+            )
+        )
         await self._send_message(message.to_json())
+
+    async def send_artwork_state(self) -> None:
+        """Report the artwork channel configuration when the artwork role is active."""
+        if self._is_role_active("artwork"):
+            await self.send_available(available=self._reported_available)
+
+    def _active_artwork_state(self) -> ClientStateArtwork | None:
+        """Return the artwork object every client/state carries while the role is active."""
+        return self._client.artwork_state if self._is_role_active("artwork") else None
 
     async def _update_reported_available(self, *, available: bool) -> None:
         if not available and self._source_stream_active:
@@ -1049,6 +1068,7 @@ class SendspinConnection:
             payload=ClientStatePayload(
                 available=self._wire_available(),
                 source=SourceStatePayload(signal=self._reported_source_signal),
+                artwork=self._active_artwork_state(),
             )
         )
         await self._send_message(message.to_json())
@@ -1078,7 +1098,6 @@ class SendspinConnection:
             supported_roles=[r.value for r in self._client.roles],
             device_info=self._client.device_info,
             player_support=player_support,
-            artwork_support=self._client.artwork_support,
             visualizer_support=self._client.visualizer_support,
             source_support=self._client.source_support,
             supported_pair_methods=await self._build_supported_pair_methods(),
@@ -1291,6 +1310,7 @@ class SendspinConnection:
     ) -> None:
         was_player_active = self._is_role_active("player")
         was_source_active = self._is_role_active("source")
+        was_artwork_active = self._is_role_active("artwork")
         if (reason := await self._apply_activation(payload)) is not None:
             await self._goodbye_and_disconnect(reason)
             return
@@ -1300,8 +1320,9 @@ class SendspinConnection:
         self._resume_time_sync()
         player_activated = not was_player_active and self._is_role_active("player")
         source_activated = not was_source_active and self._is_role_active("source")
+        artwork_activated = not was_artwork_active and self._is_role_active("artwork")
         initial_state_due = bool(self._active_roles) and not self._initial_state_sent
-        if resync or player_activated or source_activated or initial_state_due:
+        if resync or player_activated or source_activated or artwork_activated or initial_state_due:
             await self._send_full_client_state()
 
     async def _pause_time_sync(self) -> None:

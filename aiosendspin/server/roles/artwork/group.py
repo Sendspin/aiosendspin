@@ -18,6 +18,8 @@ from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from aiosendspin.server.group import SendspinGroup
 
 
@@ -40,18 +42,15 @@ class ArtworkGroupRole(GroupRole):
 
     def on_member_join(self, role: Role) -> None:
         """Send current artwork to newly joined member."""
-        self._send_artwork_to_role(role)
+        if isinstance(role, ArtworkRoleProtocol):
+            self.send_current_artwork(role, role.get_channel_configs())
 
-    def _send_artwork_to_role(self, role: Role) -> None:
-        """Send current artwork for all channels to a role."""
-        if not isinstance(role, ArtworkRoleProtocol):
-            return
+    def send_current_artwork(self, role: ArtworkRoleProtocol, channels: Iterable[int]) -> None:
+        """Schedule the current image for each of `channels` the role streams."""
         channel_configs = role.get_channel_configs()
-        if not channel_configs:
-            return
-
-        for channel_num, channel_config in channel_configs.items():
-            if channel_config.source == ArtworkSource.NONE:
+        for channel_num in channels:
+            channel_config = channel_configs.get(channel_num)
+            if channel_config is None or channel_config.source == ArtworkSource.NONE:
                 continue
             artwork = self._current_artwork.get(channel_config.source)
             if artwork is not None:
@@ -76,6 +75,10 @@ class ArtworkGroupRole(GroupRole):
         channel_config: ArtworkChannel,
     ) -> None:
         """Send artwork to a specific role channel."""
+        # ArtworkChannel requires these for every source but none, which is never sent.
+        assert channel_config.width is not None
+        assert channel_config.height is not None
+        assert channel_config.format is not None
         try:
             timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
             img_data = await asyncio.to_thread(
