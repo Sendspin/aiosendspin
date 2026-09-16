@@ -271,6 +271,9 @@ class SendspinConnection:
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_messages_started = False
         self._pairing_index = 0
+        # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+        self._sent_psk_pair_init = False
+        self._activated_pairing_method: PairMethod | None = None
         self._connection_done = asyncio.Event()
         self._transport: Transport | None = None
         self._pending_first_text: str | None = None  # legacy first frame held for the loop
@@ -1025,6 +1028,9 @@ class SendspinConnection:
                 try:
                     if not await self._pair(transport):
                         return False
+                except ClientComplianceError:
+                    await self.disconnect(retry_connection=False)
+                    return False
                 except PairingTimeoutError as exc:
                     # Timeout waiting for client; the connection stays open for a retry.
                     self._logger.debug("Initial-connect pairing timed out: %s", exc)
@@ -1447,6 +1453,8 @@ class SendspinConnection:
                     and self._server.languages is not None
                 ):
                     languages = list(self._server.languages)
+            # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+            self._activated_pairing_method = method
             # No gate on the hello-advertised methods: the advertisement may lag the client's
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
@@ -1500,9 +1508,14 @@ class SendspinConnection:
             attempt = self._pairing_attempt
             return await run_pairing_psk_server(
                 transport,
+                pairing_index=pairing_index,
                 client_id=self._client_id,
                 store=self._server.pairing_store,
                 owner=attempt.owner if attempt is not None else None,
+                on_pair_init=self._note_psk_pair_init,
+                on_legacy_finalize=(
+                    None if self._sent_psk_pair_init else self._flag_legacy_psk_finalize
+                ),
             )
         assert self._pairing_attempt is not None
         assert self._pairing_attempt.pairing_code_provider is not None
@@ -1536,6 +1549,28 @@ class SendspinConnection:
             on_pair_pending=self._pairing_attempt.on_pair_pending,
             owner=self._pairing_attempt.owner,
         )
+
+    # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+    def _note_pairing_frame(self, message_type: str | None) -> None:
+        """Note a client/pair-init seen by the message loop under a Pairing PSK activation.
+
+        Covers frames the pairing task never consumes, such as one queued for a cancelled attempt.
+        """
+        if (
+            message_type == "client/pair-init"
+            and self._activated_pairing_method is PairMethod.PAIRING_PSK
+        ):
+            self._note_psk_pair_init()
+
+    # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+    def _note_psk_pair_init(self) -> None:
+        """Record that the client speaks the Pairing PSK flow that starts with pair-init."""
+        self._sent_psk_pair_init = True
+
+    # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+    def _flag_legacy_psk_finalize(self) -> None:
+        """Flag a Pairing PSK attempt started by client/pair-finalize; raises when strict."""
+        self._flag_noncompliance("Pairing PSK client/pair-finalize sent without client/pair-init")
 
     def _negotiated_dynamic_pairing_format(self) -> PairingCodeFormat:
         """Return the attempt's emission format, checked against the advertised descriptor."""
@@ -1793,11 +1828,11 @@ class SendspinConnection:
         """Forward a message to the pairing handler; return whether it was routed."""
         if self._pairing_message_queue is None:
             return False
-        if (
-            msg.type is WSMsgType.TEXT
-            and self._peek_message_type(cast("str", msg.data)) in _PAIR_TRANSITION_TYPES
-        ):
-            self._pairing_messages_started = True
+        if msg.type is WSMsgType.TEXT:
+            message_type = self._peek_message_type(cast("str", msg.data))
+            self._note_pairing_frame(message_type)
+            if message_type in _PAIR_TRANSITION_TYPES:
+                self._pairing_messages_started = True
         if not self._pairing_messages_started:
             return False
         self._pairing_message_queue.put_nowait(msg)
@@ -1833,7 +1868,9 @@ class SendspinConnection:
                 try:
                     message = self._deserialize_client_message(text)
                 except Exception:
-                    if self._peek_message_type(text) in _PAIRING_MESSAGE_TYPES:
+                    message_type = self._peek_message_type(text)
+                    self._note_pairing_frame(message_type)
+                    if message_type in _PAIRING_MESSAGE_TYPES:
                         # In flight from before the client observed the leave activate.
                         self._logger.debug("Discarding pairing message: not in pairing")
                         continue

@@ -592,7 +592,7 @@ class SendspinConnection:
         if method is PairMethod.PAIRING_PSK:
             with self._attempt_in_progress():
                 return await run_pairing_psk_client(
-                    self._ws, server_id=self._server_id, store=store
+                    self._ws, pairing_index=pairing_index, server_id=self._server_id, store=store
                 )
         assert self._handshake_hash is not None
         if method is PairMethod.STATIC_PAIRING_CODE:

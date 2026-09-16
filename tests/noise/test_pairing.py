@@ -28,6 +28,7 @@ from aiosendspin.noise.models import (
     ClientPairPendingPayload,
     ServerPairAuthMessage,
     ServerPairAuthPayload,
+    ServerPairFinalizeMessage,
     ServerPairInitMessage,
 )
 from aiosendspin.noise.pairing import (
@@ -136,10 +137,13 @@ async def test_pairing_psk_finalize_round_trip() -> None:
     _client_ret, server_record = await asyncio.gather(
         run_pairing_psk_client(
             client_ews,
+            pairing_index=0,
             server_id="server-X",
             store=client_store,
         ),
-        run_pairing_psk_server(server_ews, client_id="client-A", store=server_store),
+        run_pairing_psk_server(
+            server_ews, pairing_index=0, client_id="client-A", store=server_store
+        ),
     )
 
     client_record = await client_store.record_by_server_id("server-X")
@@ -156,6 +160,29 @@ async def test_pairing_psk_finalize_round_trip() -> None:
     assert server_record.pair_methods == [PairMethod.PAIRING_PSK]
 
 
+async def test_pairing_psk_client_sends_pair_init_then_finalize() -> None:
+    """The client starts the attempt with its indexed pair-init, then finalizes unprompted."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+
+    async def server() -> None:
+        init = ClientPairInitMessage.from_json((await server_ews.receive()).data)
+        assert init.payload == ClientPairInitPayload(pairing_index=3)
+        assert "commit_B" not in init.to_dict()["payload"]
+        finalize = ClientPairFinalizeMessage.from_json((await server_ews.receive()).data)
+        assert finalize.payload.long_term_psk is not None
+        await server_ews.send_str(ServerPairFinalizeMessage().to_json())
+
+    client_ret, _ = await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews, pairing_index=3, server_id="server-X", store=client_store
+        ),
+        server(),
+    )
+    assert client_ret is None
+    assert await client_store.record_by_server_id("server-X") is not None
+
+
 async def test_pairing_psk_client_times_out_without_finalize(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -165,28 +192,33 @@ async def test_pairing_psk_client_times_out_without_finalize(
     client_store = InMemoryClientPairingStore()
 
     async def silent_server() -> None:
+        await server_ews.receive()  # consume client/pair-init
         await server_ews.receive()  # consume client/pair-finalize, then never reply
         await asyncio.sleep(0.5)
 
     with pytest.raises(PairingAbortError) as excinfo:
         await asyncio.gather(
-            run_pairing_psk_client(client_ews, server_id="server-X", store=client_store),
+            run_pairing_psk_client(
+                client_ews, pairing_index=0, server_id="server-X", store=client_store
+            ),
             silent_server(),
         )
     assert excinfo.value.reason is PairAbortReason.ATTEMPT_TIMEOUT
     assert await client_store.record_by_server_id("server-X") is None
 
 
-async def test_pairing_psk_server_times_out_without_finalize(
+async def test_pairing_psk_server_times_out_without_pair_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Pairing PSK server times out locally, sending nothing, if the client never finalizes."""
+    """The Pairing PSK server times out locally, sending nothing, without a client/pair-init."""
     monkeypatch.setattr("aiosendspin.noise.pairing.SERVER_FIRST_MESSAGE_TIMEOUT_S", 0.05)
     _client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
-    with pytest.raises(PairingTimeoutError):
-        await run_pairing_psk_server(server_ews, client_id="client-X", store=server_store)
+    with pytest.raises(PairingTimeoutError, match="client/pair-init did not arrive"):
+        await run_pairing_psk_server(
+            server_ews, pairing_index=0, client_id="client-X", store=server_store
+        )
     assert server_raw.sent == []
     assert await server_store.record_by_client_id("client-X") is None
 
@@ -476,8 +508,12 @@ async def test_finalize_rotate_preserves_birth_and_appends_method() -> None:
     await server_store.store_record(seeded)
 
     _client_ret, rotated = await asyncio.gather(
-        run_pairing_psk_client(client_ews, server_id="server-X", store=client_store),
-        run_pairing_psk_server(server_ews, client_id="client-A", store=server_store),
+        run_pairing_psk_client(
+            client_ews, pairing_index=0, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews, pairing_index=0, client_id="client-A", store=server_store
+        ),
     )
 
     assert rotated.psk != seeded.psk  # rotated onto a fresh PSK
@@ -492,9 +528,11 @@ async def test_finalize_stamps_owner_on_a_fresh_record() -> None:
     server_store = InMemoryServerPairingStore()
 
     _client_ret, record = await asyncio.gather(
-        run_pairing_psk_client(client_ews, server_id="server-X", store=client_store),
+        run_pairing_psk_client(
+            client_ews, pairing_index=0, server_id="server-X", store=client_store
+        ),
         run_pairing_psk_server(
-            server_ews, client_id="client-A", store=server_store, owner="user-1"
+            server_ews, pairing_index=0, client_id="client-A", store=server_store, owner="user-1"
         ),
     )
 
@@ -517,8 +555,12 @@ async def test_finalize_rotate_restamps_owner() -> None:
     await server_store.store_record(seeded)
 
     _client_ret, rotated = await asyncio.gather(
-        run_pairing_psk_client(client_ews, server_id="server-X", store=client_store),
-        run_pairing_psk_server(server_ews, client_id="client-A", store=server_store),
+        run_pairing_psk_client(
+            client_ews, pairing_index=0, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews, pairing_index=0, client_id="client-A", store=server_store
+        ),
     )
 
     assert rotated.owner is None  # an unowned re-pair promotes the record to durable
@@ -533,6 +575,7 @@ async def test_client_finalize_raises_if_server_closes_before_ack() -> None:
     with pytest.raises(PairingError, match="closed while awaiting ServerPairFinalizeMessage"):
         await run_pairing_psk_client(
             client_ews,
+            pairing_index=0,
             server_id="server-X",
             store=client_store,
         )
@@ -541,14 +584,237 @@ async def test_client_finalize_raises_if_server_closes_before_ack() -> None:
 
 
 async def test_server_finalize_raises_if_client_closes_first() -> None:
-    """If the client closes before sending client/pair-finalize, the server raises."""
+    """If the client closes before starting the attempt, the server raises."""
     _client_ews, server_ews, client_raw, _server_raw = _paired_encrypted_ws()
     server_store = InMemoryServerPairingStore()
 
-    await client_raw.close_outbound()  # client never sends client/pair-finalize
-    with pytest.raises(PairingError, match="closed while awaiting ClientPairFinalizeMessage"):
-        await run_pairing_psk_server(server_ews, client_id="client-A", store=server_store)
+    await client_raw.close_outbound()  # client never sends client/pair-init
+    with pytest.raises(PairingError, match="closed while awaiting ClientPairInitMessage"):
+        await run_pairing_psk_server(
+            server_ews, pairing_index=0, client_id="client-A", store=server_store
+        )
     assert await server_store.record_by_client_id("client-A") is None
+
+
+def _psk_finalize(psk: bytes) -> str:
+    return ClientPairFinalizeMessage(
+        payload=ClientPairFinalizePayload(long_term_psk=b64url_encode(psk))
+    ).to_json()
+
+
+def _unexpected_legacy_finalize() -> None:
+    pytest.fail("a leftover finalize was accepted as a legacy attempt")
+
+
+async def test_pairing_psk_server_discards_a_cancelled_attempts_messages() -> None:
+    """A late init and finalize from a cancelled attempt do not finalize the next attempt."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    stale_psk = generate_psk()
+    pair_inits = 0
+
+    def on_pair_init() -> None:
+        nonlocal pair_inits
+        pair_inits += 1
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    await client_ews.send_str(_psk_finalize(stale_psk))
+
+    _client_ret, server_record = await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews, pairing_index=2, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews,
+            pairing_index=2,
+            client_id="client-A",
+            store=server_store,
+            on_pair_init=on_pair_init,
+            on_legacy_finalize=_unexpected_legacy_finalize,
+        ),
+    )
+
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert server_record.psk == client_record.psk
+    assert server_record.psk != stale_psk
+    assert pair_inits == 2
+
+
+async def test_pairing_psk_server_discards_a_leading_finalize_without_the_legacy_hook() -> None:
+    """Without ``on_legacy_finalize``, a finalize ahead of the matching init is a leftover."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+    stale_psk = generate_psk()
+
+    await client_ews.send_str(_psk_finalize(stale_psk))
+
+    _client_ret, server_record = await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews, pairing_index=1, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews, pairing_index=1, client_id="client-A", store=server_store
+        ),
+    )
+
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert server_record.psk == client_record.psk != stale_psk
+
+
+@pytest.mark.parametrize("long_term_psk", [None, b64url_encode(bytes(32))])
+async def test_pairing_psk_server_always_discards_a_wrapped_finalize(
+    long_term_psk: str | None,
+) -> None:
+    """A finalize carrying ``wrapped_psk`` is a leftover, even with the legacy hook set."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairFinalizeMessage(
+            payload=ClientPairFinalizePayload(
+                long_term_psk=long_term_psk, wrapped_psk=b64url_encode(bytes(48))
+            )
+        ).to_json()
+    )
+
+    _client_ret, server_record = await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews, pairing_index=1, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews,
+            pairing_index=1,
+            client_id="client-A",
+            store=server_store,
+            on_legacy_finalize=_unexpected_legacy_finalize,
+        ),
+    )
+
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert server_record.psk == client_record.psk
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+async def test_pairing_psk_server_accepts_a_legacy_finalize_first_attempt() -> None:
+    """With ``on_legacy_finalize`` set, a finalize before any init is this attempt's."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    psk = generate_psk()
+    legacy_calls = 0
+
+    def on_legacy_finalize() -> None:
+        nonlocal legacy_calls
+        legacy_calls += 1
+
+    await client_ews.send_str(_psk_finalize(psk))
+    record = await run_pairing_psk_server(
+        server_ews,
+        pairing_index=1,
+        client_id="client-A",
+        store=server_store,
+        on_legacy_finalize=on_legacy_finalize,
+    )
+
+    assert record.psk == psk
+    assert legacy_calls == 1
+    assert await server_store.record_by_client_id("client-A") == record
+    assert len(server_raw.sent) == 1  # server/pair-finalize
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+async def test_pairing_psk_server_legacy_hook_rejection_stores_nothing() -> None:
+    """An ``on_legacy_finalize`` that raises ends the attempt before anything is persisted."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    class RejectedError(Exception):
+        pass
+
+    def reject() -> None:
+        raise RejectedError
+
+    await client_ews.send_str(_psk_finalize(generate_psk()))
+    with pytest.raises(RejectedError):
+        await run_pairing_psk_server(
+            server_ews,
+            pairing_index=1,
+            client_id="client-A",
+            store=server_store,
+            on_legacy_finalize=reject,
+        )
+    assert server_raw.sent == []
+    assert await server_store.record_by_client_id("client-A") is None
+
+
+@pytest.mark.parametrize(
+    ("message", "error"),
+    [
+        (
+            ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=2)),
+            "ClientPairInitMessage pairing_index is ahead of the server's count",
+        ),
+        (
+            ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=2)),
+            "ClientPairPendingMessage pairing_index is ahead of the server's count",
+        ),
+        (
+            ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=1)),
+            "client/pair-pending is not part of the Pairing PSK flow",
+        ),
+        (
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(pairing_index=1, commit_B=b64url_encode(bytes(32)))
+            ),
+            "client/pair-init carries commit_B for Pairing PSK",
+        ),
+    ],
+)
+async def test_pairing_psk_server_rejects_out_of_sequence_messages(
+    message: ClientPairInitMessage | ClientPairPendingMessage, error: str
+) -> None:
+    """A higher index, a matching pair-pending, or a commit_B is a protocol error."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(message.to_json())
+    with pytest.raises(PairingError, match=error):
+        await run_pairing_psk_server(
+            server_ews, pairing_index=1, client_id="client-A", store=server_store
+        )
+    assert server_raw.sent == []
+    assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_pairing_psk_server_discards_a_stale_pair_pending() -> None:
+    """A pair-pending from a superseded activate is discarded; the matching init pairs."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=1)).to_json()
+    )
+
+    _client_ret, server_record = await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews, pairing_index=2, server_id="server-X", store=client_store
+        ),
+        run_pairing_psk_server(
+            server_ews, pairing_index=2, client_id="client-A", store=server_store
+        ),
+    )
+
+    client_record = await client_store.record_by_server_id("server-X")
+    assert client_record is not None
+    assert server_record.psk == client_record.psk
 
 
 _HANDSHAKE_HASH = bytes(range(32))
@@ -1230,10 +1496,13 @@ async def test_pairing_psk_falls_back_to_shared_when_storage_exhausted() -> None
     _client_ret, server_record = await asyncio.gather(
         run_pairing_psk_client(
             client_ews,
+            pairing_index=0,
             server_id="server-X",
             store=client_store,
         ),
-        run_pairing_psk_server(server_ews, client_id="client-A", store=server_store),
+        run_pairing_psk_server(
+            server_ews, pairing_index=0, client_id="client-A", store=server_store
+        ),
     )
 
     # The client admitted the server under the shared record: no new stored-pubkey record.

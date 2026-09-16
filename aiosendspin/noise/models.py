@@ -163,18 +163,18 @@ class ClientPairPendingMessage(PairingMessage):
 
 @dataclass
 class ClientPairInitPayload(SendspinModel):
-    """``client/pair-init`` payload — signals readiness for the pairing code-pairing flow."""
+    """``client/pair-init`` payload — starts the pairing attempt, whatever the method."""
 
     pairing_index: int
     """Pairing ``server/activate`` message count received since the last Noise handshake."""
     commit_B: str | None = None  # noqa: N815 - spec wire field name
     """``SHA-256("sendspin-pair-commit-v1" || nonce_B)`` (43-char base64url).
 
-    Present in dynamic pairing code and absent in static pairing code.
+    Present in dynamic pairing code and absent otherwise.
     """
 
     class Config(SendspinConfig):
-        """Omit the optional commitment when absent (static pairing code)."""
+        """Omit the optional commitment when absent (all but dynamic pairing code)."""
 
         omit_none = True
 
