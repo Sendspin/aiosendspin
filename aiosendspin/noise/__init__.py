@@ -1,6 +1,9 @@
 """Noise Protocol Framework (KKpsk2) transport for Sendspin."""
 
+from aiosendspin.models.types import ServerErrorReason
+
 from .constants import (
+    ERROR_TYPE_SERVER,
     HANDSHAKE_TYPE,
     INIT_TYPE_CLIENT,
     INIT_TYPE_SERVER,
@@ -14,6 +17,7 @@ from .driver import (
     HandshakeAbortedError,
     HandshakeResult,
     HandshakeWebSocket,
+    InitRejectedError,
     PskProvider,
     PskResolver,
     run_handshake_client,
@@ -39,6 +43,8 @@ from .models import (
     NoiseHandshakePayload,
     NoiseMsg1Payload,
     NoiseMsg2Payload,
+    ServerErrorMessage,
+    ServerErrorPayload,
     ServerInitMessage,
     ServerInitPayload,
     ServerPairFinalizeMessage,
@@ -82,6 +88,7 @@ from .wire import EncryptedWebSocket, RawWebSocket
 
 __all__ = [
     "DEFAULT_HANDSHAKE_TIMEOUT_S",
+    "ERROR_TYPE_SERVER",
     "HANDSHAKE_TYPE",
     "INIT_TYPE_CLIENT",
     "INIT_TYPE_SERVER",
@@ -106,6 +113,7 @@ __all__ = [
     "Identity",
     "InMemoryClientPairingStore",
     "InMemoryServerPairingStore",
+    "InitRejectedError",
     "NoiseCipherSuite",
     "NoiseHandshakeMessage",
     "NoiseHandshakePayload",
@@ -120,6 +128,9 @@ __all__ = [
     "PskResolver",
     "RawWebSocket",
     "ResolvedPsk",
+    "ServerErrorMessage",
+    "ServerErrorPayload",
+    "ServerErrorReason",
     "ServerInitMessage",
     "ServerInitPayload",
     "ServerPairFinalizeMessage",

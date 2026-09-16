@@ -8,7 +8,7 @@ from typing import Literal
 from mashumaro.types import Discriminator
 
 from aiosendspin.models.base import SendspinConfig, SendspinModel
-from aiosendspin.models.types import PairAbortReason, ServerMessage
+from aiosendspin.models.types import PairAbortReason, ServerErrorReason, ServerMessage
 
 
 @dataclass
@@ -47,6 +47,22 @@ class ServerInitMessage(SendspinModel):
 
     payload: ServerInitPayload
     type: Literal["server/init"] = "server/init"
+
+
+@dataclass
+class ServerErrorPayload(SendspinModel):
+    """Cleartext ``server/error`` payload — replaces ``server/init``; the server closes after."""
+
+    reason: ServerErrorReason
+    """Why the server rejected the ``client/init``."""
+
+
+@dataclass
+class ServerErrorMessage(SendspinModel):
+    """Envelope for ``ServerErrorPayload``."""
+
+    payload: ServerErrorPayload
+    type: Literal["server/error"] = "server/error"
 
 
 @dataclass

@@ -915,45 +915,44 @@ class SendspinConnection:
     async def _establish_transport(
         self, raw: web.WebSocketResponse | ClientWebSocketResponse
     ) -> Transport:
-        """Dispatch on the first frame: run the Noise handshake or accept a legacy client.
+        """Dispatch on the first frame: accept a legacy client or run the Noise handshake.
 
-        A ``client/init`` first frame runs the Noise initiator handshake and yields
-        an encrypted transport. In transition mode, a ``client/hello`` first frame
-        is accepted unencrypted (the raw socket is the transport, and the frame is
-        held for the message loop). Anything else raises
-        ``HandshakeAbortedError``.
+        A ``client/hello`` first frame closes a pairing dial without a reply; otherwise,
+        in transition mode, it is accepted unencrypted (the raw socket is the transport,
+        and the frame is held for the message loop). Every other TEXT first frame runs
+        the Noise initiator handshake and yields an encrypted transport; one that is not
+        a valid ``client/init`` is answered with ``server/error``. Handshake failures
+        raise ``HandshakeAbortedError``.
         """
         first_text = await receive_text_frame(raw, what="first frame")
-        msg_type = self._peek_message_type(first_text)
-        if msg_type == "client/init":
-            result = await run_handshake_server(
-                raw,
-                local_identity=self._server.identity,
-                psk_provider=self._psk_provider,
-                client_init_text=first_text,
-                expected_client_id=self._expected_client_id,
-            )
-            self._client_id = result.peer_id
-            self._noise_psk = result.psk
-            self._handshake_hash = result.handshake_hash
-            self._pairing_index = 0
-            self._logger = logger.getChild(result.peer_id)
-            self._credential_mismatch = result.credential_mismatch and await self._holds_record(
-                result.peer_id
-            )
-            if self._credential_mismatch:
-                self._logger.warning(
-                    "Client could not use its pairing record and was admitted on the "
-                    "Sentinel PSK; it needs re-pairing before it can play again"
-                )
-            return result.encrypted_ws
-        if msg_type == "client/hello" and self._server.allow_unencrypted:
+        if self._peek_message_type(first_text) == "client/hello":
             if self._pairing_attempt is not None:
                 raise HandshakeAbortedError("pairing requires an encrypted connection")
-            self._logger.warning("Accepting unencrypted legacy connection (transition mode)")
-            self._pending_first_text = first_text
-            return raw
-        raise HandshakeAbortedError(f"unexpected first frame type {msg_type!r}")
+            if self._server.allow_unencrypted:
+                self._logger.warning("Accepting unencrypted legacy connection (transition mode)")
+                self._pending_first_text = first_text
+                return raw
+        result = await run_handshake_server(
+            raw,
+            local_identity=self._server.identity,
+            psk_provider=self._psk_provider,
+            client_init_text=first_text,
+            expected_client_id=self._expected_client_id,
+        )
+        self._client_id = result.peer_id
+        self._noise_psk = result.psk
+        self._handshake_hash = result.handshake_hash
+        self._pairing_index = 0
+        self._logger = logger.getChild(result.peer_id)
+        self._credential_mismatch = result.credential_mismatch and await self._holds_record(
+            result.peer_id
+        )
+        if self._credential_mismatch:
+            self._logger.warning(
+                "Client could not use its pairing record and was admitted on the "
+                "Sentinel PSK; it needs re-pairing before it can play again"
+            )
+        return result.encrypted_ws
 
     @staticmethod
     def _peek_message_type(text: str) -> str | None:
