@@ -350,9 +350,10 @@ async def _serve_legacy_peer() -> AsyncIterator[tuple[str, asyncio.Event, list[s
         await test_server.close()
 
 
-async def test_pairing_dial_refuses_legacy_client() -> None:
-    """A dial carrying a pairing intent aborts when the peer answers with a legacy hello."""
-    server = _make_server(InMemoryServerPairingStore(), allow_unencrypted=True)
+@pytest.mark.parametrize("allow_unencrypted", [True, False])
+async def test_pairing_dial_refuses_legacy_client(allow_unencrypted: bool) -> None:  # noqa: FBT001
+    """A pairing dial answered with a legacy hello closes without a reply."""
+    server = _make_server(InMemoryServerPairingStore(), allow_unencrypted=allow_unencrypted)
     try:
         async with _serve_legacy_peer() as (url, closed, frames):
             async with ClientSession() as session, session.ws_connect(url) as wsock:
