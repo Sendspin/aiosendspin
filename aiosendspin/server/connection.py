@@ -84,7 +84,11 @@ from aiosendspin.models.management import (
     ServerUnpairMessage,
     StorageAccounting,
 )
-from aiosendspin.models.player import compute_send_ahead, pack_player_audio_header
+from aiosendspin.models.player import (
+    compute_send_ahead,
+    pack_player_audio_frame,
+    stamp_send_ahead,
+)
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
@@ -2098,11 +2102,13 @@ class SendspinConnection:
         if binary.player_audio_header:
             # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
             if self.uses_pre_spec_177_wire:
-                header = pack_binary_header_raw(binary.message_type, entry.timestamp_us)
+                data = pack_binary_header_raw(binary.message_type, entry.timestamp_us) + data
             else:
-                send_ahead = compute_send_ahead(entry.timestamp_us, self._server.clock.now_us())
-                header = pack_player_audio_header(entry.timestamp_us, send_ahead)
-            data = header + data
+                frame = pack_player_audio_frame(entry.timestamp_us, data)
+                now_us = self._server.clock.now_us()
+                stamp_send_ahead(frame, compute_send_ahead(entry.timestamp_us, now_us))
+                # The Noise transport only encrypts bytes.
+                data = bytes(frame)
         start_s = time.monotonic()
         await wsock.send_bytes(data)
         elapsed_ms = (time.monotonic() - start_s) * 1000

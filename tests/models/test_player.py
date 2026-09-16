@@ -12,7 +12,9 @@ from aiosendspin.models.player import (
     PlayerCommandPayload,
     PlayerStatePayload,
     compute_send_ahead,
+    pack_player_audio_frame,
     pack_player_audio_header,
+    stamp_send_ahead,
     unpack_player_audio_header,
 )
 from aiosendspin.models.types import BinaryMessageType, PlayerCommand
@@ -293,3 +295,13 @@ def test_unpack_player_audio_header_rejects_short_data() -> None:
 def test_compute_send_ahead_saturates(timestamp_us: int, now_us: int, expected: int) -> None:
     """send_ahead is the lead in hand, clamped to 0 and to the uint32 maximum."""
     assert compute_send_ahead(timestamp_us, now_us) == expected
+
+
+def test_stamped_player_audio_frame_matches_packed_header() -> None:
+    """A frame stamped with send_ahead equals the packed header followed by the payload."""
+    frame = pack_player_audio_frame(1_500_000, b"audio")
+    assert unpack_player_audio_header(frame).send_ahead == 0
+
+    stamp_send_ahead(frame, SEND_AHEAD_MAX)
+
+    assert frame == pack_player_audio_header(1_500_000, SEND_AHEAD_MAX) + b"audio"

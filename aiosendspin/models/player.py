@@ -36,6 +36,8 @@ def _rewrite_legacy_delay_key(d: dict[str, Any]) -> dict[str, Any]:
 PLAYER_AUDIO_HEADER_FORMAT = ">BqI"
 _PLAYER_AUDIO_HEADER_STRUCT = struct.Struct(PLAYER_AUDIO_HEADER_FORMAT)
 PLAYER_AUDIO_HEADER_SIZE = _PLAYER_AUDIO_HEADER_STRUCT.size
+_SEND_AHEAD_STRUCT = struct.Struct(">I")
+_SEND_AHEAD_OFFSET = PLAYER_AUDIO_HEADER_SIZE - _SEND_AHEAD_STRUCT.size
 # Saturated send_ahead: the lead exceeds what the field can hold.
 SEND_AHEAD_MAX = 0xFFFFFFFF
 
@@ -60,6 +62,21 @@ def pack_player_audio_header(timestamp_us: int, send_ahead: int) -> bytes:
     return _PLAYER_AUDIO_HEADER_STRUCT.pack(
         BinaryMessageType.AUDIO_CHUNK.value, timestamp_us, send_ahead
     )
+
+
+def pack_player_audio_frame(timestamp_us: int, payload: bytes) -> bytearray:
+    """Return a player audio frame whose send_ahead is 0 until stamp_send_ahead() sets it."""
+    frame = bytearray(PLAYER_AUDIO_HEADER_SIZE + len(payload))
+    _PLAYER_AUDIO_HEADER_STRUCT.pack_into(
+        frame, 0, BinaryMessageType.AUDIO_CHUNK.value, timestamp_us, 0
+    )
+    frame[PLAYER_AUDIO_HEADER_SIZE:] = payload
+    return frame
+
+
+def stamp_send_ahead(frame: bytearray, send_ahead: int) -> None:
+    """Write `send_ahead` into a frame from pack_player_audio_frame()."""
+    _SEND_AHEAD_STRUCT.pack_into(frame, _SEND_AHEAD_OFFSET, send_ahead)
 
 
 def unpack_player_audio_header(data: bytes) -> PlayerAudioHeader:

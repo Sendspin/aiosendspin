@@ -24,9 +24,11 @@ from aiosendspin.models.player import (
     PLAYER_AUDIO_HEADER_SIZE,
     SEND_AHEAD_MAX,
     StreamStartPlayer,
+    pack_player_audio_frame,
     unpack_player_audio_header,
 )
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
+from aiosendspin.server import connection as connection_module
 from aiosendspin.server.audio import BufferTracker
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.connection import (
@@ -959,12 +961,37 @@ async def test_writer_stamps_player_audio_send_ahead_at_send_time(
     await _drain_one(conn, sent)
 
     assert len(sent) == 1
+    # The Noise transport only encrypts bytes.
+    assert type(sent[0]) is bytes
     assert len(sent[0]) == PLAYER_AUDIO_HEADER_SIZE + len(b"audio")
     header = unpack_player_audio_header(sent[0])
     assert header.message_type == BinaryMessageType.AUDIO_CHUNK.value
     assert header.timestamp_us == timestamp_us
     assert header.send_ahead == expected_send_ahead
     assert sent[0][PLAYER_AUDIO_HEADER_SIZE:] == b"audio"
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_writer_reads_send_ahead_clock_after_building_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Time spent building the frame is excluded from send_ahead."""
+    clock = ManualClock(now_us_value=1_000_000)
+    conn, sent = await _start_recording_connection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=clock)
+    )
+
+    def _slow_pack(timestamp_us: int, payload: bytes) -> bytearray:
+        clock.advance_us(100_000)
+        return pack_player_audio_frame(timestamp_us, payload)
+
+    monkeypatch.setattr(connection_module, "pack_player_audio_frame", _slow_pack)
+    _send_player_audio(conn, b"audio", 1_500_000)
+    await _drain_one(conn, sent)
+
+    assert unpack_player_audio_header(sent[0]).send_ahead == 400_000
 
     await conn.disconnect(retry_connection=False)
 
