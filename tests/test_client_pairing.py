@@ -7,13 +7,19 @@ import json
 import logging
 from contextlib import suppress
 from dataclasses import replace
+from typing import TYPE_CHECKING, cast
 
 import pytest
-from aiohttp import WSMessage, WSMsgType
+from aiohttp import WSMsgType
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.models import PairingSupport, ServerInfo
-from aiosendspin.models.core import ActivatePairing, ServerActivateMessage, ServerActivatePayload
+from aiosendspin.models.core import (
+    ActivatePairing,
+    ServerActivatePayload,
+    ServerTimeMessage,
+    ServerTimePayload,
+)
 from aiosendspin.models.types import (
     Activity,
     GoodbyeReason,
@@ -27,10 +33,12 @@ from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
     ClientPairPendingMessage,
     PairAbortMessage,
+    PairAbortPayload,
     ServerPairAuthMessage,
     ServerPairAuthPayload,
+    ServerPairFinalizeMessage,
 )
-from aiosendspin.noise.pairing import LocalPairingAbortError, PairingError
+from aiosendspin.noise.pairing import LocalPairingAbortError, PairingError, RemotePairingAbortError
 from aiosendspin.noise.trust_store import (
     PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
@@ -39,8 +47,13 @@ from aiosendspin.noise.trust_store import (
     PskCategory,
     ResolvedPsk,
 )
+from aiosendspin.noise.wire import EncryptedWebSocket
 
 from .conftest import make_sdk_client
+from .noise.conftest import make_paired_encrypted_ws
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 class _FakeWS:
@@ -59,6 +72,10 @@ class _FakeWS:
 
     def exception(self) -> BaseException | None:
         return None
+
+
+def _as_ews(ws: _FakeWS) -> EncryptedWebSocket:
+    return cast("EncryptedWebSocket", ws)
 
 
 def _client_with(category: PskCategory) -> tuple[SendspinConnection, _FakeWS]:
@@ -154,33 +171,6 @@ async def test_pair_abort_and_goodbye_bypass_exchange_suppression() -> None:
     assert abort.payload.reason is PairAbortReason.CONCURRENT_ATTEMPT
 
 
-async def test_pairing_window_tolerates_bare_leave_activate() -> None:
-    """A bare leave server/activate during the window wait ends pairing, not the connection."""
-    client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER])
-    connection = SendspinConnection(client)
-    ws = _FakeWS()
-    leave = ServerActivateMessage(
-        payload=ServerActivatePayload(activities=[], active_roles=[])
-    ).to_json()
-
-    async def receive() -> WSMessage:
-        return WSMessage(WSMsgType.TEXT, leave, "")
-
-    ws.receive = receive  # type: ignore[attr-defined]
-    connection._ws = ws  # type: ignore[assignment]  # noqa: SLF001
-    connection._server_id = "server-1"  # noqa: SLF001
-    # Gesture-gated pairing runs over the Sentinel PSK.
-    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
-        "psk-id", b"\x00" * 32, PskCategory.SENTINEL
-    )
-
-    frame = await connection._gate_on_pairing_window(1)  # noqa: SLF001
-
-    # The bare leave activate is surfaced raw for downstream parsing, not raised.
-    assert frame == leave
-    assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 1
-
-
 def _pairing_connection(pairing_support: PairingSupport) -> tuple[SendspinConnection, _FakeWS]:
     """Build a Sentinel-keyed connection whose client offers ``pairing_support``."""
     client = make_sdk_client(
@@ -222,18 +212,19 @@ async def test_dynamic_attempt_at_round_limit_is_held_back() -> None:
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
         method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
     )
-    leave = ServerActivateMessage(
-        payload=ServerActivatePayload(activities=[], active_roles=[])
-    ).to_json()
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    ws.receive = queue.get  # type: ignore[attr-defined]
 
-    async def receive() -> WSMessage:
-        return WSMessage(WSMsgType.TEXT, leave, "")
+    attempt = asyncio.create_task(
+        connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+    )
+    async with asyncio.timeout(1):
+        while not ws.sent:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    attempt.cancel()
+    with suppress(asyncio.CancelledError):
+        await attempt
 
-    ws.receive = receive  # type: ignore[attr-defined]
-
-    frame = await connection._run_pairing_protocol()  # noqa: SLF001
-
-    assert frame == leave
     assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 1
     assert await store.pairing_round_count() == PAIRING_ROUND_LIMIT
 
@@ -253,7 +244,7 @@ async def test_ungated_dynamic_attempt_starts_immediately(
 
     monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
 
-    assert await connection._run_pairing_protocol() is None  # noqa: SLF001
+    await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
     assert captured["pairing_format"] is PairingCodeFormat.DIGITS
     assert ws.sent == []  # no pair-pending
 
@@ -266,7 +257,7 @@ async def test_unrecognized_activation_format_aborts() -> None:
     )
 
     with pytest.raises(PairingError):
-        await connection._run_pairing_protocol()  # noqa: SLF001
+        await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
 
     abort = PairAbortMessage.from_json(ws.sent[0])
     assert abort.payload.reason is PairAbortReason.METHOD_NOT_SUPPORTED
@@ -291,7 +282,7 @@ async def test_held_back_attempt_consumes_open_window_and_resets_rounds(
 
     monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
 
-    assert await connection._run_pairing_protocol() is None  # noqa: SLF001
+    await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
     assert not client.pairing_window_open  # consumed by the attempt
     assert await store.pairing_round_count() == 0  # the operator action resets the count
@@ -318,7 +309,7 @@ async def test_static_pairing_code_attempt_consumes_a_pre_open_window(
 
     monkeypatch.setattr("aiosendspin.client.connection.run_static_pairing_code_client", fake_run)
 
-    assert await connection._run_pairing_protocol() is None  # noqa: SLF001
+    await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
     assert not client.pairing_window_open
 
@@ -337,7 +328,7 @@ async def test_ungated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
 
-    assert await connection._run_pairing_protocol() is None  # noqa: SLF001
+    await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
     assert not client.pairing_window_open  # spent by the attempt
 
@@ -549,39 +540,227 @@ async def _cancel_time_task(connection: SendspinConnection) -> None:
             await task
 
 
-async def test_leave_activate_redeclaring_pairing_runs_next_attempt() -> None:
-    """A leave activate that declares pairing again immediately admits the next attempt."""
-    connection, _ws = _client_with(PskCategory.LONG_TERM)
+def _live_connection(
+    category: PskCategory, pairing_support: PairingSupport | None = None
+) -> tuple[SendspinConnection, EncryptedWebSocket]:
+    """Build a live connection; the returned server end reads what the client sends."""
+    client = make_sdk_client(
+        client_name="C", roles=[Roles.CONTROLLER], pairing_support=pairing_support
+    )
+    connection = SendspinConnection(client)
+    client_ews, server_ews, _client_raw, _server_raw = make_paired_encrypted_ws()
+    connection._ws = client_ews  # noqa: SLF001
+    connection._server_id = "server-1"  # noqa: SLF001
+    connection._handshake_hash = b"\x00" * 32  # noqa: SLF001
+    connection._noise_psk = ResolvedPsk("psk-id", b"\x00" * 32, category)  # noqa: SLF001
     connection._connected = True  # noqa: SLF001
-    attempts = 0
-    activates = iter(
-        [
-            ServerActivatePayload(
-                activities=[Activity.PAIRING],
-                active_roles=[],
-                pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
-            ),
-            ServerActivatePayload(activities=[], active_roles=[]),
-        ]
+    return connection, server_ews
+
+
+def _pairing_activation(method: PairMethod) -> ServerActivatePayload:
+    return ServerActivatePayload(
+        activities=[Activity.PAIRING],
+        active_roles=[],
+        pairing=ActivatePairing(
+            method=method,
+            format="digits" if method is PairMethod.DYNAMIC_PAIRING_CODE else None,
+        ),
     )
 
-    async def fake_protocol() -> str:
-        nonlocal attempts
-        attempts += 1
-        return "leftover"
 
-    async def resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
-        return next(activates)
+async def _received_types(server_ews: EncryptedWebSocket, count: int) -> list[str]:
+    types = []
+    async with asyncio.timeout(1):
+        for _ in range(count):
+            msg = await server_ews.receive()
+            assert msg.type is WSMsgType.TEXT
+            types.append(json.loads(msg.data)["type"])
+    return types
 
-    connection._run_pairing_protocol = fake_protocol  # type: ignore[method-assign]  # noqa: SLF001
-    connection._resolve_pairing_activate = resolve  # type: ignore[method-assign]  # noqa: SLF001
 
+async def test_each_pairing_activation_admits_a_new_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pairing activation mid-attempt abandons it and admits the next one."""
+    connection, _server_ews = _live_connection(PskCategory.PAIRING)
+    indexes: list[int] = []
+    cancelled: list[int] = []
+
+    async def fake_run(_ws: object, *, pairing_index: int, **_kwargs: object) -> None:
+        indexes.append(pairing_index)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(pairing_index)
+            raise
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_pairing_psk_client", fake_run)
     try:
-        await connection._pair()  # noqa: SLF001
-        assert attempts == 2
-        assert not connection.is_pairing
+        activation = _pairing_activation(PairMethod.PAIRING_PSK)
+        await connection._handle_server_activate(activation)  # noqa: SLF001
+        await asyncio.sleep(0)
+        await connection._handle_server_activate(activation)  # noqa: SLF001
+        await asyncio.sleep(0)
+        assert indexes == [1, 2]
+        assert cancelled == [1]
+        assert connection._pairing_task is not None  # noqa: SLF001
     finally:
-        await _cancel_time_task(connection)
+        await connection.disconnect()
+    assert cancelled == [1, 2]
+
+
+async def test_server_activate_mid_attempt_cancels_it_and_persists_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A leave activation after client/pair-finalize abandons the attempt without storing."""
+    connection, server_ews = _live_connection(PskCategory.PAIRING)
+    store = connection._client.pairing_store  # noqa: SLF001
+    pairing = generate_psk()
+    await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.PAIRING_PSK)
+        )
+        assert await _received_types(server_ews, 2) == ["client/pair-init", "client/pair-finalize"]
+        assert connection.pairing_attempt_in_progress
+
+        await connection._handle_server_activate(  # noqa: SLF001
+            ServerActivatePayload(activities=[], active_roles=[])
+        )
+        assert connection._pairing_task is None  # noqa: SLF001
+        assert not connection.pairing_attempt_in_progress
+        assert not connection.is_pairing
+
+        # The ack the server sent before it saw nothing further is discarded quietly.
+        with caplog.at_level(logging.DEBUG):
+            await connection._handle_json_message(  # noqa: SLF001
+                ServerPairFinalizeMessage().to_json()
+            )
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert connection.connected
+        assert await store.record_by_server_id("server-1") is None
+    finally:
+        await connection.disconnect()
+
+
+async def test_finalize_ack_persists_before_the_reader_moves_on() -> None:
+    """The reader hands server/pair-finalize over and waits until the record is stored."""
+    connection, server_ews = _live_connection(PskCategory.PAIRING)
+    store = connection._client.pairing_store  # noqa: SLF001
+    pairing = generate_psk()
+    await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.PAIRING_PSK)
+        )
+        await _received_types(server_ews, 2)
+
+        await connection._handle_json_message(  # noqa: SLF001
+            ServerPairFinalizeMessage().to_json()
+        )
+
+        assert connection._pairing_task is None  # noqa: SLF001
+        assert await store.record_by_server_id("server-1") is not None
+    finally:
+        await connection.disconnect()
+
+
+async def test_attempt_runs_alongside_other_traffic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """During an attempt time sync flows both ways and pairing messages go to the attempt."""
+    connection, server_ews = _live_connection(PskCategory.PAIRING)
+    received: asyncio.Queue[str] = asyncio.Queue()
+
+    async def fake_run(ws: EncryptedWebSocket, **_kwargs: object) -> None:
+        msg = await ws.receive()
+        await received.put(msg.data)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_pairing_psk_client", fake_run)
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.PAIRING_PSK)
+        )
+        connection._pairing_attempt_in_progress = True  # noqa: SLF001
+
+        await connection._send_time_message()  # noqa: SLF001
+        assert await _received_types(server_ews, 1) == ["client/time"]
+
+        now_us = connection.now_us()
+        time_reply = ServerTimeMessage(
+            payload=ServerTimePayload(
+                client_transmitted=now_us, server_received=now_us, server_transmitted=now_us
+            )
+        )
+        await connection._handle_json_message(time_reply.to_json())  # noqa: SLF001
+        assert connection._time_filter.count == 1  # noqa: SLF001
+
+        abort = PairAbortMessage(payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED))
+        await connection._handle_json_message(abort.to_json())  # noqa: SLF001
+        async with asyncio.timeout(1):
+            assert await received.get() == abort.to_json()
+    finally:
+        await connection.disconnect()
+
+
+async def test_remote_abort_leaves_the_connection_in_pairing() -> None:
+    """A non-closing pair/abort ends the attempt only; later pairing frames are discarded."""
+    connection, _server_ews = _live_connection(PskCategory.PAIRING)
+    reasons: list[PairAbortReason] = []
+    connection._client.add_pairing_abort_listener(reasons.append)  # noqa: SLF001
+    pairing = generate_psk()
+    store = connection._client.pairing_store  # noqa: SLF001
+    await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.PAIRING_PSK)
+        )
+        abort = PairAbortMessage(payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED))
+        await connection._handle_json_message(abort.to_json())  # noqa: SLF001
+        task = connection._pairing_task  # noqa: SLF001
+        if task is not None:
+            await asyncio.wait((task,))
+
+        assert reasons == [PairAbortReason.USER_CANCELLED]
+        assert connection._pairing_task is None  # noqa: SLF001
+        assert connection.is_pairing
+        assert connection.connected
+        await connection._handle_json_message(ServerPairFinalizeMessage().to_json())  # noqa: SLF001
+        assert await store.record_by_server_id("server-1") is None
+    finally:
+        await connection.disconnect()
+
+
+async def test_out_channel_is_suspended_while_the_code_is_emitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The suspend hook brackets the dynamic pairing code's emission."""
+    events: list[object] = []
+
+    async def display(pairing_code: str | None) -> None:
+        events.append(pairing_code)
+
+    async def suspend(active: bool) -> None:  # noqa: FBT001
+        events.append(active)
+
+    connection, ws = _pairing_connection(
+        PairingSupport(pairing_code_display=display, out_channel_suspend=suspend)
+    )
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
+    )
+
+    async def fake_run(_ws: object, *, pairing_code_emitter: object, **_kwargs: object) -> None:
+        emit = cast("Callable[[str], Awaitable[None]]", pairing_code_emitter)
+        await emit("123456")
+        await emit("123456")  # the next round keeps the channel suspended
+        raise RemotePairingAbortError(PairAbortReason.PAIRING_CODE_MISMATCH)
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
+
+    with pytest.raises(RemotePairingAbortError):
+        await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+
+    assert events == [True, "123456", "123456", None, False]
 
 
 async def test_leave_activate_resumes_time_sync() -> None:
@@ -630,17 +809,12 @@ async def test_post_pairing_activation_sends_stateless_initial_state() -> None:
     connection, ws = _client_with(PskCategory.LONG_TERM)
     connection._connected = True  # noqa: SLF001
 
-    async def fake_protocol() -> str:
-        return "leftover"
-
-    async def resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
-        return ServerActivatePayload(activities=[], active_roles=[Roles.CONTROLLER.value])
-
-    connection._run_pairing_protocol = fake_protocol  # type: ignore[method-assign]  # noqa: SLF001
-    connection._resolve_pairing_activate = resolve  # type: ignore[method-assign]  # noqa: SLF001
-
     try:
-        await connection._pair()  # noqa: SLF001
+        # The activation following the re-handshake onto the new record.
+        await connection._handle_server_activate(  # noqa: SLF001
+            ServerActivatePayload(activities=[], active_roles=[Roles.CONTROLLER.value]),
+            resync=True,
+        )
         states = [msg for msg in map(json.loads, ws.sent) if msg["type"] == "client/state"]
         assert [msg["payload"] for msg in states] == [{"available": True}]
     finally:

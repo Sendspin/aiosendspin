@@ -169,18 +169,15 @@ async def run_pairing_psk_client(
     pairing_index: int,
     server_id: str,
     store: ClientPairingStore,
-) -> str | None:
-    """Run the client side of the Pairing PSK flow.
-
-    Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
-    """
+) -> None:
+    """Run the client side of the Pairing PSK flow through finalize."""
     async with _client_timeout(ws):
         await ws.send_str(
             ClientPairInitMessage(
                 payload=ClientPairInitPayload(pairing_index=pairing_index),
             ).to_json(),
         )
-        return await _finalize_client(ws, server_id=server_id, store=store)
+        await _finalize_client(ws, server_id=server_id, store=store)
 
 
 async def run_pairing_psk_server(
@@ -269,11 +266,8 @@ async def run_dynamic_pairing_code_client(
     pairing_code_emitter: PairingCodeEmitter,
     server_id: str,
     store: ClientPairingStore,
-) -> str | None:
-    """Run the client side of the dynamic-pairing-code flow.
-
-    Returns ``None`` on finalize, else the raw ``server/activate`` leave frame.
-    """
+) -> None:
+    """Run the client side of the dynamic-pairing-code flow through finalize."""
     nonce_b = pairing_code_mod.generate_nonce()
     async with _client_timeout(ws):
         await ws.send_str(
@@ -326,7 +320,7 @@ async def run_dynamic_pairing_code_client(
             ).to_json(),
         )
 
-        return await _finalize_client(
+        await _finalize_client(
             ws,
             server_id=server_id,
             store=store,
@@ -434,11 +428,10 @@ async def run_static_pairing_code_client(
     static_pairing_code: str,
     server_id: str,
     store: ClientPairingStore,
-) -> str | None:
-    """Run the client side of the static-pairing-code flow.
+) -> None:
+    """Run the client side of the static-pairing-code flow through finalize.
 
-    The caller has opened the pairing window. Returns ``None`` on finalize,
-    else the raw ``server/activate`` leave frame.
+    The caller has opened the pairing window.
     """
     sid = _pake_sid(handshake_hash, pairing_index, 1)
     async with _client_timeout(ws):
@@ -456,7 +449,7 @@ async def run_static_pairing_code_client(
             ).to_json(),
         )
 
-        return await _finalize_client(
+        await _finalize_client(
             ws,
             server_id=server_id,
             store=store,
@@ -592,11 +585,10 @@ async def _finalize_client(
     server_id: str,
     store: ClientPairingStore,
     wrap_key: bytes | None = None,
-) -> str | None:
+) -> None:
     """Send ``client/pair-finalize``, wrapping the PSK when ``wrap_key`` is set.
 
-    Pairing-code flows set ``wrap_key``. Returns ``None`` after persisting on the
-    server's ack, else its raw leave frame.
+    Pairing-code flows set ``wrap_key``. The record is persisted on the server's ack.
     """
     psk, record = await store.resolve_pairing_outcome(server_id=server_id)
     if wrap_key is None:
@@ -605,12 +597,9 @@ async def _finalize_client(
         wrapped = _wrap_aead(ws.session.suite, wrap_key).encrypt(_WRAP_NONCE, psk, None)
         payload = ClientPairFinalizePayload(wrapped_psk=b64url_encode(wrapped))
     await ws.send_str(ClientPairFinalizeMessage(payload=payload).to_json())
-    reply = await _receive_pairing_frame(ws, ServerPairFinalizeMessage)
-    if isinstance(reply, str):
-        return reply  # server left pairing without finalizing; nothing stored
+    await _receive_pairing(ws, ServerPairFinalizeMessage)
     if record is not None:
         await store.replace_record_for_server_id(record)
-    return None
 
 
 async def _finalize_server(
@@ -715,58 +704,6 @@ async def abort_pairing(ws: EncryptedWebSocket, reason: PairAbortReason) -> NoRe
 
 
 @overload
-async def _receive_pairing_frame[T: PairingMessage](
-    ws: EncryptedWebSocket, expected: type[T]
-) -> T | str: ...
-
-
-@overload
-async def _receive_pairing_frame[T: PairingMessage, U: PairingMessage](
-    ws: EncryptedWebSocket, expected: tuple[type[T], type[U]]
-) -> T | U | str: ...
-
-
-@overload
-async def _receive_pairing_frame[T: PairingMessage, U: PairingMessage, V: PairingMessage](
-    ws: EncryptedWebSocket, expected: tuple[type[T], type[U], type[V]]
-) -> T | U | V | str: ...
-
-
-@overload
-async def _receive_pairing_frame[
-    T: PairingMessage,
-    U: PairingMessage,
-    V: PairingMessage,
-    W: PairingMessage,
-](
-    ws: EncryptedWebSocket, expected: tuple[type[T], type[U], type[V], type[W]]
-) -> T | U | V | W | str: ...
-
-
-async def _receive_pairing_frame(
-    ws: EncryptedWebSocket, expected: type[PairingMessage] | tuple[type[PairingMessage], ...]
-) -> PairingMessage | str:
-    """Receive a frame: a parsed ``expected`` message, or the raw text if it isn't pairing."""
-    kinds = expected if isinstance(expected, tuple) else (expected,)
-    expected_names = _expected_names(expected)
-    msg = await ws.receive()
-    if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-        raise PairingError(f"connection closed while awaiting {expected_names}")
-    if msg.type is not WSMsgType.TEXT:
-        raise PairingError(f"expected a JSON frame ({expected_names}), got {msg.type.name}")
-    data = cast("str", msg.data)
-    try:
-        message = PairingMessage.from_json(data)
-    except (ValueError, LookupError):
-        return data
-    if isinstance(message, PairAbortMessage):
-        raise RemotePairingAbortError(message.payload.reason)
-    if not isinstance(message, kinds):
-        raise PairingError(f"expected {expected_names}, got {type(message).__name__}")
-    return message
-
-
-@overload
 async def _receive_pairing[T: PairingMessage](ws: EncryptedWebSocket, expected: type[T]) -> T: ...
 
 
@@ -799,9 +736,21 @@ async def _receive_pairing(
     | tuple[type[PairingMessage], type[PairingMessage], type[PairingMessage], type[PairingMessage]],
 ) -> PairingMessage:
     """Receive the next pairing frame, requiring it to be of an ``expected`` type."""
-    message = await _receive_pairing_frame(ws, expected)
-    if isinstance(message, str):
-        raise PairingError(f"malformed message awaiting {_expected_names(expected)}")
+    kinds = expected if isinstance(expected, tuple) else (expected,)
+    expected_names = _expected_names(expected)
+    msg = await ws.receive()
+    if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+        raise PairingError(f"connection closed while awaiting {expected_names}")
+    if msg.type is not WSMsgType.TEXT:
+        raise PairingError(f"expected a JSON frame ({expected_names}), got {msg.type.name}")
+    try:
+        message = PairingMessage.from_json(cast("str", msg.data))
+    except (ValueError, LookupError) as exc:
+        raise PairingError(f"malformed message awaiting {expected_names}") from exc
+    if isinstance(message, PairAbortMessage):
+        raise RemotePairingAbortError(message.payload.reason)
+    if not isinstance(message, kinds):
+        raise PairingError(f"expected {expected_names}, got {type(message).__name__}")
     return message
 
 
@@ -811,16 +760,13 @@ def _expected_names(expected: type[PairingMessage] | tuple[type[PairingMessage],
     return " or ".join(kind.__name__ for kind in kinds)
 
 
-async def receive_pairing_abort(ws: EncryptedWebSocket) -> str:
+async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
     """Await the ``pair/abort`` ending an unstarted attempt.
 
-    A ``pair/abort`` (or close, or another pairing frame) raises. A non-pairing
-    JSON frame, such as the ``server/activate`` leaving pairing, is returned raw
-    for the caller to interpret.
+    Raises ``RemotePairingAbortError`` on ``pair/abort``, else ``PairingError``.
     """
-    frame = await _receive_pairing_frame(ws, PairAbortMessage)
-    assert isinstance(frame, str)
-    return frame
+    await _receive_pairing(ws, PairAbortMessage)
+    raise PairingError("expected pair/abort")
 
 
 async def _receive_pair_init(

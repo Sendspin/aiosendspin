@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import struct
 from collections.abc import Awaitable, Callable
@@ -21,6 +22,7 @@ from aiosendspin.models.artwork import (
     StreamStartArtwork,
 )
 from aiosendspin.models.core import (
+    ActivatePairing,
     ServerActivatePayload,
     ServerCommandPayload,
     ServerHelloPayload,
@@ -36,7 +38,11 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
     pack_player_audio_header,
 )
-from aiosendspin.models.source import ServerHelloSourceSupport
+from aiosendspin.models.source import (
+    ClientHelloSourceFeatures,
+    ClientHelloSourceSupport,
+    ServerHelloSourceSupport,
+)
 from aiosendspin.models.types import (
     Activity,
     ArtworkSource,
@@ -44,6 +50,7 @@ from aiosendspin.models.types import (
     BinaryMessageType,
     GoodbyeReason,
     MediaCommand,
+    PairMethod,
     PictureFormat,
     PlayerCommand,
     Roles,
@@ -207,31 +214,53 @@ async def test_sentinel_playback_activity_rejected_without_unpaired_access() -> 
 
 
 @pytest.mark.asyncio
-async def test_start_skips_reader_when_pairing_closes_connection(
+async def test_start_runs_pairing_alongside_reader_and_time_sync(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If pairing rejects the post-pairing activation and closes, start() starts no reader."""
+    """A pairing activation on connect starts the attempt next to the steady-state tasks."""
     connection = await _connection(PskCategory.SENTINEL)
     connection._activities = [Activity.PAIRING]  # noqa: SLF001 — drive the is_pairing branch
+    connection._ws = MagicMock()  # noqa: SLF001
+    connection._connected = True  # noqa: SLF001
+    started: list[int] = []
 
-    async def _fake_pair() -> None:
-        # Mimic _pair rejecting the post-pairing server/activate and disconnecting.
-        connection._connected = False  # noqa: SLF001
+    async def _fake_pair(_ws: object, pairing_index: int) -> None:
+        started.append(pairing_index)
+
+    async def _idle() -> None:
+        return
 
     monkeypatch.setattr(connection, "_pair", _fake_pair)
+    monkeypatch.setattr(connection, "_reader_loop", _idle)
+    monkeypatch.setattr(connection, "_time_sync_loop", _idle)
+    monkeypatch.setattr("aiosendspin.client.connection.QueuedEncryptedWebSocket", MagicMock())
     await connection.start()
-    assert connection._reader_task is None  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert started == [1]
+    assert connection._reader_task is not None  # noqa: SLF001
+    assert connection._time_task is not None  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
     ("category", "activities", "roles", "unpaired", "expected"),
     [
-        # Sendspin PSK: ['pairing'] or any subset of {playback, management}.
+        # Long-term PSK: [] or ['playback'], plus management.
+        (PskCategory.LONG_TERM, [], [], False, None),
+        (PskCategory.LONG_TERM, [Activity.PLAYBACK], [Roles.PLAYER.value], False, None),
         (PskCategory.LONG_TERM, [Activity.MANAGEMENT], [], False, None),
         (PskCategory.LONG_TERM, [Activity.PLAYBACK, Activity.MANAGEMENT], [], False, None),
         # Roles allowed without 'playback' in activities: the set is playback-capable.
         (PskCategory.LONG_TERM, [Activity.MANAGEMENT], [Roles.PLAYER.value], False, None),
-        # 'pairing' is exclusive.
+        # ['pairing'] alone re-verifies the pairing; it is not playback-capable.
+        (PskCategory.LONG_TERM, [Activity.PAIRING], [], False, None),
+        (
+            PskCategory.LONG_TERM,
+            [Activity.PAIRING],
+            [Roles.PLAYER.value],
+            False,
+            GoodbyeReason.UNAUTHORIZED,
+        ),
+        # Pairing never runs alongside playback on a long-term PSK.
         (
             PskCategory.LONG_TERM,
             [Activity.PAIRING, Activity.PLAYBACK],
@@ -246,25 +275,45 @@ async def test_start_skips_reader_when_pairing_closes_connection(
             False,
             GoodbyeReason.UNAUTHORIZED,
         ),
-        # Pairing PSK: only ['pairing'].
+        # Pairing PSK: [], ['pairing'], and with unpaired access also with 'playback'.
+        (PskCategory.PAIRING, [], [], False, None),
         (PskCategory.PAIRING, [Activity.PAIRING], [], False, None),
-        (PskCategory.PAIRING, [], [], False, GoodbyeReason.UNAUTHORIZED),
-        (PskCategory.PAIRING, [Activity.PLAYBACK], [], False, GoodbyeReason.UNAUTHORIZED),
-        # A pairing connection is never playback-capable, so it may not carry roles.
+        (PskCategory.PAIRING, [Activity.PLAYBACK], [], True, None),
+        (
+            PskCategory.PAIRING,
+            [Activity.PLAYBACK, Activity.PAIRING],
+            [Roles.PLAYER.value],
+            True,
+            None,
+        ),
+        (PskCategory.PAIRING, [Activity.PAIRING], [Roles.PLAYER.value], True, None),
+        (PskCategory.PAIRING, [Activity.PLAYBACK], [], False, GoodbyeReason.PAIRING_REQUIRED),
+        (
+            PskCategory.PAIRING,
+            [Activity.PLAYBACK, Activity.PAIRING],
+            [],
+            False,
+            GoodbyeReason.PAIRING_REQUIRED,
+        ),
         (
             PskCategory.PAIRING,
             [Activity.PAIRING],
             [Roles.PLAYER.value],
             False,
-            GoodbyeReason.UNAUTHORIZED,
+            GoodbyeReason.PAIRING_REQUIRED,
         ),
-        # Sentinel: 'pairing' combined with playback is malformed, not a pair-first case.
+        (PskCategory.PAIRING, [Activity.MANAGEMENT], [], True, GoodbyeReason.UNAUTHORIZED),
+        # Sentinel: the same sets as the pairing PSK.
+        (PskCategory.SENTINEL, [], [], False, None),
+        (PskCategory.SENTINEL, [Activity.PAIRING], [], False, None),
+        (PskCategory.SENTINEL, [Activity.PLAYBACK], [Roles.PLAYER.value], True, None),
+        (PskCategory.SENTINEL, [Activity.PLAYBACK, Activity.PAIRING], [], True, None),
         (
             PskCategory.SENTINEL,
             [Activity.PAIRING, Activity.PLAYBACK],
             [],
             False,
-            GoodbyeReason.UNAUTHORIZED,
+            GoodbyeReason.PAIRING_REQUIRED,
         ),
         # Management is the real problem here, so unauthorized wins over pairing_required.
         (
@@ -291,6 +340,81 @@ async def test_activation_admissibility(
         ServerActivatePayload(activities=activities, active_roles=roles)
     )
     assert reason is expected
+
+
+@pytest.mark.parametrize(
+    ("category", "unpaired", "activities"),
+    [
+        # Pairing on a long-term PSK is never playback-capable.
+        (PskCategory.LONG_TERM, False, [Activity.PAIRING]),
+        # Without unpaired access an unpaired session is never playback-capable.
+        (PskCategory.SENTINEL, False, [Activity.PAIRING]),
+        (PskCategory.PAIRING, False, []),
+    ],
+)
+@pytest.mark.asyncio
+async def test_persisted_roles_lapse_when_no_longer_playback_capable(
+    category: PskCategory,
+    unpaired: bool,  # noqa: FBT001
+    activities: list[Activity],
+) -> None:
+    """An activation that omits active_roles on a non-playback-capable set empties them."""
+    connection = await _connection(category, unpaired_access=unpaired)
+    connection._active_roles = [Roles.PLAYER.value]  # noqa: SLF001
+
+    reason = await connection._apply_activation(  # noqa: SLF001
+        ServerActivatePayload(activities=activities)
+    )
+
+    assert reason is None
+    assert connection._active_roles == []  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_persisted_roles_stay_while_playback_capable() -> None:
+    """Adding 'pairing' next to playback keeps the persisted roles."""
+    connection = await _connection(PskCategory.SENTINEL, unpaired_access=True)
+    connection._active_roles = [Roles.PLAYER.value]  # noqa: SLF001
+
+    reason = await connection._apply_activation(  # noqa: SLF001
+        ServerActivatePayload(
+            activities=[Activity.PLAYBACK, Activity.PAIRING],
+            pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
+        )
+    )
+
+    assert reason is None
+    assert connection._active_roles == [Roles.PLAYER.value]  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_lapsed_source_role_ends_its_stream() -> None:
+    """A source role emptied by a pairing activation on a long-term PSK ends its stream."""
+    connection = await _connection(
+        PskCategory.LONG_TERM,
+        roles=[Roles.SOURCE],
+        source_support=ClientHelloSourceSupport(
+            features=ClientHelloSourceFeatures(line_sense=True)
+        ),
+    )
+    connection._active_roles = [Roles.SOURCE.value]  # noqa: SLF001
+    connection._source_stream_active = True  # noqa: SLF001
+    ended: list[bool] = []
+
+    async def send_client_stream_end() -> None:
+        ended.append(True)
+
+    connection.send_client_stream_end = send_client_stream_end  # type: ignore[method-assign]
+    connection._ws = MagicMock(closed=False)  # noqa: SLF001
+    connection._connected = True  # noqa: SLF001
+
+    reason = await connection._apply_activation(  # noqa: SLF001
+        ServerActivatePayload(activities=[Activity.PAIRING])
+    )
+
+    assert reason is None
+    assert connection._active_roles == []  # noqa: SLF001
+    assert ended == [True]
 
 
 @pytest.mark.asyncio

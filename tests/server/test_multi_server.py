@@ -46,11 +46,11 @@ from aiosendspin.noise.trust_store import (
     ServerPairingStore,
     TrustedUnpairedClient,
 )
-from aiosendspin.noise.wire import EncryptedWebSocket
+from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
-from aiosendspin.server.connection import SendspinConnection, _QueuedTransport
+from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.negotiation import negotiate_roles
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
@@ -962,7 +962,7 @@ class TestInitialConnectPairingAbort:
         )
         fake = _FakePairingTransport([_client_hello_frame("client-1")])
         conn._transport = fake  # noqa: SLF001
-        conn._pair = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+        conn._pair_on_connect = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
             side_effect=RemotePairingAbortError(reason)
         )
         return conn, fake
@@ -1079,7 +1079,7 @@ class TestLegacyFragmentTolerance:
         base = EncryptedWebSocket(raw, server_session)
         base.legacy_fragment_framing = legacy
 
-        queued = _QueuedTransport(base, asyncio.Queue())
+        queued = QueuedEncryptedWebSocket(base, asyncio.Queue())
         await queued.send_bytes(b"\x08" + b"a" * MAX_TRANSPORT_PLAINTEXT)
 
         expected = MSG_TYPE_FRAGMENT_MORE if legacy else MSG_TYPE_FRAGMENT

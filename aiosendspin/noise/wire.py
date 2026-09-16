@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Protocol
 
 from aiohttp import WSMessage, WSMsgType
@@ -65,7 +66,7 @@ class EncryptedWebSocket:
     Construct only after ``NoiseSession.handshake_complete`` is true. A message
     larger than one Noise frame is sent as binary type ``1`` fragments and
     reassembled on receive; a malformed fragment sequence surfaces as an ERROR
-    message.
+    message. Concurrent sends are serialized, so a fragmented message goes out whole.
 
     Two opt-ins keep pre-spec-#172 peers working; both are off by default:
 
@@ -86,6 +87,7 @@ class EncryptedWebSocket:
         self._reasm_buf: bytearray | None = None
         self._reasm_type: int | None = None
         self._reasm_legacy = False
+        self._send_lock = asyncio.Lock()
         # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
         self.on_legacy_fragment: Callable[[], None] | None = None
         # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
@@ -140,13 +142,14 @@ class EncryptedWebSocket:
 
     async def _send_plaintext(self, plaintext: bytes) -> None:
         """Encrypt and send ``plaintext``, fragmenting it if it exceeds one frame."""
-        if len(plaintext) <= MAX_TRANSPORT_PLAINTEXT:
-            await self._ws.send_bytes(self._session.encrypt(plaintext))
-            return
-        # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
-        fragment = _fragment_legacy if self.legacy_fragment_framing else _fragment
-        for frame in fragment(plaintext):
-            await self._ws.send_bytes(self._session.encrypt(frame))
+        async with self._send_lock:
+            if len(plaintext) <= MAX_TRANSPORT_PLAINTEXT:
+                await self._ws.send_bytes(self._session.encrypt(plaintext))
+                return
+            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+            fragment = _fragment_legacy if self.legacy_fragment_framing else _fragment
+            for frame in fragment(plaintext):
+                await self._ws.send_bytes(self._session.encrypt(frame))
 
     def __aiter__(self) -> EncryptedWebSocket:
         """Iterate decrypted messages (the wrapper is its own async iterator)."""
@@ -274,6 +277,35 @@ class EncryptedWebSocket:
         """Discard any reassembly state and build an ERROR ``WSMessage``."""
         self._reset_reassembly()
         return WSMessage(WSMsgType.ERROR, RuntimeError(message), "")
+
+
+class QueuedEncryptedWebSocket(EncryptedWebSocket):
+    """View of an ``EncryptedWebSocket`` that receives messages its owner's reader routed to it.
+
+    Sends and session swaps go through ``base``.
+    """
+
+    def __init__(self, base: EncryptedWebSocket, queue: asyncio.Queue[WSMessage]) -> None:
+        """Initialize the view; ``queue`` supplies the messages ``receive()`` returns."""
+        super().__init__(base._ws, base._session)  # noqa: SLF001
+        self._base = base
+        self._queue = queue
+
+    @property
+    def session(self) -> NoiseSession:
+        """The base transport's current session."""
+        return self._base.session
+
+    def swap_session(self, new_session: NoiseSession) -> None:
+        """Swap the base transport's session."""
+        self._base.swap_session(new_session)
+
+    async def _send_plaintext(self, plaintext: bytes) -> None:
+        await self._base._send_plaintext(plaintext)  # noqa: SLF001
+
+    async def receive(self) -> WSMessage:
+        """Return the next routed message."""
+        return await self._queue.get()
 
 
 def _fragment(plaintext: bytes) -> list[bytes]:
