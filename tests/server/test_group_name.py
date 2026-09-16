@@ -185,6 +185,29 @@ async def test_no_update_reaches_a_client_still_coming_up() -> None:
 
 
 @pytest.mark.asyncio
+async def test_replacing_a_stale_founder_keeps_the_group_name() -> None:
+    """A replacement object takes over the stale member's place, the group's name with it.
+
+    An unnamed group is named after the member it was founded on, so moving the
+    replacement to the end of the membership would hand that name to whoever it left
+    sitting first.
+    """
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    founder = _connected_member(server, "c1", "Kitchen Speaker")
+    joiner = _connected_member(server, "c2", "Living Room")
+    group = founder.group
+    await group.add_client(joiner)
+    assert group.group_name == "Kitchen Speaker"
+
+    await group.add_client(_connected_member(server, "c1", "Kitchen Speaker"))
+
+    assert [client.client_id for client in group.clients] == ["c1", "c2"]
+    assert group.group_name == "Kitchen Speaker"
+    assert _group_updates(joiner)[-1].payload.group_name == "Kitchen Speaker"
+
+
+@pytest.mark.asyncio
 async def test_a_client_regrouped_while_coming_up_waits_for_its_connect_update() -> None:
     """Leaving a group mid-bring-up does not tell the client about its new solo group early.
 

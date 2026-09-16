@@ -460,16 +460,18 @@ class SendspinGroup:
             # per client_id, but if a duplicate object appears, replace the stale one so
             # membership and role subscriptions stay coherent.
             logger.debug(
-                "Removing stale client %s (object %s) before adding new client (object %s)",
+                "Replacing stale client %s (object %s) with new client (object %s)",
                 stale_client.client_id,
                 id(stale_client),
                 id(client),
             )
-            self._clients.remove(stale_client)
+            # Taking the stale object's place keeps the membership order, and with it the
+            # founding member an unnamed group takes its name from.
+            self._clients[self._clients.index(stale_client)] = client
             self._unregister_client_events(stale_client)
-
-        # Add client to this group's client list
-        self._clients.append(client)
+        else:
+            # Add client to this group's client list
+            self._clients.append(client)
 
         # Emit event for client addition
         self._signal_event(GroupMemberAddedEvent(client.client_id))
