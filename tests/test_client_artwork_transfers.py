@@ -221,17 +221,17 @@ async def test_malformed_message_outside_stream_closes_connection() -> None:
             [pack_artwork_announce(0, _NOW_US, 5), pack_artwork_announce(1, _NOW_US, 5)],
             id="announce-in-flight",
         ),
-        pytest.param([pack_artwork_parts(0, b"part")[0]], id="part-without-transfer"),
+        pytest.param([next(pack_artwork_parts(0, b"part"))], id="part-without-transfer"),
         pytest.param(
-            [pack_artwork_announce(0, _NOW_US, 5), pack_artwork_parts(1, b"part")[0]],
+            [pack_artwork_announce(0, _NOW_US, 5), next(pack_artwork_parts(1, b"part"))],
             id="part-on-other-channel",
         ),
         pytest.param(
-            [pack_artwork_announce(0, _NOW_US, 5), pack_artwork_parts(0, b"too long")[0]],
+            [pack_artwork_announce(0, _NOW_US, 5), next(pack_artwork_parts(0, b"too long"))],
             id="part-past-total-size",
         ),
         pytest.param(
-            [*_transfer(0, b"done"), pack_artwork_parts(0, b"more")[0]],
+            [*_transfer(0, b"done"), next(pack_artwork_parts(0, b"more"))],
             id="part-after-completion",
         ),
     ],
@@ -254,7 +254,7 @@ async def test_messages_outside_stream_are_ignored() -> None:
         StreamEndMessage(payload=StreamEndPayload(roles=["artwork"]))
     )
 
-    _receive(connection, pack_artwork_parts(0, b"part")[0], *_transfer(0, b"image"))
+    _receive(connection, next(pack_artwork_parts(0, b"part")), *_transfer(0, b"image"))
 
     assert delivered == []
     await _assert_open(connection)

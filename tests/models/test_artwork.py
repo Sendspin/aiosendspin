@@ -119,16 +119,16 @@ def test_artwork_parts_split_at_the_size_cap() -> None:
     """Parts carry the image in order, each at most 65519 bytes with flags 0x00."""
     image = bytes(range(256)) * 520
 
-    parts = pack_artwork_parts(3, image)
+    parts = list(pack_artwork_parts(3, image))
 
     assert [len(part) for part in parts] == [
         ARTWORK_MAX_MESSAGE_SIZE,
         ARTWORK_MAX_MESSAGE_SIZE,
         len(image) - 2 * ARTWORK_MAX_PART_DATA_SIZE + 2,
     ]
-    assert all(part[:2] == bytes([11, 0x00]) for part in parts)
+    assert all(type(part) is bytes and part[:2] == bytes([11, 0x00]) for part in parts)
     assert b"".join(part[2:] for part in parts) == image
-    assert pack_artwork_parts(0, b"") == []
+    assert list(pack_artwork_parts(0, b"")) == []
 
 
 def test_artwork_cancel_is_two_bytes() -> None:

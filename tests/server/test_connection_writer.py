@@ -1151,7 +1151,10 @@ async def test_epoch_exempt_binary_survives_stream_end() -> None:
     message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value
 
     conn.send_binary(
-        pack_artwork_parts(0, b"part")[0], role="artwork", timestamp_us=0, message_type=message_type
+        next(pack_artwork_parts(0, b"part")),
+        role="artwork",
+        timestamp_us=0,
+        message_type=message_type,
     )
     conn.send_binary(
         pack_artwork_cancel(0),

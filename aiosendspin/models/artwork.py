@@ -9,6 +9,7 @@ preferred format and resolution.
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -52,13 +53,12 @@ def pack_artwork_announce(channel: int, timestamp_us: int, total_size: int) -> b
     )
 
 
-def pack_artwork_parts(channel: int, image: bytes) -> list[bytes]:
-    """Return the part messages carrying `image` on `channel`, each within the size cap."""
+def pack_artwork_parts(channel: int, image: bytes) -> Iterator[bytes]:
+    """Yield the part messages carrying `image` on `channel`, each within the size cap."""
     prefix = bytes((artwork_message_type(channel), 0))
-    return [
-        prefix + image[offset : offset + ARTWORK_MAX_PART_DATA_SIZE]
-        for offset in range(0, len(image), ARTWORK_MAX_PART_DATA_SIZE)
-    ]
+    view = memoryview(image)
+    for offset in range(0, len(image), ARTWORK_MAX_PART_DATA_SIZE):
+        yield prefix + view[offset : offset + ARTWORK_MAX_PART_DATA_SIZE]
 
 
 def pack_artwork_cancel(channel: int) -> bytes:

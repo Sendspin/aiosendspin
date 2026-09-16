@@ -449,7 +449,7 @@ async def test_artwork_listener_receives_binary_frames_after_artwork_stream_star
 
     payload = b"artwork-bytes"
     connection._handle_binary_message(pack_artwork_announce(0, 123_456, len(payload)))  # noqa: SLF001
-    connection._handle_binary_message(pack_artwork_parts(0, payload)[0])  # noqa: SLF001
+    connection._handle_binary_message(next(pack_artwork_parts(0, payload)))  # noqa: SLF001
 
     assert captured == [(0, payload)]
 
@@ -516,7 +516,7 @@ async def test_artwork_binary_dropped_when_only_player_stream_active() -> None:
     )
 
     connection._handle_binary_message(pack_artwork_announce(0, 123_456, 3))  # noqa: SLF001
-    connection._handle_binary_message(pack_artwork_parts(0, b"art")[0])  # noqa: SLF001
+    connection._handle_binary_message(next(pack_artwork_parts(0, b"art")))  # noqa: SLF001
 
     assert captured == []
 
@@ -637,7 +637,7 @@ async def test_artwork_binary_dispatched_when_artwork_stream_active() -> None:
 
     payload = b"artwork-bytes-2"
     connection._handle_binary_message(pack_artwork_announce(1, 234_567, len(payload)))  # noqa: SLF001
-    connection._handle_binary_message(pack_artwork_parts(1, payload)[0])  # noqa: SLF001
+    connection._handle_binary_message(next(pack_artwork_parts(1, payload)))  # noqa: SLF001
 
     assert captured == [(1, payload)]
 
