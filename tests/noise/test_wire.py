@@ -576,10 +576,13 @@ async def test_legacy_fragments_reassemble_with_opt_in() -> None:
     [
         (bytes([MSG_TYPE_FRAGMENT_END]) + b"orphan", "no fragmented message in flight"),
         (bytes([MSG_TYPE_FRAGMENT_MORE]), "missing orig_type"),
+        (bytes([MSG_TYPE_FRAGMENT_MORE, 1]) + b"data", "reserved orig_type 1"),
+        (bytes([MSG_TYPE_FRAGMENT_MORE, 2]) + b"data", "reserved orig_type 2"),
+        (bytes([MSG_TYPE_FRAGMENT_MORE, 3]) + b"data", "reserved orig_type 3"),
     ],
 )
 async def test_malformed_legacy_fragment_is_rejected(frame: bytes, error: str) -> None:
-    """With the opt-in, a malformed legacy start frame surfaces as ERROR."""
+    """With the opt-in, a malformed legacy start frame surfaces as ERROR before the callback."""
     calls: list[None] = []
     seen, _ = await _receive_frames([frame], on_legacy_fragment=lambda: calls.append(None))
     assert seen[0].type is WSMsgType.ERROR

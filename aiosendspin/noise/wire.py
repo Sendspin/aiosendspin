@@ -230,6 +230,8 @@ class EncryptedWebSocket:
                 return self._error("legacy fragment-end frame with no fragmented message in flight")
             if len(plaintext) < 2:
                 return self._error("legacy fragment start frame missing orig_type")
+            if plaintext[1] in _TRANSPORT_BINARY_TYPES:
+                return self._error(f"legacy fragment has reserved orig_type {plaintext[1]}")
             self.on_legacy_fragment()
             self._start_reassembly(plaintext[1], legacy=True)
             return self._append_fragment(plaintext[2:], last=False)
