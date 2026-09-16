@@ -1153,31 +1153,7 @@ class SendspinConnection:
         )
         self._logger = logger.getChild(client_id)
         self._logger.debug("Received client/hello: %s", client_info)
-        if client_info.legacy_support_keys_used:
-            self._flag_noncompliance(
-                "client/hello used unversioned support keys: "
-                + ", ".join(client_info.legacy_support_keys_used)
-            )
-        if client_info.unlisted_support_roles:
-            self._flag_noncompliance(
-                "client/hello sent support objects for unlisted roles: "
-                + ", ".join(client_info.unlisted_support_roles)
-            )
-        if client_info.artwork_support is not None:
-            self._flag_legacy_artwork_wire(client_info.artwork_support)
-        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
-        player_support = client_info.player_support
-        if player_support is not None and player_support.supported_commands is not None:
-            self._flag_noncompliance(
-                "client/hello declared player supported_commands, superseded by client/state"
-            )
-            # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
-            # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
-            self._legacy_hello = True
-            # A pre-#177 client also predates the type 1 fragment framing.
-            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
-            if isinstance(self._transport, EncryptedWebSocket):
-                self._transport.legacy_fragment_framing = True
+        self._note_client_hello_wire(client_info)
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
                 "Client offered roles/versions this server does not implement: %s", unimplemented
@@ -1238,6 +1214,58 @@ class SendspinConnection:
             )
         if any(channel.format is PictureFormat.BMP for channel in support.channels):
             self._flag_noncompliance("client/hello artwork declared the removed 'bmp' format")
+
+    def _note_client_hello_wire(self, client_info: ClientHelloPayload) -> None:
+        """Record what the hello reveals about the wire revision the client speaks."""
+        if client_info.legacy_support_keys_used:
+            self._flag_noncompliance(
+                "client/hello used unversioned support keys: "
+                + ", ".join(client_info.legacy_support_keys_used)
+            )
+        if client_info.unlisted_support_roles:
+            self._flag_noncompliance(
+                "client/hello sent support objects for unlisted roles: "
+                + ", ".join(client_info.unlisted_support_roles)
+            )
+        if client_info.artwork_support is not None:
+            self._flag_legacy_artwork_wire(client_info.artwork_support)
+        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+        player_support = client_info.player_support
+        if player_support is not None and player_support.supported_commands is not None:
+            self._flag_noncompliance(
+                "client/hello declared player supported_commands, superseded by client/state"
+            )
+            # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+            # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
+            self._legacy_hello = True
+            # A pre-#177 client also predates the type 1 fragment framing.
+            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+            if isinstance(self._transport, EncryptedWebSocket):
+                self._transport.legacy_fragment_framing = True
+        self._note_pair_method_wire(client_info)
+
+    def _note_pair_method_wire(self, client_info: ClientHelloPayload) -> None:
+        """Flag the superseded pair-method shape, and log what the parse set aside."""
+        # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+        if client_info.legacy_pair_methods_list_used:
+            self._flag_noncompliance("client/hello sent supported_pair_methods as a list")
+        methods = client_info.supported_pair_methods
+        if methods is None:
+            return
+        if methods.offered_both_pairing_code_methods:
+            self._logger.info("client/hello offered both pairing-code methods")
+        if methods.ignored_methods:
+            # Offering a method this server does not know is conformant: the client speaks a
+            # newer revision of the spec. Worth noticing, but not a compliance failure.
+            self._logger.info(
+                "client/hello offered unrecognized pairing methods: %s",
+                ", ".join(methods.ignored_methods),
+            )
+        if methods.unusable_methods:
+            self._logger.info(
+                "client/hello offered pairing methods with no usable values: %s",
+                ", ".join(methods.unusable_methods),
+            )
 
     async def _admit_legacy_client_id(self, client_id: str) -> bool:
         """Whether an unauthenticated (legacy) hello may claim ``client_id``."""
@@ -1600,19 +1628,15 @@ class SendspinConnection:
         assert self._pairing_attempt is not None
         requested = self._pairing_attempt.pairing_format
         assert requested is not None
-        descriptor = next(
-            (
-                d
-                for d in (self._client_info.supported_pair_methods or [])
-                if d.method is PairMethod.DYNAMIC_PAIRING_CODE
-            ),
-            None,
-        )
+        methods = self._client_info.supported_pair_methods
+        descriptor = methods.dynamic_pairing_code if methods is not None else None
+        if methods is not None and PairMethod.DYNAMIC_PAIRING_CODE.value in (
+            methods.unusable_methods or ()
+        ):
+            raise PairingError("client offers no usable dynamic_pairing_code format or channel")
         if descriptor is None:
             # The advertisement lags a management enable; the client arbitrates.
             return requested
-        if not descriptor.formats:
-            raise PairingError("client's dynamic_pairing_code descriptor is missing formats")
         if requested.value not in descriptor.formats:
             raise PairingError(f"client does not offer the {requested.value} emission format")
         return requested

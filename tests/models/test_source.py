@@ -14,6 +14,7 @@ from aiosendspin.models.core import (
     PairMethodDescriptor,
     ServerCommandPayload,
     ServerHelloPayload,
+    SupportedPairMethods,
 )
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
@@ -25,7 +26,6 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import (
     AudioCodec,
     ClientMessage,
-    PairMethod,
     SignalState,
     _client_message_tags,
 )
@@ -69,7 +69,7 @@ def test_hello_drops_source_support_without_role() -> None:
 
 def test_hello_preserves_supported_pair_methods_positional_argument() -> None:
     """Source support is appended, so it does not displace supported_pair_methods."""
-    pair_methods = [PairMethodDescriptor(method=PairMethod.PAIRING_PSK)]
+    pair_methods = SupportedPairMethods(pairing_psk=PairMethodDescriptor())
     payload = ClientHelloPayload(
         "Client",
         [],
