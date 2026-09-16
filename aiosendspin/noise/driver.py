@@ -18,7 +18,13 @@ from noise.exceptions import (
 
 from aiosendspin.models.types import ServerErrorReason
 
-from .constants import ERROR_TYPE_SERVER, INIT_TYPE_CLIENT, PROTOCOL_VERSION, SENTINEL_PSK
+from .constants import (
+    ERROR_TYPE_SERVER,
+    HANDSHAKE_TYPE,
+    INIT_TYPE_CLIENT,
+    PROTOCOL_VERSION,
+    SENTINEL_PSK,
+)
 from .keys import (
     PEER_ID_SIZE,
     X25519_KEY_SIZE,
@@ -246,7 +252,9 @@ async def run_rehandshake_server(
         prologue=prologue,
         psk=psk.psk,
     )
-    session, _ = await _exchange_as_initiator(enc_ws, session=session, psk=psk, timeout_s=timeout_s)
+    session, _ = await _exchange_as_initiator(
+        enc_ws, session=session, psk=psk, timeout_s=timeout_s, discard_old_key_messages=True
+    )
     enc_ws.swap_session(session)
     return HandshakeResult(
         encrypted_ws=enc_ws,
@@ -314,6 +322,45 @@ async def receive_text_frame(
     return cast("str", msg.data)
 
 
+async def _receive_handshake_discarding_application(
+    ws: HandshakeWebSocket,
+    *,
+    what: str,
+    timeout_s: float,
+) -> str:
+    """Receive the next ``noise/handshake`` TEXT frame within ``timeout_s``, or abort.
+
+    BINARY frames and application TEXT messages before it are discarded; a TEXT frame
+    that is not a typed JSON object aborts, as does any other frame type.
+    """
+    try:
+        async with asyncio.timeout(timeout_s):
+            while True:
+                msg = await ws.receive()
+                if msg.type is WSMsgType.BINARY:
+                    continue
+                if msg.type is not WSMsgType.TEXT:
+                    raise HandshakeAbortedError(f"expected {what} (TEXT), got {msg.type.name}")
+                text = cast("str", msg.data)
+                message_type = _peek_message_type(text)
+                if message_type is None:
+                    raise HandshakeAbortedError(f"malformed message while awaiting {what}")
+                if message_type == HANDSHAKE_TYPE:
+                    return text
+    except TimeoutError as exc:
+        raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
+
+
+def _peek_message_type(text: str) -> str | None:
+    """Return the envelope ``type`` of a JSON message, or ``None`` if it has none."""
+    try:
+        decoded = orjson.loads(text)
+    except orjson.JSONDecodeError:
+        return None
+    message_type = decoded.get("type") if isinstance(decoded, dict) else None
+    return message_type if isinstance(message_type, str) else None
+
+
 async def _exchange_as_initiator(
     transport: HandshakeWebSocket,
     *,
@@ -321,18 +368,27 @@ async def _exchange_as_initiator(
     psk: ResolvedPsk,
     timeout_s: float,
     allow_sentinel_fallback: bool = False,
+    discard_old_key_messages: bool = False,
 ) -> tuple[NoiseSession, bool]:
     """Exchange the two ``noise/handshake`` messages as the initiator (server).
 
     Returns the session that verified message 2 and whether the Sentinel admitted it
     after the referenced PSK failed. That session may be a fork of the one passed in,
     which is spent once its read fails and must not be reused.
+
+    With ``discard_old_key_messages``, application messages the peer sent before it
+    received message 1 are dropped while awaiting message 2.
     """
     msg1 = NoiseMsg1Payload(psk_id=psk.psk_id, psk_category=psk.category.code)
     msg1_pt = msg1.to_json().encode("utf-8")
     msg1_ct = session.write_message(msg1_pt)
     await transport.send_str(_pack_handshake(msg1_ct))
-    hs2_text = await receive_text_frame(transport, what="Noise message 2", timeout_s=timeout_s)
+    if discard_old_key_messages:
+        hs2_text = await _receive_handshake_discarding_application(
+            transport, what="Noise message 2", timeout_s=timeout_s
+        )
+    else:
+        hs2_text = await receive_text_frame(transport, what="Noise message 2", timeout_s=timeout_s)
     sentinel_admitted = False
     try:
         msg2_pt = _read_handshake_message(session, hs2_text, "Noise message 2")

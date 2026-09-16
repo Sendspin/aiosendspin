@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from aiosendspin.models.types import ServerErrorReason
 from aiosendspin.noise.constants import PROTOCOL_VERSION
 from aiosendspin.noise.driver import (
     HandshakeAbortedError,
+    HandshakeResult,
     InitRejectedError,
     PskProvider,
     PskResolver,
@@ -714,6 +716,202 @@ async def test_rehandshake_swaps_keys_in_transport_mode() -> None:
     seen = [msg async for msg in client_re.encrypted_ws]
     assert seen[0].type is WSMsgType.TEXT
     assert seen[0].data == '{"type":"server/activate"}'
+
+
+async def _established_sessions() -> tuple[
+    Identity, Identity, HandshakeResult, HandshakeResult, FakeWebSocket
+]:
+    """Return both identities, both initial handshake results, and the client's raw socket."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+    psk = generate_psk()
+    resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.SENTINEL)
+    server_ws, client_ws = make_ws_pair()
+    server_init, client_init = await asyncio.gather(
+        run_handshake_server(server_ws, local_identity=server_id, psk_provider=_provider(resolved)),
+        run_handshake_client(
+            client_ws,
+            local_identity=client_id,
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=_resolver({resolved.psk_id: resolved}),
+        ),
+    )
+    return server_id, client_id, server_init, client_init, client_ws
+
+
+def _long_term_psks(server_id: Identity, client_id: Identity) -> tuple[ResolvedPsk, PskResolver]:
+    """Return a fresh long-term PSK as the server holds it and a client store holding it."""
+    psk = generate_psk()
+    server_psk = ResolvedPsk(
+        psk_id=psk_id_for(psk),
+        psk=psk,
+        category=PskCategory.LONG_TERM,
+        counterparty_id=client_id.peer_id,
+    )
+    client_psk = replace(server_psk, counterparty_id=server_id.peer_id)
+    return server_psk, _resolver({client_psk.psk_id: client_psk})
+
+
+async def test_rehandshake_discards_old_key_messages_before_message_2() -> None:
+    """Application messages the client sent before message 1 do not break the re-handshake."""
+    server_id, client_id, server_init, client_init, _ = await _established_sessions()
+    server_psk, client_resolver = _long_term_psks(server_id, client_id)
+
+    # In flight when the server starts: they reach it ahead of message 2.
+    await client_init.encrypted_ws.send_str('{"type":"client/state","payload":{}}')
+    await client_init.encrypted_ws.send_bytes(b"\x04audio")
+
+    server_re, client_re = await asyncio.gather(
+        run_rehandshake_server(
+            server_init.encrypted_ws,
+            local_identity=server_id,
+            client_id=client_id.peer_id,
+            suite=server_init.suite,
+            prologue=server_init.handshake_hash,
+            psk=server_psk,
+            timeout_s=1.0,
+        ),
+        run_rehandshake_client(
+            client_init.encrypted_ws,
+            local_identity=client_id,
+            server_id=server_id.peer_id,
+            suite=client_init.suite,
+            prologue=client_init.handshake_hash,
+            psk_resolver=client_resolver,
+        ),
+    )
+
+    assert server_re.handshake_hash == client_re.handshake_hash
+    assert server_re.psk.psk == server_psk.psk
+    await client_re.encrypted_ws.send_str('{"type":"client/hello"}')
+    msg = await server_re.encrypted_ws.receive()
+    assert msg.type is WSMsgType.TEXT
+    assert msg.data == '{"type":"client/hello"}'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("this is not json", id="not-json"),
+        pytest.param("[1]", id="not-an-object"),
+        pytest.param('{"payload":{}}', id="no-type"),
+        pytest.param('{"type":1}', id="non-string-type"),
+    ],
+)
+async def test_rehandshake_aborts_on_untyped_text_before_message_2(text: str) -> None:
+    """Only typed application messages are discarded; anything else aborts."""
+    server_id, client_id, server_init, client_init, _ = await _established_sessions()
+    server_psk, _ = _long_term_psks(server_id, client_id)
+
+    await client_init.encrypted_ws.send_str(text)
+    with pytest.raises(HandshakeAbortedError, match="malformed message while awaiting"):
+        await run_rehandshake_server(
+            server_init.encrypted_ws,
+            local_identity=server_id,
+            client_id=client_id.peer_id,
+            suite=server_init.suite,
+            prologue=server_init.handshake_hash,
+            psk=server_psk,
+            timeout_s=1.0,
+        )
+
+
+async def _send_closed(client_ws: FakeWebSocket) -> None:
+    await client_ws.close_outbound()
+
+
+async def _send_unauthenticated_frame(client_ws: FakeWebSocket) -> None:
+    await client_ws.send_bytes(b"\x00" * 32)
+
+
+@pytest.mark.parametrize(
+    ("send", "match"),
+    [
+        pytest.param(_send_closed, "got CLOSED", id="closed"),
+        pytest.param(_send_unauthenticated_frame, "got ERROR", id="error"),
+    ],
+)
+async def test_rehandshake_aborts_on_error_or_close_before_message_2(
+    send: Callable[[FakeWebSocket], Awaitable[None]], match: str
+) -> None:
+    """Discarding stops at transport failures: they still abort the re-handshake."""
+    server_id, client_id, server_init, client_init, client_ws = await _established_sessions()
+    server_psk, _ = _long_term_psks(server_id, client_id)
+
+    await client_init.encrypted_ws.send_str('{"type":"client/state","payload":{}}')
+    await send(client_ws)
+    with pytest.raises(HandshakeAbortedError, match=match):
+        await run_rehandshake_server(
+            server_init.encrypted_ws,
+            local_identity=server_id,
+            client_id=client_id.peer_id,
+            suite=server_init.suite,
+            prologue=server_init.handshake_hash,
+            psk=server_psk,
+            timeout_s=1.0,
+        )
+
+
+async def test_rehandshake_discarded_messages_do_not_extend_the_deadline() -> None:
+    """A client that keeps sending but never answers is cut off after one ``timeout_s``."""
+    server_id, client_id, server_init, client_init, _ = await _established_sessions()
+    server_psk, _ = _long_term_psks(server_id, client_id)
+
+    async def chatter() -> None:
+        while True:
+            await client_init.encrypted_ws.send_str('{"type":"client/time","payload":{}}')
+            await asyncio.sleep(0.005)
+
+    chatter_task = asyncio.create_task(chatter())
+    try:
+        async with asyncio.timeout(1.0):
+            with pytest.raises(HandshakeAbortedError, match="timed out awaiting Noise message 2"):
+                await run_rehandshake_server(
+                    server_init.encrypted_ws,
+                    local_identity=server_id,
+                    client_id=client_id.peer_id,
+                    suite=server_init.suite,
+                    prologue=server_init.handshake_hash,
+                    psk=server_psk,
+                    timeout_s=0.1,
+                )
+    finally:
+        chatter_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await chatter_task
+
+
+async def test_initial_handshake_aborts_on_application_message_before_message_2() -> None:
+    """Only the re-handshake discards: the cleartext handshake has no earlier session."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+    psk = generate_psk()
+    resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.SENTINEL)
+    server_ws, client_ws = make_ws_pair()
+
+    async def chatty_client() -> None:
+        await client_ws.send_str(
+            ClientInitMessage(
+                payload=ClientInitPayload(
+                    client_id=client_id.peer_id,
+                    version=PROTOCOL_VERSION,
+                    suite=NoiseCipherSuite.CHACHAPOLY.value,
+                ),
+            ).to_json(),
+        )
+        await client_ws.receive()  # server/init
+        await client_ws.receive()  # Noise message 1
+        await client_ws.send_str('{"type":"client/state","payload":{}}')
+
+    client_task = asyncio.create_task(chatty_client())
+    with pytest.raises(HandshakeAbortedError, match="malformed noise/handshake"):
+        await run_handshake_server(
+            server_ws,
+            local_identity=server_id,
+            psk_provider=_provider(resolved),
+            timeout_s=1.0,
+        )
+    await client_task
 
 
 # --- adversarial: the client rejecting a malicious / buggy server ----------
