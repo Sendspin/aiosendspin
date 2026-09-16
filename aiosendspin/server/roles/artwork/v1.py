@@ -73,6 +73,11 @@ class ArtworkV1Role(Role):
         """Artwork receives server binary, gated on the client's initial state."""
         return True
 
+    def requires_activation_state(self) -> bool:
+        """Artwork waits for its client/state channels unless the hello declared them."""
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        return self._client.info.artwork_support is None
+
     def on_connect(self) -> None:
         """Subscribe to the group; the stream starts once the client declares its channels."""
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>

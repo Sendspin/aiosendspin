@@ -75,6 +75,7 @@ def _conn_with_client() -> tuple[SendspinConnection, MagicMock]:
         _DummyServer(loop=loop, clock=LoopClock(loop)), wsock_client=MagicMock()
     )
     client = MagicMock()
+    client.awaits_role_state.return_value = False
     conn._client = client  # noqa: SLF001
     return conn, client
 

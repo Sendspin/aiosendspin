@@ -660,7 +660,7 @@ async def test_preferred_format_override_survives_role_recreation() -> None:
 
 @pytest.mark.asyncio
 async def test_set_active_roles_notifies_group_of_stream_membership() -> None:
-    """set_active_roles drops deactivated roles from the stream and joins activated ones."""
+    """set_active_roles drops deactivated roles; activated ones join once their state arrives."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="player-1")
@@ -684,8 +684,14 @@ async def test_set_active_roles_notifies_group_of_stream_membership() -> None:
         assert activated.call_count == 0
 
         client.set_active_roles([Roles.PLAYER.value])
-        assert activated.call_count == 1
-        assert activated.call_args.args[0].role_id == Roles.PLAYER.value
+        assert client.awaits_role_state("player")
+        assert activated.call_count == 0
+
+        role = client.role(Roles.PLAYER.value)
+        assert role is not None
+        client.release_role_hold("player")
+        client.join_active_stream(role)
+        activated.assert_called_once_with(role)
 
 
 @pytest.mark.asyncio
