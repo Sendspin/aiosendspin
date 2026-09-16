@@ -17,6 +17,8 @@ from aiosendspin.server.roles.metadata.state import Metadata
 from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
 
 if TYPE_CHECKING:
+    import asyncio
+
     from aiosendspin.server.group import SendspinGroup
 
 _UNSET = object()
@@ -33,10 +35,9 @@ class MetadataGroupRole(GroupRole):
     def __init__(self, group: SendspinGroup) -> None:
         """Initialize MetadataGroupRole."""
         super().__init__(group)
-        self._state: ScheduledRoleState[Metadata, SessionUpdateMetadata] = ScheduledRoleState(
-            self._on_state_commit
-        )
-        self._track_progress_timestamp_us: int | None = None
+        self._state: ScheduledRoleState[Metadata] = ScheduledRoleState()
+        # Defers sending the scheduled metadata until it is close enough to its timestamp.
+        self._send_scheduled_handle: asyncio.TimerHandle | None = None
 
     @property
     def metadata(self) -> Metadata | None:
@@ -80,22 +81,22 @@ class MetadataGroupRole(GroupRole):
             return None
 
         if (
-            self._track_progress_timestamp_us is not None
+            current.timestamp_us is not None
             and self._group.has_active_stream
-            and metadata.playback_speed is not None
+            and current.playback_speed is not None
         ):
-            elapsed_us = timestamp_us - self._track_progress_timestamp_us
-            elapsed_ms = (elapsed_us * metadata.playback_speed) // 1_000_000
-            calculated_progress = metadata.track_progress + elapsed_ms
+            elapsed_us = current_time_us - current.timestamp_us
+            elapsed_ms = (elapsed_us * current.playback_speed) // 1_000_000
+            calculated_progress = current.track_progress + elapsed_ms
 
-            if metadata.track_duration is not None and metadata.track_duration > 0:
-                calculated_progress = max(0, min(calculated_progress, metadata.track_duration))
+            if current.track_duration is not None and current.track_duration > 0:
+                calculated_progress = max(0, min(calculated_progress, current.track_duration))
             else:
                 calculated_progress = max(0, calculated_progress)
 
             return calculated_progress
 
-        return metadata.track_progress
+        return current.track_progress
 
     def freeze_progress(self) -> None:
         """Snapshot current progress and stop further client-side progress extrapolation."""
@@ -109,14 +110,20 @@ class MetadataGroupRole(GroupRole):
                 metadata,
                 track_progress=current_progress,
                 playback_speed=0,
-                timestamp_us=None,
             )
         )
 
     def set_metadata(self, metadata: Metadata | None) -> None:
         """Set metadata and push the full metadata state to all subscribed roles.
 
-        Nothing is sent when the metadata is unchanged. `None` clears the metadata.
+        Nothing is sent when the metadata is unchanged. `None` clears the metadata, and
+        any scheduled metadata, at once.
+
+        Metadata whose `timestamp_us` is in the future is scheduled to take effect then,
+        replacing any metadata already scheduled. It is sent to clients at most 20
+        seconds ahead, and `MetadataUpdatedEvent` fires now, carrying that timestamp.
+        Metadata taking effect now cancels scheduled metadata; so does `update()`. To show
+        two tracks in sequence, schedule the second only after the first took effect.
         """
         self._apply_metadata(metadata, force=False)
 
@@ -134,51 +141,6 @@ class MetadataGroupRole(GroupRole):
         self._apply_metadata(
             replace(metadata, track_progress=track_progress, timestamp_us=None), force=True
         )
-
-    def _on_state_commit(self, metadata: Metadata | None, timestamp_us: int) -> None:
-        self._track_progress_timestamp_us = (
-            timestamp_us if metadata is not None and metadata.track_progress is not None else None
-        )
-
-    def _scheduled_progress_value(
-        self,
-        last_metadata: Metadata | None,
-        metadata: Metadata,
-        timestamp_us: int,
-    ) -> Progress | None:
-        """Progress a scheduled diff must restate when it would otherwise omit it."""
-        progress = self._get_track_progress_at(last_metadata, timestamp_us)
-        if (
-            progress is not None
-            and metadata.track_duration is not None
-            and metadata.playback_speed is not None
-        ):
-            return Progress(
-                track_progress=progress,
-                track_duration=metadata.track_duration,
-                playback_speed=metadata.playback_speed,
-            )
-        if (
-            metadata.track_progress is not None
-            and metadata.track_duration is not None
-            and metadata.playback_speed is not None
-        ):
-            return Progress(
-                track_progress=metadata.track_progress,
-                track_duration=metadata.track_duration,
-                playback_speed=metadata.playback_speed,
-            )
-        return None
-
-    def _rebase_omitted_progress(
-        self,
-        last_metadata: Metadata | None,
-        metadata: Metadata,
-        timestamp_us: int,
-    ) -> Metadata:
-        """Align stored progress with the trajectory clients keep extrapolating."""
-        progress = self._get_track_progress_at(last_metadata, timestamp_us)
-        return metadata if progress is None else replace(metadata, track_progress=progress)
 
     def update(
         self,
