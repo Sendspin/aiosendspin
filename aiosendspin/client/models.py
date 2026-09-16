@@ -60,6 +60,13 @@ class PairingSupport:
     start of every round, and with ``None`` when the pairing exchange ends so the display
     can clear.
     """
+    offer_static_pairing_code: bool = True
+    """Whether to offer ``static_pairing_code`` for a device without a per-device code."""
+    secret_locations: tuple[str, ...] = ()
+    """Where the operator finds a configured static secret, from ``SECRET_LOCATIONS``.
+
+    Applies to every static-secret method the client offers.
+    """
     out_channel_suspend: Callable[[bool], Awaitable[None]] | None = None
     """Optional hook for an out-channel that is also a role's output (the speaker playing the
     stream, the display showing artwork): awaited with ``True`` before a dynamic pairing code is
@@ -67,13 +74,6 @@ class PairingSupport:
 
     Suspend that output locally meanwhile. Streams stay open and their timeline runs on, so a
     player discards the audio scheduled while suspended and resumes in sync.
-    """
-    offer_static_pairing_code: bool = True
-    """Whether to offer ``static_pairing_code`` for a device without a per-device code."""
-    secret_locations: tuple[str, ...] = ()
-    """Where the operator finds a configured static secret, from ``SECRET_LOCATIONS``.
-
-    Applies to every static-secret method the client offers.
     """
 
     def __post_init__(self) -> None:
