@@ -38,9 +38,8 @@ def test_float_duration_from_caller_reaches_the_wire_as_an_integer() -> None:
         track=3.0,
     )
 
-    for update in (metadata.diff_update(None, timestamp=1_000_000), metadata.snapshot_update(1)):
-        payload = json.loads(update.to_json())
-        assert payload["progress"]["track_duration"] == 217_000
-        assert type(payload["progress"]["track_duration"]) is int
-        assert type(payload["year"]) is int
-        assert type(payload["track"]) is int
+    payload = json.loads(metadata.snapshot_update(1).to_json())
+    assert payload["progress"]["track_duration"] == 217_000
+    assert type(payload["progress"]["track_duration"]) is int
+    assert type(payload["year"]) is int
+    assert type(payload["track"]) is int

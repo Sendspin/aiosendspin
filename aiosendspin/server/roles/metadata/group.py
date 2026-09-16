@@ -6,7 +6,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
-from aiosendspin.models.metadata import Progress
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.state import Metadata
@@ -42,25 +41,13 @@ class MetadataGroupRole(GroupRole):
 
     def _send_state_to_role(self, role: Role) -> None:
         """Send current metadata state to a single role."""
-        # TODO: refactor to guard clause: if metadata is None, send clear and return
+        if self._current_metadata is None:
+            role.send_message(ServerStateMessage(ServerStatePayload(metadata=None)))
+            return
+
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-
-        if self._current_metadata is not None:
-            metadata_update = self._current_metadata.snapshot_update(timestamp)
-            current_progress = self._get_current_track_progress()
-            if (
-                current_progress is not None
-                and self._current_metadata.track_duration is not None
-                and self._current_metadata.playback_speed is not None
-            ):
-                metadata_update.progress = Progress(
-                    track_progress=current_progress,
-                    track_duration=self._current_metadata.track_duration,
-                    playback_speed=self._current_metadata.playback_speed,
-                )
-        else:
-            metadata_update = Metadata.cleared_update(timestamp)
-
+        current = replace(self._current_metadata, track_progress=self._get_current_track_progress())
+        metadata_update = current.snapshot_update(timestamp)
         state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
         role.send_message(state_message)
 
@@ -108,9 +95,9 @@ class MetadataGroupRole(GroupRole):
         )
 
     def set_metadata(self, metadata: Metadata | None) -> None:
-        """Set metadata and push updates to all subscribed roles.
+        """Set metadata and push the full metadata state to all subscribed roles.
 
-        Only sends updates for fields that have changed.
+        Nothing is sent when the metadata is unchanged. `None` clears the metadata.
         """
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
 
@@ -126,10 +113,7 @@ class MetadataGroupRole(GroupRole):
             return
 
         last_metadata = self._current_metadata
-        if metadata is None:
-            metadata_update = Metadata.cleared_update(timestamp)
-        else:
-            metadata_update = metadata.diff_update(last_metadata, timestamp)
+        metadata_update = None if metadata is None else metadata.snapshot_update(timestamp)
 
         self._current_metadata = metadata
 

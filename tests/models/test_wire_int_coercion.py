@@ -16,9 +16,10 @@ from mashumaro.mixins.orjson import DataClassORJSONMixin
 import aiosendspin.models as models_package
 import aiosendspin.noise.models as noise_models
 from aiosendspin.models.base import SendspinConfig, int_to_wire
+from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.player import StreamStartPlayer
-from aiosendspin.models.types import AudioCodec
+from aiosendspin.models.types import AudioCodec, RepeatMode
 
 
 class _Level(IntEnum):
@@ -88,7 +89,11 @@ def test_int_to_wire_rejects_bool(value: bool) -> None:  # noqa: FBT001
 
 def test_bool_typed_fields_are_unaffected() -> None:
     """Rejecting bool for int fields must not disturb genuinely bool-typed fields."""
-    payload = json.loads(SessionUpdateMetadata(timestamp=0, shuffle=True).to_json())
+    controller = ControllerStatePayload(
+        supported_commands=[], volume=0, muted=True, repeat=RepeatMode.OFF, shuffle=True
+    )
+    payload = json.loads(controller.to_json())
+    assert payload["muted"] is True
     assert payload["shuffle"] is True
 
 
@@ -136,10 +141,12 @@ def test_metadata_role_path_emits_integers() -> None:
     assert float not in _json_types(payload)
 
 
-def test_undefined_and_null_union_members_still_work() -> None:
-    """Coercion must not disturb the undefined/null distinction on union fields."""
-    assert "year" not in json.loads(SessionUpdateMetadata(timestamp=0).to_json())
-    assert json.loads(SessionUpdateMetadata(timestamp=0, year=None).to_json())["year"] is None
+def test_optional_union_members_still_work() -> None:
+    """Coercion must not disturb optional int fields: None is omitted, a value is coerced."""
+    assert "year" not in json.loads(SessionUpdateMetadata(timestamp=0, year=None).to_json())
+    payload = json.loads(SessionUpdateMetadata(timestamp=0, year=2020.0).to_json())  # type: ignore[arg-type]
+    assert payload["year"] == 2020
+    assert type(payload["year"]) is int
 
 
 def test_plain_int_fields_are_coerced() -> None:

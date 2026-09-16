@@ -87,23 +87,14 @@ class Color:
         if self.on_light is not None:
             _assert_contrast("on_light vs white text", self.on_light, _WHITE)
 
-    def diff_update(self, last: Color | None, timestamp: int) -> SessionUpdateColor:
-        """Build a SessionUpdateColor containing only changed fields compared to last."""
-        update = SessionUpdateColor(timestamp=timestamp)
-        if last is None or last.background_dark != self.background_dark:
-            update.background_dark = self.background_dark
-        if last is None or last.background_light != self.background_light:
-            update.background_light = self.background_light
-        if last is None or last.primary != self.primary:
-            update.primary = self.primary
-        if last is None or last.accent != self.accent:
-            update.accent = self.accent
-        if last is None or last.on_dark != self.on_dark:
-            update.on_dark = self.on_dark
-        if last is None or last.on_light != self.on_light:
-            update.on_light = self.on_light
-        return update
-
     def snapshot_update(self, timestamp: int) -> SessionUpdateColor:
-        """Build a SessionUpdateColor snapshot with all current values."""
-        return self.diff_update(None, timestamp)
+        """Build a SessionUpdateColor carrying the full current state."""
+        return SessionUpdateColor(
+            timestamp=timestamp,
+            background_dark=self.background_dark,
+            background_light=self.background_light,
+            primary=self.primary,
+            accent=self.accent,
+            on_dark=self.on_dark,
+            on_light=self.on_light,
+        )

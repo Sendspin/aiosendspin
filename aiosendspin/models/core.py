@@ -8,7 +8,7 @@ synchronization, stream lifecycle management, and role-based state updates and c
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import Annotated, Any, ClassVar, Literal
 
 from mashumaro.types import Alias
@@ -528,6 +528,21 @@ class ServerStatePayload(SendspinModel):
     color: SessionUpdateColor | None | UndefinedField = field(default_factory=undefined_field)
     """Color state - only sent to clients with color role."""
 
+    def merge(self, other: ServerStatePayload) -> ServerStatePayload:
+        """Return this state updated with the role objects present in `other`.
+
+        Each present role object, including `None`, replaces the existing one wholesale.
+        Role objects omitted from `other` are kept.
+        """
+        return replace(
+            self,
+            **{
+                role.name: getattr(other, role.name)
+                for role in fields(other)
+                if not isinstance(getattr(other, role.name), UndefinedField)
+            },
+        )
+
     class Config(SendspinConfig):
         """Config for parsing json messages."""
 
@@ -542,11 +557,11 @@ class ServerStateMessage(ServerMessage):
     type: Literal["server/state"] = "server/state"
 
     def merge(self, other: ServerMessage) -> ServerMessage | None:
-        """Merge with another server/state message, preferring non-null incoming fields."""
+        """Merge with another server/state message, replacing each role object it includes."""
         if not isinstance(other, ServerStateMessage):
             return None
 
-        return ServerStateMessage(_merge_optional_dataclass_fields(self.payload, other.payload))
+        return ServerStateMessage(self.payload.merge(other.payload))
 
 
 # Server -> Client: group/update

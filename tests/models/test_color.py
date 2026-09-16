@@ -5,23 +5,19 @@ from __future__ import annotations
 import pytest
 
 from aiosendspin.models.color import SessionUpdateColor
-from aiosendspin.models.types import UndefinedField
 
 
-def test_undefined_fields_omitted_from_json() -> None:
-    """Fields left as UndefinedField are omitted from serialized JSON."""
+def test_unset_fields_omitted_from_json() -> None:
+    """Fields left unset are omitted from serialized JSON."""
     update = SessionUpdateColor(timestamp=42, primary=(10, 20, 30))
     payload = update.to_dict()
     assert payload == {"timestamp": 42, "primary": [10, 20, 30]}
 
 
-def test_explicit_none_serializes_as_null() -> None:
-    """Explicit None serializes (clears the field on the wire)."""
-    update = SessionUpdateColor.cleared(timestamp=7)
-    payload = update.to_dict()
-    assert payload["primary"] is None
-    assert payload["background_dark"] is None
-    assert payload["on_light"] is None
+def test_explicit_none_omitted_from_json() -> None:
+    """Explicit None is omitted, so no leaf null reaches the wire."""
+    update = SessionUpdateColor(timestamp=7, primary=None, on_light=(0, 0, 0))
+    assert update.to_dict() == {"timestamp": 7, "on_light": [0, 0, 0]}
 
 
 def test_roundtrip_decodes_to_tuples() -> None:
@@ -42,10 +38,10 @@ def test_rgb_component_out_of_range_raises() -> None:
         SessionUpdateColor(timestamp=0, primary=(300, 0, 0))  # type: ignore[arg-type]
 
 
-def test_undefined_field_passes_validation() -> None:
-    """UndefinedField sentinel does not trigger validation."""
+def test_unset_field_passes_validation() -> None:
+    """An unset field defaults to None and does not trigger validation."""
     update = SessionUpdateColor(timestamp=0)
-    assert isinstance(update.primary, UndefinedField)
+    assert update.primary is None
 
 
 def test_rgb_wrong_length_raises() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from aiosendspin.models.core import ServerStateMessage
-from aiosendspin.models.types import UndefinedField
+from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 
@@ -84,6 +84,9 @@ def test_metadata_group_role_clear_metadata() -> None:
 
     assert mgr.metadata is None
     member.send_message.assert_called_once()
+    msg = member.send_message.call_args.args[0]
+    assert isinstance(msg, ServerStateMessage)
+    assert msg.payload.to_dict() == {"metadata": None}
     group._signal_event.assert_called()  # noqa: SLF001
     event = group._signal_event.call_args.args[0]  # noqa: SLF001
     assert isinstance(event, MetadataClearedEvent)
@@ -181,7 +184,7 @@ def test_metadata_group_role_on_member_join_sends_current_state() -> None:
 
 
 def test_metadata_group_role_on_member_join_no_metadata() -> None:
-    """on_member_join() sends cleared metadata when no metadata set."""
+    """on_member_join() sends a metadata null when no metadata is set."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
@@ -191,8 +194,7 @@ def test_metadata_group_role_on_member_join_no_metadata() -> None:
     new_member.send_message.assert_called_once()
     msg = new_member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
-    # Cleared update has explicit None values
-    assert msg.payload.metadata is not None
+    assert msg.payload.to_dict() == {"metadata": None}
 
 
 def test_metadata_group_role_skips_unchanged() -> None:
@@ -269,57 +271,76 @@ def test_metadata_group_role_member_join_does_not_rewind_after_freeze() -> None:
     assert msg.payload.metadata.progress.playback_speed == 0
 
 
-def test_progress_set_on_first_update() -> None:
-    """diff_update emits a full Progress object on the first update."""
-    current = Metadata(
-        title="Song",
-        track_progress=5_000,
-        track_duration=180_000,
-        playback_speed=1000,
+def _sent_metadata(member: MagicMock) -> dict[str, object]:
+    msg = member.send_message.call_args.args[0]
+    assert isinstance(msg, ServerStateMessage)
+    metadata = msg.payload.to_dict()["metadata"]
+    assert isinstance(metadata, dict)
+    return metadata
+
+
+def test_update_sends_full_state_with_progress_after_title_change() -> None:
+    """A title-only change still sends every set field, including progress, with no nulls."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+
+    mgr.set_metadata(
+        Metadata(
+            title="Song",
+            artist="Artist",
+            album=None,
+            track_progress=5_000,
+            track_duration=180_000,
+            playback_speed=1000,
+        )
     )
+    member.reset_mock()
 
-    update = current.diff_update(None, timestamp=1_000_000)
+    mgr.update(title="New Title")
 
-    assert update.progress is not None
-    assert not isinstance(update.progress, UndefinedField)
-    assert update.progress.track_progress == 5_000
-    assert update.progress.track_duration == 180_000
-    assert update.progress.playback_speed == 1000
+    assert _sent_metadata(member) == {
+        "timestamp": 1_000_000,
+        "title": "New Title",
+        "artist": "Artist",
+        "progress": {"track_progress": 5_000, "track_duration": 180_000, "playback_speed": 1000},
+    }
 
 
-def test_progress_cleared_when_track_progress_becomes_none() -> None:
-    """diff_update emits progress=null when previous state had progress and new doesn't."""
-    last = Metadata(
-        title="Song",
-        track_progress=12_345,
-        track_duration=180_000,
-        playback_speed=1000,
+def test_update_omits_progress_when_position_cleared() -> None:
+    """Clearing the position omits progress, which clears it on the client."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+
+    mgr.set_metadata(
+        Metadata(title="Song", track_progress=12_345, track_duration=180_000, playback_speed=1000)
     )
-    current = Metadata(title="Loading next track...")
+    member.reset_mock()
 
-    update = current.diff_update(last, timestamp=2_000_000)
+    mgr.set_metadata(Metadata(title="Loading next track..."))
 
-    assert update.progress is None
-    assert update.to_dict()["progress"] is None
-    assert '"progress":null' in update.to_json()
+    assert _sent_metadata(member) == {"timestamp": 1_000_000, "title": "Loading next track..."}
 
 
-def test_progress_omitted_when_unchanged() -> None:
-    """diff_update omits progress when no progress field changed."""
-    last = Metadata(
-        title="Song",
-        track_progress=5_000,
-        track_duration=180_000,
-        playback_speed=1000,
-    )
-    current = Metadata(
-        title="New Title",
-        track_progress=5_000,
-        track_duration=180_000,
-        playback_speed=1000,
-    )
+# DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+def test_repeat_and_shuffle_are_accepted_but_never_sent() -> None:
+    """Metadata still accepts repeat/shuffle but ignores them on the wire and in equality."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
 
-    update = current.diff_update(last, timestamp=2_000_000)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
 
-    assert isinstance(update.progress, UndefinedField)
-    assert "progress" not in update.to_json()
+    mgr.set_metadata(Metadata(title="Song", repeat=RepeatMode.ALL, shuffle=True))
+
+    assert _sent_metadata(member) == {"timestamp": 1_000_000, "title": "Song"}
+
+    member.reset_mock()
+    mgr.set_metadata(Metadata(title="Song", repeat=RepeatMode.ONE, shuffle=False))
+
+    member.send_message.assert_not_called()

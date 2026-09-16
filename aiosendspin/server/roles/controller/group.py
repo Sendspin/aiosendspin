@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from aiosendspin.models.controller import ControllerCommandPayload, ControllerStatePayload
@@ -27,8 +26,6 @@ from aiosendspin.server.roles.controller.events import (
     ControllerSwitchEvent,
     ControllerVolumeEvent,
 )
-from aiosendspin.server.roles.metadata.group import MetadataGroupRole
-from aiosendspin.server.roles.metadata.state import Metadata
 from aiosendspin.server.roles.player.events import VolumeChangedEvent
 
 if TYPE_CHECKING:
@@ -111,22 +108,11 @@ class ControllerGroupRole(GroupRole):
         """Set group repeat mode and push state to members if changed."""
         self._repeat = mode
         self._push_state_to_members()
-        self._mirror_to_metadata_back_compat()
 
     def set_shuffle(self, shuffle: bool) -> None:  # noqa: FBT001
         """Set group shuffle state and push state to members if changed."""
         self._shuffle = shuffle
         self._push_state_to_members()
-        self._mirror_to_metadata_back_compat()
-
-    def _mirror_to_metadata_back_compat(self) -> None:
-        """Mirror repeat/shuffle into metadata state for v1 clients."""
-        # Deprecated: drop with metadata dual-emit.
-        metadata_gr = self._group.group_role("metadata")
-        if not isinstance(metadata_gr, MetadataGroupRole):
-            return
-        current = metadata_gr.metadata or Metadata()
-        metadata_gr.set_metadata(replace(current, repeat=self._repeat, shuffle=self._shuffle))
 
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:
         """Set the commands supported by the application.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.color.events import ColorClearedEvent, ColorUpdatedEvent
@@ -39,11 +38,12 @@ class ColorGroupRole(GroupRole):
 
     def _send_state_to_role(self, role: ColorRoleProtocol) -> None:
         """Send current color state to a single role."""
+        if self._current_color is None:
+            role.send_message(ServerStateMessage(ServerStatePayload(color=None)))
+            return
+
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-        if self._current_color is not None:
-            color_update = self._current_color.snapshot_update(timestamp)
-        else:
-            color_update = SessionUpdateColor.cleared(timestamp)
+        color_update = self._current_color.snapshot_update(timestamp)
         role.send_message(ServerStateMessage(ServerStatePayload(color=color_update)))
 
     def set_color(self, color: Color | None) -> None:
@@ -53,10 +53,7 @@ class ColorGroupRole(GroupRole):
 
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
         last_color = self._current_color
-        if color is None:
-            color_update = SessionUpdateColor.cleared(timestamp)
-        else:
-            color_update = color.diff_update(last_color, timestamp)
+        color_update = None if color is None else color.snapshot_update(timestamp)
 
         self._current_color = color
 

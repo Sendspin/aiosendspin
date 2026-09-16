@@ -26,6 +26,7 @@ from aiosendspin.server.roles.controller.events import (
     ControllerVolumeEvent,
 )
 from aiosendspin.server.roles.controller.group import ControllerGroupRole
+from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 from aiosendspin.server.roles.player.group import PlayerGroupRole
 from aiosendspin.server.roles.player.v1 import PlayerPersistentState, PlayerV1Role
 
@@ -440,6 +441,21 @@ def test_controller_group_role_set_shuffle_pushes_state() -> None:
     member.send_message.assert_called_once()
     msg = member.send_message.call_args.args[0]
     assert msg.payload.controller.shuffle is True
+
+
+def test_controller_group_role_repeat_and_shuffle_leave_metadata_untouched() -> None:
+    """set_repeat() and set_shuffle() never write to the group's metadata."""
+    group = _make_group_stub()
+    metadata_group_role = MetadataGroupRole(group)
+    group.group_role.side_effect = lambda family: (
+        metadata_group_role if family == "metadata" else None
+    )
+    cgr = ControllerGroupRole(group)
+
+    cgr.set_repeat(RepeatMode.ALL)
+    cgr.set_shuffle(shuffle=True)
+
+    assert metadata_group_role.metadata is None
 
 
 def test_controller_group_role_set_repeat_dedupes_unchanged_value() -> None:
