@@ -2,7 +2,7 @@
 
 This PlayerV1Role implementation uses hook-based streaming:
 - on_stream_start(): Send stream/start message
-- on_audio_chunk(): Pack and send binary audio
+- on_audio_chunk(): Send binary audio; the connection adds the header
 - on_stream_clear(): Send stream/clear message
 - on_stream_end(): Send stream/end message
 """
@@ -82,7 +82,7 @@ class PlayerV1Role(Role):
 
     Hook-based streaming:
     - on_stream_start(): Send stream/start message
-    - on_audio_chunk(): Pack and send binary audio
+    - on_audio_chunk(): Send binary audio; the connection adds the header
     - on_stream_clear(): Send stream/clear message
     - on_stream_end(): Send stream/end message
     """
