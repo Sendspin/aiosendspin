@@ -103,6 +103,19 @@ async def test_unsolicited_management_result_is_flagged() -> None:
     client.flag_noncompliance.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_state_before_the_initial_gate_opens_is_not_initial() -> None:
+    """A client/state read before any activation needs one (connect-time pairing) is ordinary."""
+    conn, client = _conn_with_client()
+    client.active_roles = []
+    client.available = True
+
+    await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
+
+    client.mark_connected.assert_not_called()
+    assert conn._initial_state_received is False  # noqa: SLF001
+
+
 def _role_mock(deviations: list[str]) -> MagicMock:
     role = MagicMock()
     role.initial_state_deviations.return_value = deviations

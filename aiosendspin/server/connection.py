@@ -2263,8 +2263,10 @@ class SendspinConnection:
             return
 
         # Validate before applying initial state.
-        # Pending from the hello exchange even if the roles that needed it were removed since.
-        is_initial = not self._initial_state_received
+        # Still initial once its timeout runs, even if the roles that needed it were removed.
+        is_initial = not self._initial_state_received and (
+            self.requires_initial_state() or self._initial_state_timeout_handle is not None
+        )
         if is_initial:
             self._flag_initial_state_deviations(payload)
         if payload.legacy_state_used:
