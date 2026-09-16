@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
 from aiohttp import WSMessage, WSMsgType
@@ -37,6 +38,7 @@ from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, TrustedUnpairedClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
 from tests.server.test_multi_server import _FakeTransport, _MockServer
@@ -47,6 +49,9 @@ if TYPE_CHECKING:
 CLIENT_ID = "client-1"
 _ARTWORK_CHANNEL = ArtworkChannel(
     source=ArtworkSource.ALBUM, format=PictureFormat.JPEG, width=300, height=300
+)
+_ALTERNATE_FORMAT = SupportedAudioFormat(
+    codec=AudioCodec.PCM, channels=2, sample_rate=44100, bit_depth=16
 )
 _PLAYER_STATE = PlayerStatePayload(
     volume=50,
@@ -69,7 +74,8 @@ def _hello(roles: list[str], *, legacy: bool = False) -> ClientHelloPayload:
             supported_formats=[
                 SupportedAudioFormat(
                     codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16
-                )
+                ),
+                _ALTERNATE_FORMAT,
             ],
             buffer_capacity=100_000,
             supported_commands=[],
@@ -382,3 +388,23 @@ async def test_role_added_after_a_stateless_connect_is_held_with_a_timeout() -> 
     first_connect.assert_not_called()
     assert not client.awaits_role_state("player")
     assert conn._activation_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_held_player_format_change_joins_the_stream_once() -> None:
+    """A re-added player whose state picks a new format joins only on release."""
+    conn, client = await _reactivated_player()
+    role = client.role(Roles.PLAYER.value)
+    state = dataclasses.replace(_PLAYER_STATE, format=_ALTERNATE_FORMAT)
+
+    with (
+        patch.object(
+            SendspinGroup, "has_active_stream", new_callable=PropertyMock, return_value=True
+        ),
+        patch.object(client.group, "on_role_format_changed") as format_changed,
+        patch.object(client.group, "on_role_activated") as activated,
+    ):
+        await conn._handle_client_state(ClientStatePayload(player=state))  # noqa: SLF001
+
+    format_changed.assert_not_called()
+    activated.assert_called_once_with(role)
