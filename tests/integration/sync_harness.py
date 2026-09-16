@@ -79,6 +79,7 @@ class CaptureConnection:
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
         player_audio_header: bool = False,
+        epoch_exempt: bool = False,  # noqa: ARG002
     ) -> bool:
         """Record outbound binary and optionally update buffered-byte accounting."""
         if player_audio_header:

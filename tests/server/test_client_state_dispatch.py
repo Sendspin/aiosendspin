@@ -205,6 +205,25 @@ async def test_pending_binary_dropped_when_stream_boundary_intervenes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_epoch_exempt_binary_survives_stream_boundary() -> None:
+    """Epoch-exempt binary buffered before the initial state is still flushed after a boundary."""
+    conn, client = _conn_with_client()
+    role = _role("artwork")
+    role.requires_initial_state.return_value = True
+    client.active_roles = [role]
+
+    conn.send_binary(b"snapshot", role="artwork", timestamp_us=0, message_type=30)
+    conn.send_binary(b"cancel", role="artwork", timestamp_us=0, message_type=30, epoch_exempt=True)
+    conn.drop_pending_binary(["artwork"])
+    conn._initial_state_received = True  # noqa: SLF001
+    conn._flush_pending_binary()  # noqa: SLF001
+
+    queued = conn._role_queues.get("artwork")  # noqa: SLF001
+    assert queued is not None
+    assert [entry.binary.data for _, _, entry in queued if entry.binary] == [b"cancel"]
+
+
+@pytest.mark.asyncio
 async def test_client_state_player_object_for_inactive_role_is_flagged() -> None:
     """A player state object with no active player role is flagged."""
     conn, client = _conn_with_client()

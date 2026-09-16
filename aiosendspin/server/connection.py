@@ -214,6 +214,8 @@ class _BinaryData:
     duration_us: int | None = None
     # data is a player audio payload; the header is built at send time.
     player_audio_header: bool = False
+    # Sent even after a stream boundary bumped the role's epoch.
+    epoch_exempt: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +297,8 @@ class SendspinConnection:
         self._max_pending_msg_by_role: defaultdict[str, int] = defaultdict(lambda: MAX_PENDING_MSG)
         # Last timestamp per role for JSON inheritance (JSON gets previous message's timestamp)
         self._last_enqueued_ts_by_role: dict[str, int] = {}
+        # Set when a role's queue empties, for wait_role_drained()
+        self._role_drained: dict[str, asyncio.Event] = {}
         # Rate-limit state for already-late-at-enqueue and slow-send warnings
         self._late_at_enqueue_count: dict[str, int] = {}
         self._last_late_at_enqueue_log_s: dict[str, float] = {}
@@ -346,7 +350,7 @@ class SendspinConnection:
         # The spec forbids sending binary before it; flushed once the state arrives.
         # Each entry carries the role's epoch at buffer time so a stream boundary
         # in the meantime (which bumps the epoch) discards it instead of replaying.
-        self._pending_binary: list[tuple[str, int, Callable[[], None]]] = []
+        self._pending_binary: list[tuple[str, int, bool, Callable[[], None]]] = []
         # Role families being removed by the activation in progress; their teardown
         # goes out ahead of that server/activate.
         self._retiring_roles: set[str] = set()
@@ -424,10 +428,10 @@ class SendspinConnection:
     def _flush_pending_binary(self) -> None:
         """Enqueue held binary whose role is no longer held, dropping stale entries."""
         pending, self._pending_binary = self._pending_binary, []
-        for role, epoch, send in pending:
+        for role, epoch, epoch_exempt, send in pending:
             # A stream boundary during the wait bumped the epoch; that data is stale.
             # A role that is still held puts its entry back.
-            if epoch == self._epoch_by_role[role]:
+            if epoch_exempt or epoch == self._epoch_by_role[role]:
                 send()
 
     def _flag_initial_state_deviations(self, payload: ClientStatePayload) -> None:
@@ -468,6 +472,11 @@ class SendspinConnection:
                 self._schedule_role_head(role)
         self._wake_writer()
 
+    async def wait_role_drained(self, role: str) -> None:
+        """Return once no message for `role` is queued."""
+        while self._role_queues.get(role):
+            await self._role_drained.setdefault(role, asyncio.Event()).wait()
+
     def send_binary(
         self,
         data: bytes,
@@ -479,6 +488,7 @@ class SendspinConnection:
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
         player_audio_header: bool = False,
+        epoch_exempt: bool = False,
     ) -> None:
         """Enqueue a binary message.
 
@@ -493,6 +503,8 @@ class SendspinConnection:
             duration_us: Duration for buffer tracking.
             player_audio_header: Prepend the player audio header, stamped with
                 send_ahead immediately before transmission.
+            epoch_exempt: Send the message even when a later stream boundary
+                invalidates the role's other queued binary.
         """
         if (self._client is not None and self._client.awaits_role_state(role)) or (
             self.requires_initial_state() and not self._initial_state_received
@@ -503,6 +515,7 @@ class SendspinConnection:
                 (
                     role,
                     self._epoch_by_role[role],
+                    epoch_exempt,
                     partial(
                         self.send_binary,
                         data,
@@ -513,6 +526,7 @@ class SendspinConnection:
                         buffer_byte_count=buffer_byte_count,
                         duration_us=duration_us,
                         player_audio_header=player_audio_header,
+                        epoch_exempt=epoch_exempt,
                     ),
                 )
             )
@@ -551,6 +565,7 @@ class SendspinConnection:
                 buffer_byte_count=buffer_byte_count,
                 duration_us=duration_us,
                 player_audio_header=player_audio_header,
+                epoch_exempt=epoch_exempt,
             ),
             enqueued_at_us=now_us,
         )
@@ -2559,6 +2574,8 @@ class SendspinConnection:
         self._queue_size = max(self._queue_size - 1, 0)
         if not role_queue:
             self._role_queues.pop(role, None)
+            if (drained := self._role_drained.pop(role, None)) is not None:
+                drained.set()
 
     def _peek_ready_entry(self) -> tuple[str, _RoleQueueEntry, int, int] | None:
         # TODO: any reason why a peek method does a full pop and push operation?
@@ -2798,7 +2815,11 @@ class SendspinConnection:
 
         # Binary entries with a stale epoch are discarded (stream was cleared/ended).
         # JSON entries skip this check - they are always delivered.
-        if entry.binary is not None and entry.epoch != self._epoch_by_role[role]:
+        if (
+            entry.binary is not None
+            and not entry.binary.epoch_exempt
+            and entry.epoch != self._epoch_by_role[role]
+        ):
             self._discard_role_head(role)
             self._schedule_role_head(role)
             return False, now_us
