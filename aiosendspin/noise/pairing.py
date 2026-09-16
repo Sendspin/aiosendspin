@@ -190,8 +190,9 @@ async def run_pairing_psk_server(
 
     ``on_pair_init`` is called for every ``client/pair-init`` received, whatever its index.
     ``client/pair-finalize`` messages preceding the matching ``client/pair-init`` are discarded
-    as leftovers, except that with ``on_legacy_finalize`` set, a ``long_term_psk`` finalize
-    arriving before any ``client/pair-init`` is accepted as this attempt's unless it raises.
+    as leftovers, except that with ``on_legacy_finalize`` set, a finalize carrying only
+    ``long_term_psk`` and arriving before any ``client/pair-init`` is accepted as this
+    attempt's unless it raises.
     """
     finalize: ClientPairFinalizeMessage | None = None
     pair_init_seen = False
@@ -206,6 +207,7 @@ async def run_pairing_psk_server(
                     on_legacy_finalize is not None
                     and not pair_init_seen
                     and message.payload.long_term_psk is not None
+                    and message.payload.wrapped_psk is None
                 ):
                     on_legacy_finalize()
                     finalize = message

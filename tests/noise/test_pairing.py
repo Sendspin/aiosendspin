@@ -667,15 +667,20 @@ async def test_pairing_psk_server_discards_a_leading_finalize_without_the_legacy
     assert server_record.psk == client_record.psk != stale_psk
 
 
-async def test_pairing_psk_server_always_discards_a_wrapped_finalize() -> None:
-    """A code-flow ``wrapped_psk`` finalize is a leftover, even with the legacy hook set."""
+@pytest.mark.parametrize("long_term_psk", [None, b64url_encode(bytes(32))])
+async def test_pairing_psk_server_always_discards_a_wrapped_finalize(
+    long_term_psk: str | None,
+) -> None:
+    """A finalize carrying ``wrapped_psk`` is a leftover, even with the legacy hook set."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
 
     await client_ews.send_str(
         ClientPairFinalizeMessage(
-            payload=ClientPairFinalizePayload(wrapped_psk=b64url_encode(bytes(48)))
+            payload=ClientPairFinalizePayload(
+                long_term_psk=long_term_psk, wrapped_psk=b64url_encode(bytes(48))
+            )
         ).to_json()
     )
 

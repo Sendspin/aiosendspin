@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -40,7 +40,13 @@ from aiosendspin.models.types import (
     TrustLevel,
 )
 from aiosendspin.noise import pairing as pairing_module
-from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
+from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
+from aiosendspin.noise.models import (
+    ClientPairFinalizeMessage,
+    ClientPairFinalizePayload,
+    ClientPairInitMessage,
+    ClientPairInitPayload,
+)
 from aiosendspin.noise.pairing import (
     PairingAbortError,
     PairingAttempt,
@@ -1722,6 +1728,104 @@ async def test_finalize_first_is_discarded_after_a_pairing_psk_pair_init(
             ):
                 await conn.initiate_pairing(attempt)
             assert await server_store.record_by_client_id(client_identity.peer_id) == first
+        finally:
+            await client.disconnect()
+
+
+async def _wait_until(predicate: Callable[[], bool]) -> None:
+    async with asyncio.timeout(5):
+        while not predicate():  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+
+# DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+@pytest.mark.parametrize("init_after_cancel", [False, True])
+async def test_unconsumed_pair_init_of_a_cancelled_attempt_blocks_the_legacy_fallback(
+    init_after_cancel: bool,  # noqa: FBT001
+) -> None:
+    """A cancelled attempt's unconsumed pair-init, queued or late, marks the client as new-flow.
+
+    Its late finalize, reaching the next attempt, is discarded instead of persisting a stale PSK.
+    """
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    attempt = PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+    release_init = asyncio.Event()
+    release_finalize = asyncio.Event()
+    second_attempt_started = asyncio.Event()
+    real_server_exchange = connection_module.run_pairing_psk_server
+    server_calls = 0
+
+    async def stalled_client_exchange(
+        ws: EncryptedWebSocket,
+        *,
+        pairing_index: int,
+        server_id: str,  # noqa: ARG001
+        store: ClientPairingStore,  # noqa: ARG001
+    ) -> str | None:
+        await release_init.wait()
+        await ws.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(pairing_index=pairing_index)
+            ).to_json()
+        )
+        await release_finalize.wait()
+        await ws.send_str(
+            ClientPairFinalizeMessage(
+                payload=ClientPairFinalizePayload(long_term_psk=b64url_encode(generate_psk()))
+            ).to_json()
+        )
+        return await pairing_module.receive_pairing_abort(ws)
+
+    async def server_exchange(ws: EncryptedWebSocket, **kwargs: Any) -> ServerPairingRecord:
+        nonlocal server_calls
+        server_calls += 1
+        if server_calls == 1:
+            await asyncio.Event().wait()  # never consumes the first attempt's messages
+        second_attempt_started.set()
+        return await real_server_exchange(ws, **kwargs)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with (
+                patch.object(
+                    client_connection_module, "run_pairing_psk_client", stalled_client_exchange
+                ),
+                patch.object(connection_module, "run_pairing_psk_server", server_exchange),
+            ):
+                first = asyncio.create_task(conn.initiate_pairing(attempt))
+                await _wait_until(lambda: server_calls > 0)
+                if not init_after_cancel:
+                    release_init.set()
+                    await _wait_until(
+                        lambda: not conn._pairing_message_queue.empty()  # noqa: SLF001
+                    )
+                await conn.end_pairing()
+                with pytest.raises(PairingAbortError):
+                    await first
+                if init_after_cancel:
+                    release_init.set()
+                    await _wait_until(lambda: conn._sent_psk_pair_init)  # noqa: SLF001
+
+                second = asyncio.create_task(conn.initiate_pairing(attempt))
+                await asyncio.wait_for(second_attempt_started.wait(), timeout=5)
+                release_finalize.set()
+                # The client leaves after the cancelled attempt, so the next one cannot pair.
+                with pytest.raises(PairingError):
+                    await asyncio.wait_for(second, timeout=5)
+            assert await server_store.record_by_client_id(client_identity.peer_id) is None
         finally:
             await client.disconnect()
 
