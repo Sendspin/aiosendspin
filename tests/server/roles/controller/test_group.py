@@ -188,9 +188,12 @@ def test_controller_group_role_supported_commands_follow_enum_order() -> None:
     cgr = ControllerGroupRole(_make_group_stub())
     cgr.set_supported_commands([MediaCommand.UNSHUFFLE, MediaCommand.SHUFFLE, MediaCommand.PLAY])
 
-    commands = cgr._get_supported_commands()  # noqa: SLF001
-
-    assert commands == [command for command in MediaCommand if command in commands]
+    assert cgr._get_supported_commands() == [  # noqa: SLF001
+        MediaCommand.PLAY,
+        MediaCommand.SHUFFLE,
+        MediaCommand.UNSHUFFLE,
+        MediaCommand.SWITCH,
+    ]
 
 
 def test_controller_group_role_set_supported_commands() -> None:
