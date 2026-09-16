@@ -583,8 +583,8 @@ async def test_writer_rewrites_server_transmitted_at_send_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_message_stamps_stream_end_server_transmitted() -> None:
-    """stream/end carries the clock value at actual send, like server/time."""
+async def test_send_message_stream_end_omits_server_transmitted() -> None:
+    """stream/end goes out with its roles and without a server_transmitted timestamp."""
     loop = asyncio.get_running_loop()
     clock = ManualClock(now_us_value=5_000_000)
     server = _DummyServer(loop=loop, clock=clock)
@@ -601,8 +601,7 @@ async def test_send_message_stamps_stream_end_server_transmitted() -> None:
     )
 
     payload = json.loads(sent[0])["payload"]
-    assert payload["server_transmitted"] == 5_000_000
-    assert payload["roles"] == ["player"]
+    assert payload == {"roles": ["player"]}
 
 
 @pytest.mark.asyncio
