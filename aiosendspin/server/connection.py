@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any, cast
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
-from aiosendspin.models import BINARY_HEADER_SIZE, unpack_binary_header
+from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw, unpack_binary_header
 from aiosendspin.models.core import (
     ActivatePairing,
     ClientCommandMessage,
@@ -84,6 +84,7 @@ from aiosendspin.models.management import (
     ServerUnpairMessage,
     StorageAccounting,
 )
+from aiosendspin.models.player import compute_send_ahead, pack_player_audio_header
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
@@ -194,6 +195,8 @@ class _BinaryData:
     buffer_end_time_us: int | None = None
     buffer_byte_count: int | None = None
     duration_us: int | None = None
+    # data is a player audio payload; the header is built at send time.
+    player_audio_header: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +317,7 @@ class SendspinConnection:
         self._trusted_unpaired = False
         self._credential_mismatch = False
         # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+        # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
         # Set when the client/hello tripped the spec-pr-177 player commands tolerance.
         self._legacy_hello = False
 
@@ -390,6 +394,16 @@ class SendspinConnection:
         """Whether this connection was admitted through the Noise handshake."""
         return self._noise_psk is not None
 
+    # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
+    @property
+    def uses_pre_spec_177_wire(self) -> bool:
+        """
+        Whether the client/hello used the pre-spec-#177 shape.
+
+        Such a client receives the 9-byte player audio header without send_ahead.
+        """
+        return self._legacy_hello
+
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
         if self._client is None:
@@ -452,17 +466,21 @@ class SendspinConnection:
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        player_audio_header: bool = False,
     ) -> None:
         """Enqueue a binary message.
 
         Args:
-            data: Binary data to send.
+            data: Binary frame to send, or only the audio payload when
+                player_audio_header is set.
             role: Role for epoch tracking and queue routing.
             timestamp_us: Playback timestamp from binary header (cached to avoid unpacking).
             message_type: Binary message type for role lookup (cached).
             buffer_end_time_us: End timestamp for buffer tracking.
             buffer_byte_count: Byte count for buffer tracking.
             duration_us: Duration for buffer tracking.
+            player_audio_header: Prepend the player audio header, stamped with
+                send_ahead immediately before transmission.
         """
         if self.requires_initial_state() and not self._initial_state_received:
             # No binary before the client's initial state; replay once it arrives,
@@ -480,6 +498,7 @@ class SendspinConnection:
                         buffer_end_time_us=buffer_end_time_us,
                         buffer_byte_count=buffer_byte_count,
                         duration_us=duration_us,
+                        player_audio_header=player_audio_header,
                     ),
                 )
             )
@@ -517,6 +536,7 @@ class SendspinConnection:
                 buffer_end_time_us=buffer_end_time_us,
                 buffer_byte_count=buffer_byte_count,
                 duration_us=duration_us,
+                player_audio_header=player_audio_header,
             ),
             enqueued_at_us=now_us,
         )
@@ -1124,6 +1144,7 @@ class SendspinConnection:
                 "client/hello declared player supported_commands, superseded by client/state"
             )
             # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+            # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
             self._legacy_hello = True
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
@@ -2073,8 +2094,17 @@ class SendspinConnection:
         """Send a binary frame with buffer tracking."""
         assert entry.binary is not None
         binary = entry.binary
+        data = binary.data
+        if binary.player_audio_header:
+            # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
+            if self.uses_pre_spec_177_wire:
+                header = pack_binary_header_raw(binary.message_type, entry.timestamp_us)
+            else:
+                send_ahead = compute_send_ahead(entry.timestamp_us, self._server.clock.now_us())
+                header = pack_player_audio_header(entry.timestamp_us, send_ahead)
+            data = header + data
         start_s = time.monotonic()
-        await wsock.send_bytes(binary.data)
+        await wsock.send_bytes(data)
         elapsed_ms = (time.monotonic() - start_s) * 1000
         if elapsed_ms >= 50.0:
             # Slow writes indicate transport/backpressure issues but are not fatal.
@@ -2088,7 +2118,7 @@ class SendspinConnection:
                     "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s; "
                     "%s stall(s) over 500ms since last report",
                     elapsed_ms,
-                    len(binary.data),
+                    len(data),
                     entry.timestamp_us,
                     role,
                     self._slow_send_count,
@@ -2099,7 +2129,7 @@ class SendspinConnection:
                 self._logger.debug(
                     "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s",
                     elapsed_ms,
-                    len(binary.data),
+                    len(data),
                     entry.timestamp_us,
                     role,
                 )

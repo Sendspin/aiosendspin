@@ -13,7 +13,6 @@ from uuid import UUID
 
 import pytest
 
-from aiosendspin.models import unpack_binary_header
 from aiosendspin.models.core import (
     StreamClearMessage,
     StreamEndMessage,
@@ -21,9 +20,12 @@ from aiosendspin.models.core import (
     StreamStartMessage,
 )
 from aiosendspin.models.player import (
+    PLAYER_AUDIO_HEADER_SIZE,
     ClientHelloPlayerSupport,
     StreamRequestFormatPlayer,
     SupportedAudioFormat,
+    pack_player_audio_header,
+    unpack_player_audio_header,
 )
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server import push_stream as push_stream_module
@@ -112,12 +114,15 @@ class _FakeConnection:
         data: bytes,
         *,
         role: str,  # noqa: ARG002
-        timestamp_us: int,  # noqa: ARG002
+        timestamp_us: int,
         message_type: int,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        player_audio_header: bool = False,
     ) -> bool:
+        if player_audio_header:
+            data = pack_player_audio_header(timestamp_us, 0) + data
         self.sent_binary.append(data)
         if (
             self.buffer_tracker is not None
@@ -383,7 +388,7 @@ async def test_commit_audio_sends_stream_start_and_binary(mock_loop: Any) -> Non
 
     assert any(isinstance(m, StreamStartMessage) for m in conn.sent_json)
     assert conn.sent_binary, "expected at least one binary chunk"
-    header = unpack_binary_header(conn.sent_binary[0])
+    header = unpack_player_audio_header(conn.sent_binary[0])
     assert header.message_type == 4  # BinaryMessageType.AUDIO_CHUNK
     role = client.role("player@v1")
     assert role is not None
@@ -2095,7 +2100,7 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
     assert pre_change_binary_count > 0
 
     # Record the last pre-change chunk's end timestamp
-    last_pre_header = unpack_binary_header(conn.sent_binary[-1])
+    last_pre_header = unpack_player_audio_header(conn.sent_binary[-1])
     # Duration of a 4800-byte PCM chunk at 48kHz stereo 16bit = 25ms = 25000us
     pre_change_end_us = last_pre_header.timestamp_us + 25_000
 
@@ -2151,17 +2156,17 @@ async def test_format_change_during_active_stream(mock_loop: Any) -> None:
     # The client flushes its un-played buffer at the announcement, so the
     # replacement audio must resume near now, not continue at the pre-change tail.
     post_change_binary = conn.sent_binary[pre_change_binary_count:]
-    first_post_header = unpack_binary_header(post_change_binary[0])
+    first_post_header = unpack_player_audio_header(post_change_binary[0])
     now_us = clock.now_us()
     assert now_us <= first_post_header.timestamp_us < pre_change_end_us, (
         f"Post-change audio starts at {first_post_header.timestamp_us}us "
         f"(now={now_us}us, pre-change tail={pre_change_end_us}us)"
     )
 
-    # No old-format frames (9-byte header + 4800-byte 48kHz payload) may
+    # No old-format frames (header + 4800-byte 48kHz payload) may
     # follow the boundary; replayed catch-up chunks are resampled to 44.1kHz
     # so their exact size can vary slightly.
-    assert all(len(frame) != 9 + 4800 for frame in post_change_binary)
+    assert all(len(frame) != PLAYER_AUDIO_HEADER_SIZE + 4800 for frame in post_change_binary)
 
 
 @pytest.mark.asyncio
@@ -2206,7 +2211,7 @@ async def test_format_flipflop_without_a_chunk_announces_the_return(mock_loop: A
         await stream.commit_audio()
 
     pre_change_count = len(conn.sent_binary)
-    pre_change_end_us = unpack_binary_header(conn.sent_binary[-1]).timestamp_us + 25_000
+    pre_change_end_us = unpack_player_audio_header(conn.sent_binary[-1]).timestamp_us + 25_000
     conn.sent_json.clear()
 
     request_format(44100)
@@ -2222,7 +2227,7 @@ async def test_format_flipflop_without_a_chunk_announces_the_return(mock_loop: A
 
     post_change_binary = conn.sent_binary[pre_change_count:]
     assert post_change_binary
-    first_post_header = unpack_binary_header(post_change_binary[0])
+    first_post_header = unpack_player_audio_header(post_change_binary[0])
     assert first_post_header.timestamp_us < pre_change_end_us
 
     stream_starts = [msg for msg in conn.sent_json if isinstance(msg, StreamStartMessage)]
@@ -2308,7 +2313,7 @@ async def test_format_change_during_inflight_commit_aborts_old_format_delivery(
     # The changer gets only new-format replay from the boundary-scheduled
     # join; the excluded commit must not have delivered old-format frames.
     assert conn.sent_binary
-    assert all(len(frame) != 9 + 4800 for frame in conn.sent_binary)
+    assert all(len(frame) != PLAYER_AUDIO_HEADER_SIZE + 4800 for frame in conn.sent_binary)
 
     # Nor may the excluded commit repopulate the evicted old-format cache.
     assert not stream._role_chunk_cache.get(old_tkey)  # noqa: SLF001
@@ -2325,7 +2330,7 @@ async def test_format_change_during_inflight_commit_aborts_old_format_delivery(
     assert stream_starts[0].payload.player is not None
     assert stream_starts[0].payload.player.sample_rate == 44100
     assert conn.sent_binary
-    assert all(len(frame) != 9 + 4800 for frame in conn.sent_binary)
+    assert all(len(frame) != PLAYER_AUDIO_HEADER_SIZE + 4800 for frame in conn.sent_binary)
 
 
 @pytest.mark.asyncio
@@ -2398,14 +2403,17 @@ async def test_format_change_preserves_peer_audio(
     # stream/start disruption of its own.
     peer_chunks = conn_b.sent_binary[peer_chunks_before:]
     assert len(peer_chunks) == 1
-    assert len(peer_chunks[0]) == 9 + 4800
-    prev_header = unpack_binary_header(conn_b.sent_binary[peer_chunks_before - 1])
-    this_header = unpack_binary_header(peer_chunks[0])
+    assert len(peer_chunks[0]) == PLAYER_AUDIO_HEADER_SIZE + 4800
+    prev_header = unpack_player_audio_header(conn_b.sent_binary[peer_chunks_before - 1])
+    this_header = unpack_player_audio_header(peer_chunks[0])
     assert this_header.timestamp_us == prev_header.timestamp_us + 25_000
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn_b.sent_json)
 
     # The changing player got no old-format frame behind its boundary.
-    assert all(len(frame) != 9 + 4800 for frame in conn_a.sent_binary[peer_chunks_before:])
+    assert all(
+        len(frame) != PLAYER_AUDIO_HEADER_SIZE + 4800
+        for frame in conn_a.sent_binary[peer_chunks_before:]
+    )
 
 
 # --- Historical Audio Tests ---

@@ -86,8 +86,9 @@ StreamEndCallback = Callable[[list[str] | None], None]
 # Receives list of roles to clear, or None if all roles should be cleared.
 StreamClearCallback = Callable[[list[str] | None], None]
 
-# Callback invoked with (server_timestamp_us, audio_data, format) when audio chunks arrive.
-AudioChunkCallback = Callable[[int, bytes, AudioFormat], None]
+# Callback invoked with (server_timestamp_us, audio_data, format, send_ahead) when audio
+# chunks arrive.
+AudioChunkCallback = Callable[[int, bytes, AudioFormat, int], None]
 
 # Callback invoked when the client disconnects from the server.
 DisconnectCallback = Callable[[], None]
@@ -933,6 +934,9 @@ class SendspinClient:
         - server_timestamp_us: Server timestamp when this audio should play
         - audio_data: Raw PCM audio bytes
         - format: PCMFormat describing the audio format
+        - send_ahead: Microseconds from the server's transmission of the chunk to
+          server_timestamp_us. 0 and 4294967295 are saturated values and carry no
+          delay sample. Never affects when the chunk plays.
 
         To convert server timestamps to client play time (monotonic client clock),
         use the compute_play_time() and compute_server_time() methods provided
@@ -1104,12 +1108,12 @@ class SendspinClient:
                 logger.exception("Error in visualizer callback %s", callback)
 
     def notify_audio_chunk(
-        self, timestamp_us: int, payload: bytes, audio_format: AudioFormat
+        self, timestamp_us: int, payload: bytes, audio_format: AudioFormat, send_ahead: int
     ) -> None:
         """Dispatch an audio chunk to the registered listeners."""
         for callback in list(self._audio_chunk_callbacks):
             try:
-                callback(timestamp_us, payload, audio_format)
+                callback(timestamp_us, payload, audio_format, send_ahead)
             except Exception:
                 logger.exception("Error in audio chunk callback %s", callback)
 

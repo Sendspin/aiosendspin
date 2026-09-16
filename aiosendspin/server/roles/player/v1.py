@@ -335,7 +335,7 @@ class PlayerV1Role(Role):
         self._last_sent_format = current_format
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
-        """Pack and send binary audio. Late audio is discarded by connection."""
+        """Send binary audio; the connection adds the header. Late audio is discarded there."""
         # Send deferred stream/start on first chunk (ensures encoder header is available)
         if self._pending_stream_start:
             self._send_stream_start_message()
@@ -350,7 +350,6 @@ class PlayerV1Role(Role):
                 )
             return
 
-        # Reuse the frame packed once and shared across subscribers.
         message_type = BinaryMessageType.AUDIO_CHUNK.value
         # Compute the wall-clock buffer horizon (effective play time) by shifting
         # the chunk's end time earlier by the configured output delay.
@@ -358,13 +357,14 @@ class PlayerV1Role(Role):
         chunk_end_us = chunk.timestamp_us + chunk.duration_us - output_delay_us
 
         self._client.send_binary(
-            chunk.packed,
+            chunk.data,
             role_family=self.role_family,
             timestamp_us=chunk.timestamp_us,
             message_type=message_type,
             buffer_end_time_us=chunk_end_us,
             buffer_byte_count=chunk.byte_count,
             duration_us=chunk.duration_us,
+            player_audio_header=True,
         )
 
     def on_stream_clear(self) -> None:

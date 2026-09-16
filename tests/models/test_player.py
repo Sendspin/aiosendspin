@@ -5,11 +5,17 @@ from __future__ import annotations
 import pytest
 
 from aiosendspin.models.player import (
+    PLAYER_AUDIO_HEADER_SIZE,
+    SEND_AHEAD_MAX,
     ClientHelloPlayerSupport,
+    PlayerAudioHeader,
     PlayerCommandPayload,
     PlayerStatePayload,
+    compute_send_ahead,
+    pack_player_audio_header,
+    unpack_player_audio_header,
 )
-from aiosendspin.models.types import PlayerCommand
+from aiosendspin.models.types import BinaryMessageType, PlayerCommand
 
 
 def test_player_state_output_delay_serializes_when_set() -> None:
@@ -252,3 +258,38 @@ def test_player_state_from_dict_does_not_mutate_input() -> None:
     raw = {"static_delay_ms": 250}
     PlayerStatePayload.from_dict(raw)
     assert raw == {"static_delay_ms": 250}
+
+
+def test_player_audio_header_round_trips() -> None:
+    """The 13-byte audio header packs big-endian and unpacks to the same fields."""
+    header = pack_player_audio_header(0x0102030405060708, 0x0A0B0C0D)
+
+    assert header == b"\x04\x01\x02\x03\x04\x05\x06\x07\x08\x0a\x0b\x0c\x0d"
+    assert PLAYER_AUDIO_HEADER_SIZE == 13
+    assert unpack_player_audio_header(header + b"audio") == PlayerAudioHeader(
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+        timestamp_us=0x0102030405060708,
+        send_ahead=0x0A0B0C0D,
+    )
+
+
+def test_unpack_player_audio_header_rejects_short_data() -> None:
+    """Data shorter than the header raises ValueError."""
+    with pytest.raises(ValueError, match="at least 13 bytes"):
+        unpack_player_audio_header(bytes(12))
+
+
+@pytest.mark.parametrize(
+    ("timestamp_us", "now_us", "expected"),
+    [
+        (1_250_000, 1_000_000, 250_000),
+        (1_000_000, 1_000_000, 0),
+        (1_000_000, 1_000_001, 0),
+        (-5_000_000, 1_000_000, 0),
+        (1_000_000 + SEND_AHEAD_MAX, 1_000_000, SEND_AHEAD_MAX),
+        (1_000_000 + SEND_AHEAD_MAX + 1, 1_000_000, SEND_AHEAD_MAX),
+    ],
+)
+def test_compute_send_ahead_saturates(timestamp_us: int, now_us: int, expected: int) -> None:
+    """send_ahead is the lead in hand, clamped to 0 and to the uint32 maximum."""
+    assert compute_send_ahead(timestamp_us, now_us) == expected

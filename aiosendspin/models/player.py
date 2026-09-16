@@ -9,11 +9,12 @@ audio formats based on their capabilities and current conditions.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from .base import SendspinConfig, SendspinModel
-from .types import AudioCodec, PlayerCommand
+from .types import AudioCodec, BinaryMessageType, PlayerCommand
 
 # Pre-rename delay key, superseded by `output_delay_ms`.
 _LEGACY_DELAY_KEY = "static_delay_ms"
@@ -29,6 +30,47 @@ def _rewrite_legacy_delay_key(d: dict[str, Any]) -> dict[str, Any]:
     if "output_delay_ms" not in normalized:
         normalized["output_delay_ms"] = value
     return normalized
+
+
+# Audio chunk header (big-endian): message_type(1) + timestamp_us(8) + send_ahead(4) = 13 bytes
+PLAYER_AUDIO_HEADER_FORMAT = ">BqI"
+_PLAYER_AUDIO_HEADER_STRUCT = struct.Struct(PLAYER_AUDIO_HEADER_FORMAT)
+PLAYER_AUDIO_HEADER_SIZE = _PLAYER_AUDIO_HEADER_STRUCT.size
+# Saturated send_ahead: the lead exceeds what the field can hold.
+SEND_AHEAD_MAX = 0xFFFFFFFF
+
+
+class PlayerAudioHeader(NamedTuple):
+    """Header of a player audio chunk."""
+
+    message_type: int
+    timestamp_us: int
+    """Server clock time in microseconds when the first sample should be output."""
+    send_ahead: int
+    """Microseconds from server transmit to `timestamp_us`; 0 and SEND_AHEAD_MAX are saturated."""
+
+
+def compute_send_ahead(timestamp_us: int, now_us: int) -> int:
+    """Return the `send_ahead` for a chunk sent at `now_us`, saturated to the uint32 range."""
+    return max(0, min(timestamp_us - now_us, SEND_AHEAD_MAX))
+
+
+def pack_player_audio_header(timestamp_us: int, send_ahead: int) -> bytes:
+    """Return the 13-byte player audio chunk header."""
+    return _PLAYER_AUDIO_HEADER_STRUCT.pack(
+        BinaryMessageType.AUDIO_CHUNK.value, timestamp_us, send_ahead
+    )
+
+
+def unpack_player_audio_header(data: bytes) -> PlayerAudioHeader:
+    """
+    Unpack the player audio chunk header from the start of `data`.
+
+    Raises ValueError when `data` is shorter than PLAYER_AUDIO_HEADER_SIZE.
+    """
+    if len(data) < PLAYER_AUDIO_HEADER_SIZE:
+        raise ValueError(f"Expected at least {PLAYER_AUDIO_HEADER_SIZE} bytes, got {len(data)}")
+    return PlayerAudioHeader(*_PLAYER_AUDIO_HEADER_STRUCT.unpack_from(data))
 
 
 # Client -> Server client/hello player support object

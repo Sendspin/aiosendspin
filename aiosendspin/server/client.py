@@ -797,8 +797,14 @@ class SendspinClient:
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        player_audio_header: bool = False,
     ) -> None:
-        """Enqueue a binary payload for this client, or no-op when disconnected."""
+        """
+        Enqueue a binary message for this client, or no-op when disconnected.
+
+        `data` is the full frame, or only the audio payload when `player_audio_header`
+        is set; the connection then prepends the player audio header at send time.
+        """
         if self._connection is None:
             return
         self._connection.send_binary(
@@ -809,6 +815,7 @@ class SendspinClient:
             buffer_end_time_us=buffer_end_time_us,
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
+            player_audio_header=player_audio_header,
         )
 
     def drop_pending_binary(self, roles: list[str] | None) -> None:

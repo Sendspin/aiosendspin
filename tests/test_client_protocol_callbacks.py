@@ -28,10 +28,12 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.player import (
+    SEND_AHEAD_MAX,
     ClientHelloPlayerSupport,
     PlayerCommandPayload,
     StreamStartPlayer,
     SupportedAudioFormat,
+    pack_player_audio_header,
 )
 from aiosendspin.models.types import (
     Activity,
@@ -384,16 +386,63 @@ async def test_audio_binary_dropped_when_only_artwork_stream_active() -> None:
         player_support=_player_support(),
         artwork_support=_artwork_support(),
     )
-    captured: list[tuple[int, bytes, AudioFormat]] = []
+    captured: list[tuple[int, bytes, AudioFormat, int]] = []
     client.add_audio_chunk_listener(
-        lambda ts, data, fmt: captured.append((ts, data, fmt)),
+        lambda ts, data, fmt, send_ahead: captured.append((ts, data, fmt, send_ahead)),
     )
 
     connection = SendspinConnection(client)
     await connection._handle_stream_start(_artwork_stream_start())  # noqa: SLF001
 
     connection._handle_binary_message(  # noqa: SLF001
-        pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 123_456) + b"\x00\x00\x00\x00"
+        pack_player_audio_header(123_456, 50_000) + b"\x00\x00\x00\x00"
+    )
+
+    assert captured == []
+
+
+@pytest.mark.parametrize("send_ahead", [0, 50_000, SEND_AHEAD_MAX])
+@pytest.mark.asyncio
+async def test_audio_binary_passes_raw_send_ahead(send_ahead: int) -> None:
+    """The 13-byte audio header's send_ahead, saturated or not, reaches the listener as sent."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+    captured: list[tuple[int, bytes, int]] = []
+    client.add_audio_chunk_listener(
+        lambda ts, data, _fmt, send_ahead: captured.append((ts, data, send_ahead)),
+    )
+
+    connection = SendspinConnection(client)
+    await connection._handle_stream_start(  # noqa: SLF001
+        StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
+    )
+    connection._handle_binary_message(  # noqa: SLF001
+        pack_player_audio_header(123_456, send_ahead) + b"\x01\x02\x03\x04"
+    )
+
+    assert captured == [(123_456, b"\x01\x02\x03\x04", send_ahead)]
+
+
+@pytest.mark.asyncio
+async def test_truncated_audio_binary_is_dropped() -> None:
+    """An audio frame shorter than the 13-byte header never reaches the listener."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+    captured: list[bytes] = []
+    client.add_audio_chunk_listener(lambda _ts, data, _fmt, _send_ahead: captured.append(data))
+
+    connection = SendspinConnection(client)
+    await connection._handle_stream_start(  # noqa: SLF001
+        StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
+    )
+    connection._handle_binary_message(  # noqa: SLF001
+        pack_player_audio_header(123_456, 0)[:-1]
     )
 
     assert captured == []

@@ -62,7 +62,12 @@ from aiosendspin.models.management import (
     ManagementSetPairingConfigMessage,
     ServerUnpairMessage,
 )
-from aiosendspin.models.player import PlayerStatePayload, StreamStartPlayer
+from aiosendspin.models.player import (
+    PLAYER_AUDIO_HEADER_SIZE,
+    PlayerStatePayload,
+    StreamStartPlayer,
+    unpack_player_audio_header,
+)
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
@@ -1202,12 +1207,13 @@ class SendspinConnection:
             return
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
-            try:
-                header = unpack_binary_header(payload)
-            except Exception:
-                logger.exception("Failed to unpack binary header")
+            if len(payload) < PLAYER_AUDIO_HEADER_SIZE:
+                logger.warning("Dropping truncated audio chunk of %d bytes", len(payload))
                 return
-            self._handle_audio_chunk(header.timestamp_us, payload[BINARY_HEADER_SIZE:])
+            header = unpack_player_audio_header(payload)
+            self._handle_audio_chunk(
+                header.timestamp_us, payload[PLAYER_AUDIO_HEADER_SIZE:], header.send_ahead
+            )
         elif message_type in _ARTWORK_BINARY_TYPES:
             try:
                 unpack_binary_header(payload)
@@ -1450,14 +1456,16 @@ class SendspinConnection:
         """Store the current audio format for use in callbacks."""
         self._current_audio_format = audio_format
 
-    def _handle_audio_chunk(self, timestamp_us: int, payload: bytes) -> None:
+    def _handle_audio_chunk(self, timestamp_us: int, payload: bytes, send_ahead: int) -> None:
         """Handle incoming audio chunk and notify callbacks."""
         if self._current_audio_format is None:
             logger.debug("Dropping audio chunk without format")
             return
         # Pass server timestamp directly to callback - it handles time conversion
         # to allow for dynamic time base updates
-        self._client.notify_audio_chunk(timestamp_us, payload, self._current_audio_format)
+        self._client.notify_audio_chunk(
+            timestamp_us, payload, self._current_audio_format, send_ahead
+        )
 
     def _handle_artwork_chunk(self, message_type: BinaryMessageType, payload: bytes) -> None:
         """Handle incoming artwork chunk and notify callbacks."""
