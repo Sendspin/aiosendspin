@@ -1469,6 +1469,56 @@ async def test_pair_retry_after_leaving_pairing_is_discarded() -> None:
             await client.disconnect()
 
 
+async def test_pairing_frames_between_attempts_are_discarded() -> None:
+    """After a non-closing abort nothing queues pairing frames until the next attempt."""
+    server = _make_server(InMemoryServerPairingStore())
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    # Offers no dynamic pairing code, so the attempt aborts with method_not_supported.
+    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
+
+    async def provide() -> str:
+        return "000000"
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            with pytest.raises(PairingAbortError):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+            assert conn._in_pairing  # noqa: SLF001
+            assert conn._pairing_message_queue is None  # noqa: SLF001
+            routed = _track_routed_types(conn)
+
+            sdk_conn = client._admitted_connection  # noqa: SLF001
+            assert sdk_conn is not None
+            await sdk_conn._send_message(ClientPairRetryMessage().to_json())  # noqa: SLF001
+            replies = sdk_conn._time_filter.count  # noqa: SLF001
+            await sdk_conn._send_time_message()  # noqa: SLF001
+            await _wait_until(lambda: sdk_conn._time_filter.count > replies)  # noqa: SLF001
+
+            assert routed == []
+            assert conn._pairing_message_queue is None  # noqa: SLF001
+            assert client.connected
+            await conn.end_pairing()
+            await _await_left_pairing(client)
+        finally:
+            await client.disconnect()
+
+
 async def test_stray_pairing_frame_outside_pairing_is_discarded() -> None:
     """A pairing frame reaching the server outside pairing is discarded, not fatal."""
     server_store = InMemoryServerPairingStore()

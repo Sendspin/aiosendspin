@@ -100,7 +100,9 @@ def _conn_with_psk(category: PskCategory | None) -> SendspinConnection:
         psk = generate_psk()
         conn._noise_psk = ResolvedPsk(psk_id_for(psk), psk, category)  # noqa: SLF001
     conn._management_active = False  # noqa: SLF001
-    conn._pairing_message_queue = None  # noqa: SLF001 — keeps _pairing_in_progress False
+    # Keep _pairing_in_progress False.
+    conn._in_pairing = False  # noqa: SLF001
+    conn._pairing_message_queue = None  # noqa: SLF001
     conn._declared_activities = None  # noqa: SLF001 — _refresh_activities then no-ops
     return conn
 

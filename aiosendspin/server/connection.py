@@ -908,8 +908,8 @@ class SendspinConnection:
 
     @property
     def _pairing_in_progress(self) -> bool:
-        """Whether operator-initiated pairing is currently being executed."""
-        return self._pairing_message_queue is not None
+        """Whether the connection is in pairing, including between attempts and on connect."""
+        return self._in_pairing or self._pairing_message_queue is not None
 
     async def _establish_transport(
         self, raw: web.WebSocketResponse | ClientWebSocketResponse
@@ -1447,11 +1447,12 @@ class SendspinConnection:
             # Legacy-generation clients read only pairing messages during an attempt.
             if self._legacy_hello:
                 await self._pause_writer()
-            self._pairing_message_queue = asyncio.Queue()
             self._in_pairing = True
-        assert self._pairing_message_queue is not None
+        # Pairing messages arriving between attempts are discarded rather than queued.
+        queue: asyncio.Queue[WSMessage] = asyncio.Queue()
+        self._pairing_message_queue = queue
         self._pairing_attempt = attempt
-        dispatched = QueuedEncryptedWebSocket(transport, self._pairing_message_queue)
+        dispatched = QueuedEncryptedWebSocket(transport, queue)
         task = create_task(self._pair(dispatched))
         self._pairing_task = task
         try:
@@ -1473,6 +1474,7 @@ class SendspinConnection:
         finally:
             self._pairing_attempt = None
             self._pairing_task = None
+            self._pairing_message_queue = None
         await self._leave_pairing()
 
     async def end_pairing(self) -> None:
