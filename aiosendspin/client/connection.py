@@ -8,20 +8,26 @@ import logging
 import struct
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, assert_never
 
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
-from aiosendspin.models import (
-    BINARY_HEADER_SIZE,
-    BinaryMessageType,
-    pack_binary_header_raw,
-    unpack_binary_header,
+from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
+from aiosendspin.models.artwork import (
+    ARTWORK_ANNOUNCE_SIZE,
+    ARTWORK_FLAG_ANNOUNCE,
+    ARTWORK_FLAG_CANCEL,
+    ARTWORK_MAX_MESSAGE_SIZE,
+    ARTWORK_PREFIX_SIZE,
+    ARTWORK_RESERVED_FLAGS,
+    ClientStateArtwork,
+    StreamArtworkChannelConfig,
+    StreamStartArtwork,
+    unpack_artwork_announce,
 )
-from aiosendspin.models.artwork import ClientStateArtwork
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -83,6 +89,7 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
     Activity,
+    ArtworkSource,
     AudioCodec,
     GoodbyeReason,
     ManagementResult,
@@ -188,6 +195,8 @@ _ARTWORK_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
         BinaryMessageType.ARTWORK_CHANNEL_3,
     }
 )
+_ARTWORK_CHANNEL_NONE = StreamArtworkChannelConfig(source=ArtworkSource.NONE)
+
 _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
     {
         BinaryMessageType.VISUALIZATION_LOUDNESS,
@@ -198,6 +207,45 @@ _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
         BinaryMessageType.VISUALIZATION_PITCH,
     }
 )
+
+
+@dataclass(slots=True)
+class _PendingArtwork:
+    """An announced image not yet shown on its channel."""
+
+    timestamp_us: int
+    total_size: int
+    data: bytearray
+    received: int = 0
+    # Image data arrived while the client was unavailable; the image is never shown.
+    discarded: bool = False
+    show_handle: asyncio.TimerHandle | None = None
+
+
+def _malformed_artwork_message(payload: bytes) -> str | None:
+    """Return why `payload` is a malformed artwork message, or None when it is well formed."""
+    length = len(payload)
+    if not ARTWORK_PREFIX_SIZE <= length <= ARTWORK_MAX_MESSAGE_SIZE:
+        return f"length {length} outside {ARTWORK_PREFIX_SIZE}-{ARTWORK_MAX_MESSAGE_SIZE}"
+    flags = payload[1]
+    if flags & ARTWORK_RESERVED_FLAGS:
+        return f"flags 0x{flags:02x} set reserved bits"
+    if flags & ARTWORK_FLAG_ANNOUNCE and flags & ARTWORK_FLAG_CANCEL:
+        return "announce and cancel flags both set"
+    if flags & ARTWORK_FLAG_ANNOUNCE and length != ARTWORK_ANNOUNCE_SIZE:
+        return f"announce of {length} bytes"
+    if flags & ARTWORK_FLAG_CANCEL and length != ARTWORK_PREFIX_SIZE:
+        return f"cancel of {length} bytes"
+    return None
+
+
+def _artwork_channel_config(
+    artwork: StreamStartArtwork | None, channel: int
+) -> StreamArtworkChannelConfig:
+    """Return the stream/start configuration of `channel`, uncovered ones as `none`."""
+    if artwork is None or channel >= len(artwork.channels):
+        return _ARTWORK_CHANNEL_NONE
+    return artwork.channels[channel]
 
 
 def _activities_allowed(
@@ -274,6 +322,16 @@ class SendspinConnection:
     """True between client-stream/start and client-stream/end for the source role."""
     _current_visualizer_config: StreamStartVisualizer | None = None
     """Current visualizer config from stream/start."""
+    _artwork_config: StreamStartArtwork | None = None
+    """Artwork config from the latest stream/start of the active artwork stream."""
+    _artwork_in_flight: int | None = None
+    """Channel of the artwork transfer announced and not yet complete."""
+    _artwork_pending: dict[int, _PendingArtwork]
+    """Per channel, the latest announced image until it is shown."""
+    _artwork_shown: set[int]
+    """Channels currently showing a non-empty image."""
+    _protocol_error_task: asyncio.Task[None] | None = None
+    """Task closing the connection after a protocol error."""
 
     _group_state: GroupUpdateServerPayload | None = None
     """Latest group state received from server."""
@@ -301,6 +359,8 @@ class SendspinConnection:
         self._time_filter = SendspinTimeFilter()
         self._output_delay_us = client.output_delay_us
         self._closed = asyncio.Event()
+        self._artwork_pending = {}
+        self._artwork_shown = set()
 
     @property
     def connected(self) -> bool:
@@ -910,6 +970,8 @@ class SendspinConnection:
         self._current_audio_format = None
         self._current_player = None
         self._artwork_stream_active = False
+        self._reset_artwork()
+        self._artwork_shown.clear()
         self._visualizer_stream_active = False
         self._source_stream_active = False
         self._current_visualizer_config = None
@@ -1323,6 +1385,12 @@ class SendspinConnection:
         else:
             role_active = False
 
+        if message_type in _ARTWORK_BINARY_TYPES and (
+            reason := _malformed_artwork_message(payload)
+        ):
+            self._close_on_protocol_error(f"malformed artwork message: {reason}")
+            return
+
         if not role_active:
             logger.debug(
                 "Ignoring binary message of type %s since its role stream is inactive",
@@ -1339,12 +1407,7 @@ class SendspinConnection:
                 header.timestamp_us, payload[PLAYER_AUDIO_HEADER_SIZE:], header.send_ahead
             )
         elif message_type in _ARTWORK_BINARY_TYPES:
-            try:
-                unpack_binary_header(payload)
-            except Exception:
-                logger.exception("Failed to unpack binary header")
-                return
-            self._handle_artwork_chunk(message_type, payload[BINARY_HEADER_SIZE:])
+            self._handle_artwork_chunk(message_type, payload)
         elif message_type is BinaryMessageType.VISUALIZATION_BEAT:
             self._handle_visualization_beat(payload[1:])
         elif message_type in _VISUALIZATION_BINARY_TYPES:
@@ -1420,6 +1483,12 @@ class SendspinConnection:
             self._visualizer_stream_active = True
         if message.payload.artwork is not None:
             self._artwork_stream_active = True
+            for channel in list(self._artwork_pending):
+                if _artwork_channel_config(message.payload.artwork, channel) != (
+                    _artwork_channel_config(self._artwork_config, channel)
+                ):
+                    self._discard_pending_artwork(channel)
+            self._artwork_config = message.payload.artwork
 
         player = message.payload.player
         if player is None:
@@ -1491,6 +1560,10 @@ class SendspinConnection:
             self._current_visualizer_config = None
         if roles is None or "artwork" in roles:
             self._artwork_stream_active = False
+            self._reset_artwork()
+            for channel in sorted(self._artwork_shown):
+                self._client.notify_artwork(channel, b"")
+            self._artwork_shown.clear()
 
         self._client.notify_stream_end(roles)
 
@@ -1601,9 +1674,92 @@ class SendspinConnection:
         )
 
     def _handle_artwork_chunk(self, message_type: BinaryMessageType, payload: bytes) -> None:
-        """Handle incoming artwork chunk and notify callbacks."""
-        channel = int(message_type.value - BinaryMessageType.ARTWORK_CHANNEL_0.value)
-        self._client.notify_artwork(channel, payload)
+        """Apply a well-formed artwork announce, part or cancel of the active stream."""
+        channel = message_type.value - BinaryMessageType.ARTWORK_CHANNEL_0.value
+        flags = payload[1]
+        if flags & ARTWORK_FLAG_CANCEL:
+            self._discard_pending_artwork(channel)
+            return
+        if flags & ARTWORK_FLAG_ANNOUNCE:
+            if self._artwork_in_flight is not None:
+                self._close_on_protocol_error("artwork announce while a transfer is in flight")
+                return
+            announce = unpack_artwork_announce(payload)
+            self._discard_pending_artwork(channel)
+            pending = _PendingArtwork(
+                timestamp_us=announce.timestamp_us,
+                total_size=announce.total_size,
+                data=bytearray(),
+                # An empty image carries no data to discard, so a clear always applies.
+                discarded=announce.total_size > 0 and not self._reported_available,
+            )
+            self._artwork_pending[channel] = pending
+            self._artwork_in_flight = channel
+        else:
+            if self._artwork_in_flight != channel:
+                self._close_on_protocol_error(
+                    f"artwork part on channel {channel} with no transfer in flight there"
+                )
+                return
+            pending = self._artwork_pending[channel]
+            data = payload[ARTWORK_PREFIX_SIZE:]
+            pending.received += len(data)
+            if pending.received > pending.total_size:
+                self._close_on_protocol_error("artwork part extends past total_size")
+                return
+            if pending.discarded or not self._reported_available:
+                pending.discarded = True
+                pending.data.clear()
+            else:
+                pending.data += data
+        if pending.received == pending.total_size:
+            self._artwork_in_flight = None
+            self._schedule_artwork(channel, pending)
+
+    def _schedule_artwork(self, channel: int, pending: _PendingArtwork) -> None:
+        """Show a complete pending image once its timestamp is reached on the local clock."""
+        if pending.discarded:
+            del self._artwork_pending[channel]
+            return
+        delay_us = 0
+        if self._time_filter.count > 0:
+            delay_us = self._time_filter.compute_client_time(pending.timestamp_us) - self.now_us()
+        if delay_us <= 0:
+            self._show_artwork(channel)
+            return
+        pending.show_handle = self._client.loop.call_later(
+            delay_us / 1_000_000, self._show_artwork, channel
+        )
+
+    def _show_artwork(self, channel: int) -> None:
+        """Make the channel's pending image current and notify the listeners."""
+        image = bytes(self._artwork_pending.pop(channel).data)
+        if image:
+            self._artwork_shown.add(channel)
+        else:
+            self._artwork_shown.discard(channel)
+        self._client.notify_artwork(channel, image)
+
+    def _discard_pending_artwork(self, channel: int) -> None:
+        """Discard the channel's pending image, ending its transfer if in flight."""
+        pending = self._artwork_pending.pop(channel, None)
+        if pending is not None and pending.show_handle is not None:
+            pending.show_handle.cancel()
+        if self._artwork_in_flight == channel:
+            self._artwork_in_flight = None
+
+    def _reset_artwork(self) -> None:
+        """Discard every pending image and the stream's artwork configuration."""
+        for channel in list(self._artwork_pending):
+            self._discard_pending_artwork(channel)
+        self._artwork_in_flight = None
+        self._artwork_config = None
+
+    def _close_on_protocol_error(self, reason: str) -> None:
+        """Close the connection because the server violated the protocol."""
+        logger.error("Closing connection on protocol error: %s", reason)
+        if self._protocol_error_task is None or self._protocol_error_task.done():
+            self._protocol_error_task = self._client.loop.create_task(self.disconnect())
 
     def _handle_visualization_frame(self, message_type: BinaryMessageType, payload: bytes) -> None:
         """Parse a single-type visualization binary and notify callbacks."""
