@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import suppress
 from dataclasses import replace
@@ -607,3 +608,25 @@ async def test_resolution_answers_within_the_declared_category() -> None:
     long_term = await connection._resolve_psk(shared_id, PskCategory.LONG_TERM)  # noqa: SLF001
     assert long_term is not None
     assert long_term.category is PskCategory.LONG_TERM
+
+
+async def test_post_pairing_activation_sends_stateless_initial_state() -> None:
+    """Pairing that ends with only stateless roles active sends the initial client/state."""
+    connection, ws = _client_with(PskCategory.LONG_TERM)
+    connection._connected = True  # noqa: SLF001
+
+    async def fake_protocol() -> str:
+        return "leftover"
+
+    async def resolve(leftover: str | None) -> ServerActivatePayload:  # noqa: ARG001
+        return ServerActivatePayload(activities=[], active_roles=[Roles.CONTROLLER.value])
+
+    connection._run_pairing_protocol = fake_protocol  # type: ignore[method-assign]  # noqa: SLF001
+    connection._resolve_pairing_activate = resolve  # type: ignore[method-assign]  # noqa: SLF001
+
+    try:
+        await connection._pair()  # noqa: SLF001
+        states = [msg for msg in map(json.loads, ws.sent) if msg["type"] == "client/state"]
+        assert [msg["payload"] for msg in states] == [{"available": True}]
+    finally:
+        await _cancel_time_task(connection)
