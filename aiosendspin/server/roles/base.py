@@ -446,6 +446,13 @@ class Role(ABC):
     def on_client_state(self, payload: ClientStatePayload) -> None:  # noqa: B027
         """Handle client/state payload."""
 
+    def on_initial_client_state(self, payload: ClientStatePayload) -> None:  # noqa: B027
+        """Apply the initial client/state fields an active stream join depends on.
+
+        Called before the client is marked connected and joins its group's active
+        stream; `on_client_state` still receives the same payload afterwards.
+        """
+
     def on_stream_request_format(  # noqa: B027
         self,
         payload: StreamRequestFormatPayload,

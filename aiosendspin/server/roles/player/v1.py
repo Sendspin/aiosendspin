@@ -27,7 +27,12 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aiosendspin.models.player import PlayerCommandPayload, StreamStartPlayer, SupportedAudioFormat
+from aiosendspin.models.player import (
+    PlayerCommandPayload,
+    PlayerStatePayload,
+    StreamStartPlayer,
+    SupportedAudioFormat,
+)
 from aiosendspin.models.types import PlayerCommand
 from aiosendspin.server.audio import AudioFormat, BufferTracker
 from aiosendspin.server.roles.base import (
@@ -742,15 +747,12 @@ class PlayerV1Role(Role):
             self.min_buffer_ms = state.min_buffer_ms
             self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
-        if state.format is None:
-            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-            # A pre-#195 client never sends `format`; keep what it requested instead.
-            if not self._client_format_legacy:
-                self._set_client_format(None)
-        elif self._is_declared_format(state.format):
-            self._client_format_legacy = False
-            self._set_client_format(state.format)
-        # An undeclared format was flagged by client_state_deviations and keeps the slot.
+        self._apply_state_format(state)
+
+    def on_initial_client_state(self, payload: ClientStatePayload) -> None:
+        """Apply the preferred format so the stream join announces it from the start."""
+        if payload.player is not None:
+            self._apply_state_format(payload.player)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def on_stream_request_format(self, payload: StreamRequestFormatPayload) -> None:
@@ -863,6 +865,18 @@ class PlayerV1Role(Role):
             audio_format.matches(fmt) for fmt in support.supported_formats
         )
 
+    def _apply_state_format(self, state: PlayerStatePayload) -> None:
+        """Store the `format` of a client/state player object as the client's preference."""
+        if state.format is None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            # A pre-#195 client never sends `format`; keep what it requested instead.
+            if not self._client_format_legacy:
+                self._set_client_format(None)
+        elif self._is_declared_format(state.format):
+            self._client_format_legacy = False
+            self._set_client_format(state.format)
+        # An undeclared format was flagged by client_state_deviations and keeps the slot.
+
     def _set_client_format(self, audio_format: SupportedAudioFormat | None) -> None:
         """Store the client's format preference and apply it when it changed."""
         if audio_format == self._client_format:
@@ -877,7 +891,14 @@ class PlayerV1Role(Role):
         before = self._effective_format()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
-        if self._client.group.has_active_stream and self._effective_format() != before:
+        # A connection still awaiting its initial client/state has not joined the stream;
+        # the join picks up the new requirements.
+        joining = self._client.connection is not None and not self._client.is_connected
+        if (
+            not joining
+            and self._client.group.has_active_stream
+            and self._effective_format() != before
+        ):
             self._begin_format_transition()
 
     def _legacy_hello_commands(self) -> list[PlayerCommand] | None:

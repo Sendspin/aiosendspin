@@ -34,6 +34,7 @@ from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
+from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.push_stream import (
     DEFAULT_INITIAL_DELAY_US,
     CachedChunk,
@@ -2074,6 +2075,69 @@ def _format_state(sample_rate: int) -> ClientStatePayload:
             )
         )
     )
+
+
+class _JoiningGroup(_DummyGroup):
+    """Dummy group that joins a connected client's roles to the active stream."""
+
+    def on_client_connected(self, client: SendspinClient) -> None:
+        if self._push_stream is not None and not self._push_stream.is_stopped:
+            for role in client.active_roles:
+                if role.get_audio_requirements() is not None:
+                    self._push_stream.on_role_join(role)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_announces_initial_state_format(mock_loop: Any) -> None:
+    """A reconnecting player's first stream/start carries its initial client/state format."""
+    group = _JoiningGroup(clients=[])
+    client, _conn = _make_connected_player_multi_format(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    group._push_stream = stream  # noqa: SLF001
+    group.has_active_stream = True
+    for _ in range(4):
+        stream.prepare_audio(
+            bytes(4800),
+            AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+        )
+        await stream.commit_audio()
+    role = client.role("player@v1")
+    assert role is not None
+    role.get_join_delay_s = MagicMock(return_value=0.0)  # type: ignore[method-assign]
+
+    hello = client.info
+    client.detach_connection(None)
+    conn = _FakeConnection()
+    client.attach_connection(
+        conn,
+        client_info=hello,
+        negotiated_roles=[Roles.PLAYER.value],
+        active_roles=[Roles.PLAYER.value],
+    )
+    dispatcher = SendspinConnection(
+        MagicMock(loop=mock_loop, clock=LoopClock(mock_loop)), wsock_client=MagicMock()
+    )
+    dispatcher._client = client  # noqa: SLF001
+    initial = _format_state(44100)
+    assert initial.player is not None
+    initial.available = True
+    initial.player.volume = 50
+    initial.player.muted = False
+    initial.player.output_delay_ms = 0
+    initial.player.required_lead_time_ms = 0
+    initial.player.min_buffer_ms = 0
+    initial.player.supported_commands = []
+
+    await dispatcher._handle_client_state(initial)  # noqa: SLF001
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    stream_starts = [msg for msg in conn.sent_json if isinstance(msg, StreamStartMessage)]
+    assert len(stream_starts) == 1
+    assert stream_starts[0].payload.player is not None
+    assert stream_starts[0].payload.player.sample_rate == 44100
+    assert conn.sent_binary
+    assert conn.dropped_pending_binary == []
 
 
 @pytest.mark.asyncio

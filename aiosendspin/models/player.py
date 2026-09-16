@@ -202,14 +202,14 @@ class PlayerStatePayload(SendspinModel):
     Required on the initial state message and empty when the player accepts no
     commands; omitted in incremental updates means unchanged.
     """
+    legacy_delay_key: str | None = None
+    """Pre-rename delay key the parser rewrote, recorded for the role to flag.
+    Not part of the wire schema (omitted when None)."""
     format: SupportedAudioFormat | None = None
     """Format the player currently prefers, one of its hello `supported_formats`.
 
     Absent means no preference: the server selects by `supported_formats` priority.
     """
-    legacy_delay_key: str | None = None
-    """Pre-rename delay key the parser rewrote, recorded for the role to flag.
-    Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:

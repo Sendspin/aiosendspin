@@ -1987,6 +1987,8 @@ class SendspinConnection:
             if self._initial_state_timeout_handle is not None:
                 self._initial_state_timeout_handle.cancel()
                 self._initial_state_timeout_handle = None
+            for role in self._client.active_roles:
+                role.on_initial_client_state(payload)
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
             self._flush_pending_binary()
