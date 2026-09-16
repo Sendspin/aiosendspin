@@ -8,11 +8,78 @@ preferred format and resolution.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from .base import SendspinConfig, SendspinModel
-from .types import ArtworkSource, PictureFormat
+from .types import ArtworkSource, BinaryMessageType, PictureFormat
+
+# Artwork binary flags (byte 1); bits 2-7 are reserved and must be zero.
+ARTWORK_FLAG_CANCEL = 0x01
+ARTWORK_FLAG_ANNOUNCE = 0x02
+ARTWORK_RESERVED_FLAGS = 0xFC
+# Largest artwork message: one Noise transport message without fragmentation.
+ARTWORK_MAX_MESSAGE_SIZE = 65519
+# type(1) + flags(1), the whole of a cancel and the header of a part.
+ARTWORK_PREFIX_SIZE = 2
+ARTWORK_MAX_PART_DATA_SIZE = ARTWORK_MAX_MESSAGE_SIZE - ARTWORK_PREFIX_SIZE
+# Announce (big-endian): type(1) + flags(1) + timestamp_us(8) + total_size(4) = 14 bytes
+_ARTWORK_ANNOUNCE_STRUCT = struct.Struct(">BBqI")
+ARTWORK_ANNOUNCE_SIZE = _ARTWORK_ANNOUNCE_STRUCT.size
+
+
+class ArtworkAnnounce(NamedTuple):
+    """Fields of an artwork announce message."""
+
+    channel: int
+    """Artwork channel number (0-3)."""
+    timestamp_us: int
+    """Server clock time in microseconds when the image should be displayed."""
+    total_size: int
+    """Size in bytes of the encoded image; 0 clears the channel."""
+
+
+def artwork_message_type(channel: int) -> int:
+    """Return the binary message type of artwork `channel` (0-3)."""
+    return BinaryMessageType.ARTWORK_CHANNEL_0.value + channel
+
+
+def pack_artwork_announce(channel: int, timestamp_us: int, total_size: int) -> bytes:
+    """Return the 14-byte announce of an image of `total_size` bytes on `channel`."""
+    return _ARTWORK_ANNOUNCE_STRUCT.pack(
+        artwork_message_type(channel), ARTWORK_FLAG_ANNOUNCE, timestamp_us, total_size
+    )
+
+
+def pack_artwork_parts(channel: int, image: bytes) -> list[bytes]:
+    """Return the part messages carrying `image` on `channel`, each within the size cap."""
+    prefix = bytes((artwork_message_type(channel), 0))
+    return [
+        prefix + image[offset : offset + ARTWORK_MAX_PART_DATA_SIZE]
+        for offset in range(0, len(image), ARTWORK_MAX_PART_DATA_SIZE)
+    ]
+
+
+def pack_artwork_cancel(channel: int) -> bytes:
+    """Return the cancel message for `channel`."""
+    return bytes((artwork_message_type(channel), ARTWORK_FLAG_CANCEL))
+
+
+def unpack_artwork_announce(data: bytes) -> ArtworkAnnounce:
+    """
+    Unpack an artwork announce message.
+
+    Raises ValueError when `data` is not a 14-byte artwork announce.
+    """
+    if len(data) != ARTWORK_ANNOUNCE_SIZE:
+        raise ValueError(f"Expected {ARTWORK_ANNOUNCE_SIZE} bytes, got {len(data)}")
+    message_type, flags, timestamp_us, total_size = _ARTWORK_ANNOUNCE_STRUCT.unpack(data)
+    channel = message_type - BinaryMessageType.ARTWORK_CHANNEL_0.value
+    if not 0 <= channel <= 3 or flags != ARTWORK_FLAG_ANNOUNCE:
+        raise ValueError(f"Not an artwork announce: type={message_type} flags={flags:#04x}")
+    return ArtworkAnnounce(channel, timestamp_us, total_size)
+
 
 # Pre-rename dimension keys, superseded by `width`/`height`.
 _DIMENSION_ALIASES = {"media_width": "width", "media_height": "height"}
