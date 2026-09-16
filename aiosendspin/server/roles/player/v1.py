@@ -198,10 +198,13 @@ class PlayerV1Role(Role):
 
     def on_connect(self) -> None:
         """Reset stream state and subscribe to PlayerGroupRole."""
+        state = self._state()
+        # No command may be sent until this connection's client/state declares it;
+        # cleared before subscribing so the group recomputes without the old commands.
+        state.state_supported_commands = []
         self._subscribe_to_group_role()
         self._stream_started = False
         self._last_sent_format = None
-        state = self._state()
         if state.buffer_reset_handle is not None:
             state.buffer_reset_handle.cancel()
             state.buffer_reset_handle = None
@@ -212,8 +215,6 @@ class PlayerV1Role(Role):
             state.buffer_tracker.reset()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
-        # No command may be sent until this connection's client/state declares it.
-        state.state_supported_commands = []
 
     def on_deactivate(self) -> None:
         """End the player stream when the role is deactivated while still connected."""
@@ -457,11 +458,15 @@ class PlayerV1Role(Role):
         self._state().state_supported_commands = value
 
     def get_player_volume(self) -> int | None:
-        """Return current volume for group aggregation."""
+        """Return current volume for group aggregation, or None when volume is not settable."""
+        if PlayerCommand.VOLUME not in self.state_supported_commands:
+            return None
         return self.volume
 
     def get_player_muted(self) -> bool | None:
-        """Return current mute state for group aggregation."""
+        """Return current mute state for group aggregation, or None when mute is not settable."""
+        if PlayerCommand.MUTE not in self.state_supported_commands:
+            return None
         return self.muted
 
     def set_player_volume(self, volume: int) -> None:
@@ -696,6 +701,8 @@ class PlayerV1Role(Role):
                 self._client.handle_availability_change(available=state.state != "external_source")
             )
 
+        group_values = (self.get_player_volume(), self.get_player_muted())
+
         # Applied before any event so listeners gate commands on this state.
         commands = state.supported_commands
         legacy_commands = self._legacy_hello_commands()
@@ -720,7 +727,9 @@ class PlayerV1Role(Role):
             self.muted = state.muted
             changed = True
 
-        if changed:
+        # A volume/mute support change alters the group aggregation even when the
+        # reported values stay the same.
+        if changed or group_values != (self.get_player_volume(), self.get_player_muted()):
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
 
         if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:

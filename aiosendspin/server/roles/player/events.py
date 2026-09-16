@@ -9,7 +9,7 @@ from aiosendspin.server.events import ClientRoleEvent, GroupRoleEvent
 
 @dataclass
 class VolumeChangedEvent(ClientRoleEvent):
-    """The volume or mute status of the player was changed."""
+    """The volume or mute status of the player, or whether either is settable, changed."""
 
     volume: int
     muted: bool
