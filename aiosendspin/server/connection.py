@@ -289,7 +289,8 @@ class SendspinConnection:
         self._queue_sequence: int = 0  # FIFO tie-breaker across all queues
         self._queue_size: int = 0
         # Outgoing message queues
-        self._priority_messages: deque[ServerMessage] = deque()
+        # Messages sent before every other queue; bytes are prepacked binary frames.
+        self._priority_messages: deque[ServerMessage | bytes] = deque()
         self._normal_messages: deque[ServerMessage] = deque()
         # Role queues: per role min-heap of (sort_ts, seq, entry)
         # Both binary and JSON messages for a role go through the same heap.
@@ -508,6 +509,10 @@ class SendspinConnection:
             epoch_exempt: Send the message even when a later stream boundary
                 invalidates the role's other queued binary.
         """
+        if epoch_exempt and role in self._retiring_roles:
+            # Must precede the removed role's teardown, which goes out ahead of server/activate.
+            self.send_priority_message(data)
+            return
         if (self._client is not None and self._client.awaits_role_state(role)) or (
             self.requires_initial_state() and not self._initial_state_received
         ):
@@ -709,8 +714,8 @@ class SendspinConnection:
         """Merge consecutive state-like messages where safe."""
         return existing.merge(incoming)
 
-    def send_priority_message(self, message: ServerMessage) -> None:
-        """Enqueue a high-priority message (processed before regular queue)."""
+    def send_priority_message(self, message: ServerMessage | bytes) -> None:
+        """Enqueue a high-priority message or binary frame (processed before regular queue)."""
         if len(self._priority_messages) >= MAX_PENDING_MSG:
             self._disconnect_due_to_queue_overflow("Priority message queue full, client too slow")
             return
@@ -2621,7 +2626,10 @@ class SendspinConnection:
             return False
         message = self._priority_messages.popleft()
         self._queue_size = max(self._queue_size - 1, 0)
-        await self._send_message(wsock, message)
+        if isinstance(message, bytes):
+            await wsock.send_bytes(message)
+        else:
+            await self._send_message(wsock, message)
         return True
 
     async def _process_normal_messages(

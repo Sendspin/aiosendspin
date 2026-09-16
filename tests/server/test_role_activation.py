@@ -7,10 +7,16 @@ import dataclasses
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, PropertyMock, patch
 
+import orjson
 import pytest
 from aiohttp import WSMessage, WSMsgType
 
-from aiosendspin.models.artwork import ArtworkChannel, ClientHelloArtworkSupport, ClientStateArtwork
+from aiosendspin.models.artwork import (
+    ArtworkChannel,
+    ClientHelloArtworkSupport,
+    ClientStateArtwork,
+    pack_artwork_cancel,
+)
 from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
@@ -41,6 +47,7 @@ from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
 from tests.server.test_multi_server import _FakeTransport, _MockServer
 
@@ -187,6 +194,41 @@ async def test_activate_tears_down_removed_roles_first() -> None:
     await conn._activate()  # noqa: SLF001
 
     assert [payload["type"] for payload in fake.sent_payloads()] == [
+        "stream/end",
+        "server/activate",
+    ]
+
+
+class _RecordingTransport(_FakeTransport):
+    """Transport double that also records binary frames, in send order with text frames."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames: list[str | bytes] = []
+
+    async def send_str(self, data: str) -> None:
+        await super().send_str(data)
+        self.frames.append(data)
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.frames.append(data)
+
+
+@pytest.mark.asyncio
+async def test_removed_artwork_role_cancels_its_transfer_before_stream_end() -> None:
+    """A transfer in flight on a removed artwork role is cancelled ahead of its stream/end."""
+    conn, _fake = await _connect(_hello([Roles.ARTWORK.value]))
+    artwork = _client(conn).roles_by_family("artwork")[0]
+    assert isinstance(artwork, ArtworkV1Role)
+    artwork._in_flight = 0  # noqa: SLF001
+    recorder = _RecordingTransport()
+    conn._transport = recorder  # type: ignore[assignment]  # noqa: SLF001
+
+    await _set_trusted(conn, trusted=False)
+    await _drain_priority(conn, recorder)
+
+    assert recorder.frames[0] == pack_artwork_cancel(0)
+    assert [orjson.loads(frame)["type"] for frame in recorder.frames[1:]] == [
         "stream/end",
         "server/activate",
     ]
