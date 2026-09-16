@@ -629,7 +629,10 @@ class VisualizerV1Role(Role):
             )
 
     def on_stream_clear(self) -> None:
-        """Reset extractor state, drop pending beats, notify client."""
+        """Reset extractor state, drop pending beats, notify client.
+
+        `stream/clear` is sent only for a stream this role announced.
+        """
         if self._extractor is not None:
             self._extractor.reset()
         self._pending_beats.clear()
@@ -644,7 +647,8 @@ class VisualizerV1Role(Role):
         self._pending_frames.clear()
         self._rearm_warmup_holdback()
         self._last_wire_emit_ts_us = None
-        self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
+        if self._stream_started:
+            self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
@@ -654,7 +658,11 @@ class VisualizerV1Role(Role):
             self._reissue_stream_start()
 
     def on_stream_end(self) -> None:
-        """End the visualizer stream and reset state."""
+        """End the visualizer stream and reset state.
+
+        `stream/end` is sent only for a stream this role announced.
+        """
+        announced = self._stream_started
         self._extractor = None
         self._stream_started = False
         self._pending_beats.clear()
@@ -662,7 +670,8 @@ class VisualizerV1Role(Role):
         self._cancel_release_timer()
         self._pending_frames.clear()
         self._holdback_active = False
-        self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
+        if announced:
+            self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
@@ -755,13 +764,21 @@ class VisualizerV1Role(Role):
         if request == self._request:
             return
         first_request = self._request is None
+        beats_were_wanted = self.wants_beats
         self._request = request
 
-        if not self._stream_started:
-            if first_request:
-                self._client.join_active_stream(self)
-            return
+        if self._stream_started:
+            self._apply_request_to_stream()
+        if self.wants_beats and not beats_were_wanted:
+            # The group role replays its beat schedule on join only to members
+            # that want beats, so rejoin it now that this role does.
+            self._unsubscribe_from_group_role()
+            self._subscribe_to_group_role()
+        if first_request and not self._stream_started:
+            self._client.join_active_stream(self)
 
+    def _apply_request_to_stream(self) -> None:
+        """Re-derive the active stream's config; send `stream/start` only when it changed."""
         if self._build_stream_config() == self._stream_config:
             self._sync_holdback()
             return

@@ -24,6 +24,7 @@ from aiosendspin.models.visualizer import (
 )
 from aiosendspin.noise.keys import Identity
 from aiosendspin.server.roles.base import AudioChunk
+from aiosendspin.server.roles.visualizer.group import VisualizerGroupRole
 from aiosendspin.server.roles.visualizer.packing import FLAG_DOWNBEAT
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
 from aiosendspin.server.server import SendspinServer
@@ -284,6 +285,7 @@ def test_on_stream_clear_sends_clear_message() -> None:
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     _connect(role)
+    role.on_stream_start()
     role.on_stream_clear()
 
     last = client.send_role_message.call_args.args[1]
@@ -296,6 +298,7 @@ def test_on_stream_end_sends_end_message() -> None:
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     _connect(role)
+    role.on_stream_start()
     role.on_stream_end()
 
     last = client.send_role_message.call_args.args[1]
@@ -977,6 +980,43 @@ def test_no_stream_before_state_object() -> None:
 
     assert _stream_start_count(client) == 0
     client.send_binary.assert_not_called()
+
+
+def test_clear_and_end_before_state_object_send_nothing() -> None:
+    """A stream cleared or ended before the state object arrives was never announced."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+    role.on_stream_start()
+    role.on_stream_clear()
+    role.on_stream_end()
+
+    client.send_role_message.assert_not_called()
+
+    role.on_client_state(_state(types=["loudness"], rate_max=30))
+    role.on_stream_start()
+    role.on_stream_clear()
+    role.on_stream_end()
+
+    sent = [type(call.args[1]) for call in client.send_role_message.call_args_list]
+    assert sent == [StreamStartMessage, StreamClearMessage, StreamEndMessage]
+
+
+def test_first_state_requesting_beats_replays_group_schedule() -> None:
+    """A state object that first requests `beat` receives the group's current schedule."""
+    client = _make_client_stub()
+    client.group._server.clock.now_us.return_value = 0  # noqa: SLF001
+    group_role = VisualizerGroupRole(client.group)
+    client.group.group_role.return_value = group_role
+    group_role.append_beat_schedule([BeatTiming(1_000_000), BeatTiming(1_500_000)])
+    role = VisualizerV1Role(client=client)
+    role.on_connect()
+
+    role.on_client_state(_state(types=["loudness", "beat"], rate_max=30))
+    role.on_stream_start()
+
+    assert "beat" in _last_stream_start(client).payload.visualizer.types
+    assert [b.timestamp_us for b in role._pending_beats] == [1_000_000, 1_500_000]  # noqa: SLF001
 
 
 def test_first_state_object_joins_running_stream() -> None:

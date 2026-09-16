@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from aiosendspin.models.core import ClientHelloPayload, StreamEndMessage
+from aiosendspin.models.core import ClientHelloPayload, ClientStatePayload, StreamEndMessage
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
     AudioCodec,
@@ -21,7 +21,7 @@ from aiosendspin.models.types import (
     PlayerCommand,
     Roles,
 )
-from aiosendspin.models.visualizer import ClientHelloVisualizerSupport
+from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, VisualizerStatePayload
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
@@ -91,9 +91,7 @@ def _hello(client_id: str, *, supported_roles: list[str]) -> ClientHelloPayload:
             supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
         )
     if Roles.VISUALIZER.value in supported_roles:
-        visualizer_support = ClientHelloVisualizerSupport(
-            types=["loudness", "beat"], buffer_capacity=65536, rate_max=30
-        )
+        visualizer_support = ClientHelloVisualizerSupport(buffer_capacity=65536)
     return ClientHelloPayload(
         client_id=client_id,
         name=client_id,
@@ -153,6 +151,13 @@ async def test_surviving_visualizer_gets_stream_end_without_active_stream() -> N
 
     group = player.group
     await group.add_client(visualizer)
+    # The visualizer stream was announced before the track transition kept it open.
+    role = visualizer.role(Roles.VISUALIZER.value)
+    assert role is not None
+    role.on_client_state(
+        ClientStatePayload(visualizer=VisualizerStatePayload(types=["loudness"], rate_max=30))
+    )
+    role.on_stream_start()
     # PLAYING with no PushStream mirrors the track-transition window.
     group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
     assert not group.has_active_stream
