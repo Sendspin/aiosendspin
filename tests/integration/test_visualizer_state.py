@@ -9,8 +9,9 @@ from contextlib import asynccontextmanager
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from aiosendspin.client.client import SendspinClient
 from aiosendspin.models.core import StreamStartMessage
-from aiosendspin.models.types import Roles
+from aiosendspin.models.types import GoodbyeReason, Roles
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
@@ -25,6 +26,7 @@ from aiosendspin.noise.trust_store import (
 )
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient as ServerClient
+from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.server import SendspinServer
 from tests.conftest import make_sdk_client
 
@@ -64,8 +66,7 @@ async def _await_visualizer_start(
             await asyncio.sleep(0.01)
 
 
-async def test_strict_server_streams_sdk_visualizer_state() -> None:
-    """A strict server admits the SDK visualizer and follows its client/state requests."""
+async def _paired_server() -> tuple[SendspinServer, Identity, InMemoryClientPairingStore]:
     server_store = InMemoryServerPairingStore()
     server = SendspinServer(
         loop=asyncio.get_running_loop(),
@@ -85,16 +86,33 @@ async def test_strict_server_streams_sdk_visualizer_state() -> None:
     await client_store.store_record(
         ClientPairingRecord(psk_id=psk_id_for(psk), psk=psk, server_id=server.id)
     )
+    return server, identity, client_store
+
+
+def _visualizer_client(
+    identity: Identity, client_store: InMemoryClientPairingStore
+) -> SendspinClient:
+    return make_sdk_client(
+        identity=identity,
+        pairing_store=client_store,
+        client_name="c",
+        roles=[Roles.VISUALIZER],
+        visualizer_support=ClientHelloVisualizerSupport(buffer_capacity=1_000_000),
+        visualizer_state=VisualizerStatePayload(types=["loudness"], rate_max=30),
+    )
+
+
+async def _commit_silence(stream: PushStream) -> None:
+    stream.prepare_audio(bytes(19_200), AudioFormat(sample_rate=48_000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+
+async def test_strict_server_streams_sdk_visualizer_state() -> None:
+    """A strict server admits the SDK visualizer and follows its client/state requests."""
+    server, identity, client_store = await _paired_server()
 
     async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.VISUALIZER],
-            visualizer_support=ClientHelloVisualizerSupport(buffer_capacity=1_000_000),
-            visualizer_state=VisualizerStatePayload(types=["loudness"], rate_max=30),
-        )
+        client = _visualizer_client(identity, client_store)
         starts: list[StreamStartMessage] = []
         client.add_stream_start_listener(starts.append)
         try:
@@ -102,10 +120,7 @@ async def test_strict_server_streams_sdk_visualizer_state() -> None:
             server_client = await _await_connected(server, identity.peer_id)
 
             stream = server_client.group.start_stream()
-            stream.prepare_audio(
-                bytes(19_200), AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
-            )
-            await stream.commit_audio()
+            await _commit_silence(stream)
 
             first = await _await_visualizer_start(starts, 1)
             assert first.types == ("loudness",)
@@ -118,5 +133,32 @@ async def test_strict_server_streams_sdk_visualizer_state() -> None:
             assert second.types == ("loudness", "peak")
             assert second.rate_max == 15
             assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_reconnect_into_streaming_group_starts_visualizer_stream() -> None:
+    """A visualizer reconnecting into a streaming group joins it from its initial state."""
+    server, identity, client_store = await _paired_server()
+
+    async with _serve(server) as url:
+        first_client = _visualizer_client(identity, client_store)
+        await first_client.connect(url)
+        server_client = await _await_connected(server, identity.peer_id)
+        stream = server_client.group.start_stream()
+        await _commit_silence(stream)
+        await first_client.disconnect(GoodbyeReason.RESTART)
+
+        client = _visualizer_client(identity, client_store)
+        starts: list[StreamStartMessage] = []
+        client.add_stream_start_listener(starts.append)
+        try:
+            await client.connect(url)
+            await _await_connected(server, identity.peer_id)
+            assert not stream.is_stopped
+            await _commit_silence(stream)
+
+            config = await _await_visualizer_start(starts, 1)
+            assert config.types == ("loudness",)
         finally:
             await client.disconnect()
