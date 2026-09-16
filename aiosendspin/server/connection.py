@@ -1816,7 +1816,7 @@ class SendspinConnection:
             )
         )
         self._client.set_active_roles(active_roles)
-        if self.requires_initial_state() and not self._initial_state_received:
+        if not self._initial_state_received:
             return  # The initial client/state releases every role, under its own timeout.
         if self._held_roles():
             self._cancel_activation_state_timeout()
@@ -2260,7 +2260,8 @@ class SendspinConnection:
             return
 
         # Validate before applying initial state.
-        is_initial = self.requires_initial_state() and not self._initial_state_received
+        # Pending from the hello exchange even if the roles that needed it were removed since.
+        is_initial = not self._initial_state_received
         if is_initial:
             self._flag_initial_state_deviations(payload)
         if payload.legacy_state_used:

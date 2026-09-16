@@ -107,7 +107,7 @@ def _full_state() -> ClientStatePayload:
 
 
 async def _connect(
-    hello: ClientHelloPayload, *, trusted: bool = True
+    hello: ClientHelloPayload, *, trusted: bool = True, send_state: bool = True
 ) -> tuple[SendspinConnection, _FakeTransport]:
     """Connect an unpaired client; a trusted one also delivers its initial client/state."""
     loop = asyncio.get_running_loop()
@@ -123,7 +123,7 @@ async def _connect(
     fake = _FakeTransport([WSMessage(WSMsgType.TEXT, ClientHelloMessage(hello).to_json(), "")])
     conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
     assert await conn._exchange_hellos()  # noqa: SLF001
-    if trusted:
+    if trusted and send_state:
         await conn._handle_client_state(_full_state())  # noqa: SLF001
     fake.sent.clear()
     return conn, fake
@@ -408,3 +408,18 @@ async def test_held_player_format_change_joins_the_stream_once() -> None:
 
     format_changed.assert_not_called()
     activated.assert_called_once_with(role)
+
+
+@pytest.mark.asyncio
+async def test_initial_state_completes_after_its_roles_were_removed() -> None:
+    """The first client/state is the initial one even when the roles that awaited it are gone."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    client = _client(conn)
+    assert conn._initial_state_timeout_handle is not None  # noqa: SLF001
+    await _set_trusted(conn, trusted=False)
+    assert not client.is_connected
+
+    await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
+
+    assert client.is_connected
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
