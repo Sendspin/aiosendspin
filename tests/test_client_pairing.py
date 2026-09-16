@@ -665,6 +665,33 @@ async def test_finalize_ack_persists_before_the_reader_moves_on() -> None:
         await connection.disconnect()
 
 
+async def test_malformed_pairing_message_fails_the_attempt_at_once() -> None:
+    """A pairing message that does not parse reaches the attempt, which fails on it."""
+
+    async def display(_pairing_code: str | None) -> None:
+        return
+
+    connection, server_ews = _live_connection(
+        PskCategory.SENTINEL, PairingSupport(pairing_code_display=display)
+    )
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.DYNAMIC_PAIRING_CODE)
+        )
+        assert await _received_types(server_ews, 1) == ["client/pair-init"]
+
+        await connection._handle_json_message(  # noqa: SLF001
+            json.dumps({"type": "server/pair-auth", "payload": {}})
+        )
+        async with asyncio.timeout(1):
+            while connection._pairing_task is not None:  # noqa: ASYNC110, SLF001
+                await asyncio.sleep(0)
+
+        assert not connection.connected
+    finally:
+        await connection.disconnect()
+
+
 async def test_attempt_runs_alongside_other_traffic(monkeypatch: pytest.MonkeyPatch) -> None:
     """During an attempt time sync flows both ways and pairing messages go to the attempt."""
     connection, server_ews = _live_connection(PskCategory.PAIRING)

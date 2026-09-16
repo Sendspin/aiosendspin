@@ -12,6 +12,7 @@ from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, assert_never
 
+import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.models import (
@@ -111,8 +112,6 @@ from aiosendspin.noise.models import (
     NoiseHandshakeMessage,
     PairAbortMessage,
     PairAbortPayload,
-    PairingMessage,
-    ServerPairFinalizeMessage,
 )
 from aiosendspin.noise.pairing import (
     PairingAbortError,
@@ -169,6 +168,17 @@ UNSYNCED_PLAY_LEAD_US: int = 500_000
 
 # psk_id of the Sentinel PSK — the client matches it during pairing-code pairing / discovery.
 _SENTINEL_PSK_ID: str = psk_id_for(SENTINEL_PSK)
+
+# Pairing message types a server sends; the reader hands them to the attempt in progress.
+_PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
+    {
+        "server/pair-init",
+        "server/pair-auth",
+        "server/pair-confirm",
+        "server/pair-finalize",
+        "pair/abort",
+    }
+)
 
 _ARTWORK_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
     {
@@ -1227,18 +1237,23 @@ class SendspinConnection:
             await self.disconnect()
 
     @staticmethod
-    def _parse_pairing_frame(data: str) -> PairingMessage | None:
-        """Return ``data`` parsed as a pairing message, or ``None`` if it is not one."""
-        with suppress(Exception):
-            return PairingMessage.from_json(data)
-        return None
+    def _peek_message_type(data: str) -> str | None:
+        """Return the envelope ``type`` of ``data``, or ``None`` if it has none."""
+        try:
+            decoded = orjson.loads(data)
+        except orjson.JSONDecodeError:
+            return None
+        message_type = decoded.get("type") if isinstance(decoded, dict) else None
+        return message_type if isinstance(message_type, str) else None
 
     async def _handle_json_message(self, data: str) -> None:
         try:
             message = ServerMessage.from_json(data)
         except Exception:
-            if (pairing_message := self._parse_pairing_frame(data)) is not None:
-                await self._route_pairing_message(data, pairing_message)
+            message_type = self._peek_message_type(data)
+            if message_type in _PAIRING_MESSAGE_TYPES:
+                # A malformed one still reaches the attempt, which fails on it.
+                await self._route_pairing_message(data, message_type)
                 return
             logger.exception("Failed to parse server message: %s", data)
             return
@@ -1276,14 +1291,14 @@ class SendspinConnection:
             case _:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
-    async def _route_pairing_message(self, data: str, message: PairingMessage) -> None:
+    async def _route_pairing_message(self, data: str, message_type: str) -> None:
         """Hand a pairing message to the attempt in progress, or discard it."""
         if self._pairing_queue is None or self._pairing_task is None:
             # In flight from before the server observed our pair/abort or leave.
             logger.debug("Discarding pairing message: no attempt in progress")
             return
         self._pairing_queue.put_nowait(WSMessage(WSMsgType.TEXT, data, ""))
-        if isinstance(message, ServerPairFinalizeMessage):
+        if message_type == "server/pair-finalize":
             # The re-handshake that follows needs the record the attempt persists on this ack.
             await asyncio.wait((self._pairing_task,))
 
