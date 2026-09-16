@@ -203,6 +203,22 @@ def test_server_hello_serializes_source_support_under_versioned_alias() -> None:
     ]
 
 
+def test_server_hello_carries_languages_alongside_source_support() -> None:
+    """Both optional server/hello fields round-trip together."""
+    hello = ServerHelloPayload(
+        name="s",
+        languages=["nl-NL", "en"],
+        source_support=ServerHelloSourceSupport(supported_codecs=[AudioCodec.PCM]),
+    )
+
+    assert hello.to_dict() == {
+        "name": "s",
+        "languages": ["nl-NL", "en"],
+        "source@v1_support": {"supported_codecs": ["pcm"]},
+    }
+    assert ServerHelloPayload.from_json(hello.to_json()) == hello
+
+
 def test_server_hello_omits_source_support_when_absent() -> None:
     """A server without source support neither sends nor expects the support object."""
     assert ServerHelloPayload(name="s").to_dict() == {"name": "s"}
