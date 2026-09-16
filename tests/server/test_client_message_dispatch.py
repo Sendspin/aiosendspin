@@ -11,7 +11,7 @@ from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.models.core import ClientLeaveMessage
 from aiosendspin.server.compliance import ClientComplianceError
-from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.connection import _MAX_WARNED_UNKNOWN_TYPES, SendspinConnection
 
 
 class _AsyncIterTransport:
@@ -69,7 +69,7 @@ async def test_client_leave_is_handed_to_the_client() -> None:
 
 
 async def test_client_leave_without_client_is_ignored() -> None:
-    """client/leave before a client is attached does nothing."""
+    """client/leave before a client is attached is dropped without raising."""
     conn, _ = _connection([])
     conn._client = None  # noqa: SLF001
 
@@ -103,6 +103,21 @@ async def test_unknown_message_type_is_warned_once_per_type(
     assert len(warnings) == 2
     assert "client/a" in warnings[0]
     assert "client/b" in warnings[1]
+
+
+async def test_unknown_message_type_warnings_are_capped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Distinct unknown types beyond the cap are ignored without a warning."""
+    types = [f"client/unknown-{i}" for i in range(_MAX_WARNED_UNKNOWN_TYPES + 1)]
+    conn, client = _connection([*(_unknown(t) for t in types), _LEAVE])
+
+    with caplog.at_level(logging.WARNING):
+        await conn._run_message_loop()  # noqa: SLF001
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == _MAX_WARNED_UNKNOWN_TYPES
+    client.handle_leave.assert_awaited_once_with()
 
 
 @pytest.mark.parametrize(
