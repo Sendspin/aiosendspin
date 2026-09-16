@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
+from mashumaro.exceptions import SuitableVariantNotFoundError
 
 from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw, unpack_binary_header
 from aiosendspin.models.core import (
@@ -51,6 +52,7 @@ from aiosendspin.models.core import (
     ClientGoodbyeMessage,
     ClientHelloMessage,
     ClientHelloPayload,
+    ClientLeaveMessage,
     ClientStateMessage,
     ClientStatePayload,
     ClientTimeMessage,
@@ -166,6 +168,9 @@ _WARN_INTERVAL_S = 30.0
 
 # Bound the wait for the writer to drain when quiescing.
 QUIESCE_TIMEOUT_S: float = 30.0
+
+# Distinct unknown message types warned about per connection; later ones log at debug.
+_MAX_WARNED_UNKNOWN_TYPES = 16
 
 _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
@@ -354,6 +359,7 @@ class SendspinConnection:
         self._pending_binary: list[tuple[str, int, Callable[[], None]]] = []
 
         self._last_goodbye_reason: GoodbyeReason | None = None
+        self._warned_unknown_types: set[str] = set()
         self._epoch_by_role: defaultdict[str, int] = defaultdict(int)
 
         # Timing tracking for binary frame logging (per role)
@@ -1913,12 +1919,8 @@ class SendspinConnection:
                 text = cast("str", msg.data)
                 try:
                     message = self._deserialize_client_message(text)
-                except Exception:
-                    message_type = self._peek_message_type(text)
-                    self._note_pairing_frame(message_type)
-                    if message_type in _PAIRING_MESSAGE_TYPES:
-                        # In flight from before the client observed the leave activate.
-                        self._logger.debug("Discarding pairing message: not in pairing")
+                except Exception as exc:
+                    if self._skip_undecodable_message(text, exc):
                         continue
                     raise
                 await self._handle_message(message, timestamp_us)
@@ -1948,6 +1950,34 @@ class SendspinConnection:
                 self._writer_task.cancel()
             if not cancelled:
                 self._connection_done.set()
+
+    def _skip_undecodable_message(self, text: str, exc: Exception) -> bool:
+        """Return whether a text message that failed to parse is skipped rather than fatal."""
+        message_type = self._peek_message_type(text)
+        self._note_pairing_frame(message_type)
+        if message_type in _PAIRING_MESSAGE_TYPES:
+            # In flight from before the client observed the leave activate.
+            self._logger.debug("Discarding pairing message: not in pairing")
+            return True
+        if not isinstance(message_type, str) or not (
+            isinstance(exc, SuitableVariantNotFoundError) and exc.variants_type is ClientMessage
+        ):
+            return False
+        self._log_unknown_message_type(message_type)
+        return True
+
+    def _log_unknown_message_type(self, message_type: str) -> None:
+        """Log an ignored message type, warning once per distinct type."""
+        if message_type in self._warned_unknown_types:
+            return
+        if len(self._warned_unknown_types) >= _MAX_WARNED_UNKNOWN_TYPES:
+            self._logger.debug("Ignoring unknown message type %s", message_type)
+            return
+        self._warned_unknown_types.add(message_type)
+        self._logger.warning(
+            "Ignoring unknown message type %s; the client may speak a newer spec revision",
+            message_type,
+        )
 
     def _route_inbound_binary(self, data: bytes) -> None:
         """Route an inbound binary chunk to the role that declares its message type."""
@@ -2031,6 +2061,12 @@ class SendspinConnection:
             self._flag_superseded_message_type(message.type)
             for role in self._client.active_roles:
                 role.on_client_stream_end()
+            return
+
+        if isinstance(message, ClientLeaveMessage):
+            if self._client is None:
+                return
+            await self._client.handle_leave()
             return
 
         if isinstance(message, ManagementResultMessage):

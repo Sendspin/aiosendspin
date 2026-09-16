@@ -18,6 +18,7 @@ from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ClientCommandPayload,
     ClientHelloPayload,
+    GroupUpdateServerMessage,
     StreamEndMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
@@ -159,7 +160,7 @@ async def test_external_source_moves_player_only_client_out_of_multi_group() -> 
 
     # Previous group bookkeeping was recorded for later rejoin.
     assert player_a._previous_group_id == shared_group_id  # noqa: SLF001
-    assert player_a._external_source_solo_group_id == player_a.group.group_id  # noqa: SLF001
+    assert player_a._leave_solo_group_id == player_a.group.group_id  # noqa: SLF001
 
     # The player role's on_stream_end fired stream/end on the connection.
     assert any(isinstance(msg, StreamEndMessage) for msg in conn_a.sent_messages)
@@ -217,7 +218,112 @@ async def test_switch_after_external_source_rejoins_previous_group() -> None:
     assert client.group is shared_group
     # Previous-group tracking is cleared after the rejoin.
     assert client._previous_group_id is None  # noqa: SLF001
-    assert client._external_source_solo_group_id is None  # noqa: SLF001
+    assert client._leave_solo_group_id is None  # noqa: SLF001
+
+
+def _record_availability_hooks(
+    client: SendspinClient, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[bool, bool]]:
+    calls: list[tuple[bool, bool]] = []
+    for role in client.active_roles:
+        monkeypatch.setattr(
+            role, "on_availability_changed", lambda old, new: calls.append((old, new))
+        )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_leave_moves_client_out_of_multi_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """client/leave moves the client to a stopped solo group and keeps it available."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    player_a, conn_a = _make_client(server, "player-a", supported_roles=[Roles.PLAYER.value])
+    player_b, _ = _make_client(server, "player-b", supported_roles=[Roles.PLAYER.value])
+    shared_group = player_a.group
+    await shared_group.add_client(player_b)
+    shared_group.start_stream()
+    hook_calls = _record_availability_hooks(player_a, monkeypatch)
+
+    conn_a.sent_messages.clear()
+    await player_a.handle_leave()
+
+    assert player_a.group is not shared_group
+    assert player_a.group.clients == [player_a]
+    assert player_a.group.state == PlaybackStateType.STOPPED
+    assert player_a._previous_group_id == shared_group.group_id  # noqa: SLF001
+    assert player_a._leave_solo_group_id == player_a.group.group_id  # noqa: SLF001
+    assert player_a.available is True
+    assert hook_calls == []
+    assert any(isinstance(msg, GroupUpdateServerMessage) for msg in conn_a.sent_messages)
+    assert any(isinstance(msg, StreamEndMessage) for msg in conn_a.sent_messages)
+
+
+@pytest.mark.asyncio
+async def test_leave_in_solo_group_stops_playback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """client/leave from a solo group stops playback and records no previous group."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    player, conn = _make_client(server, "player-solo", supported_roles=[Roles.PLAYER.value])
+    group = player.group
+    group.start_stream()
+    hook_calls = _record_availability_hooks(player, monkeypatch)
+
+    conn.sent_messages.clear()
+    await player.handle_leave()
+
+    assert player.group is group
+    assert group.state == PlaybackStateType.STOPPED
+    assert player._previous_group_id is None  # noqa: SLF001
+    assert player.available is True
+    assert hook_calls == []
+    assert any(isinstance(msg, StreamEndMessage) for msg in conn.sent_messages)
+
+
+@pytest.mark.asyncio
+async def test_repeated_leave_keeps_previous_group() -> None:
+    """A second client/leave from the solo group keeps the group to rejoin."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    client, _ = _make_client(server, "player-a", supported_roles=[Roles.PLAYER.value])
+    other, _ = _make_client(server, "player-b", supported_roles=[Roles.PLAYER.value])
+    shared_group = client.group
+    await shared_group.add_client(other)
+
+    await client.handle_leave()
+    solo_group = client.group
+    await client.handle_leave()
+
+    assert client.group is solo_group
+    assert client._previous_group_id == shared_group.group_id  # noqa: SLF001
+    assert client._leave_solo_group_id == solo_group.group_id  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_switch_after_leave_rejoins_previous_group() -> None:
+    """A switch command after client/leave rejoins the group the client left."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    client, _ = _make_client(
+        server,
+        "ctrl-player",
+        supported_roles=[Roles.PLAYER.value, Roles.CONTROLLER.value],
+    )
+    other, _ = _make_client(server, "player-other", supported_roles=[Roles.PLAYER.value])
+    shared_group = client.group
+    await shared_group.add_client(other)
+
+    await client.handle_leave()
+    assert client.group is not shared_group
+
+    await client.handle_switch_command()
+
+    assert client.group is shared_group
+    assert client._previous_group_id is None  # noqa: SLF001
+    assert client._leave_solo_group_id is None  # noqa: SLF001
 
 
 @pytest.mark.asyncio
