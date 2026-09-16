@@ -42,7 +42,7 @@ class PlayerGroupEvent(GroupRoleEvent):
 
 @dataclass
 class PlayerGroupVolumeChangedEvent(PlayerGroupEvent):
-    """The effective group volume changed."""
+    """The effective group volume changed; it is 100 while no player supports volume."""
 
     previous_volume: int
     volume: int
@@ -50,7 +50,7 @@ class PlayerGroupVolumeChangedEvent(PlayerGroupEvent):
 
 @dataclass
 class PlayerGroupMuteChangedEvent(PlayerGroupEvent):
-    """The effective group mute state changed."""
+    """The effective group mute state changed; it is False while no player supports mute."""
 
     previous_muted: bool
     muted: bool
