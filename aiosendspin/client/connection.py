@@ -785,24 +785,30 @@ class SendspinConnection:
             self._out_channel_suspended = True
             if suspend is not None:
                 await suspend(True)  # noqa: FBT003
+        try:
+            await self._emit_to_out_channels(pairing_code, pairing_format=pairing_format)
+        finally:
+            if pairing_code is None and self._out_channel_suspended:
+                self._out_channel_suspended = False
+                if suspend is not None:
+                    await suspend(False)  # noqa: FBT003
+
+    async def _emit_to_out_channels(
+        self, pairing_code: str | None, *, pairing_format: PairingCodeFormat
+    ) -> None:
+        """Hand ``pairing_code`` to the format's out-channels."""
         if pairing_format is PairingCodeFormat.QR_CODE:
             assert self._client.qr_code_display is not None  # validated as offered
             await self._client.qr_code_display(pairing_code)
-        else:
-            emissions = []
-            if self._client.pairing_code_display is not None:
-                emissions.append(self._client.pairing_code_display(pairing_code))
-            if self._client.pairing_code_speaker is not None:
-                emissions.append(
-                    self._client.pairing_code_speaker(
-                        pairing_code, languages=self._server_languages()
-                    )
-                )
-            await asyncio.gather(*emissions)
-        if pairing_code is None and self._out_channel_suspended:
-            self._out_channel_suspended = False
-            if suspend is not None:
-                await suspend(False)  # noqa: FBT003
+            return
+        emissions = []
+        if self._client.pairing_code_display is not None:
+            emissions.append(self._client.pairing_code_display(pairing_code))
+        if self._client.pairing_code_speaker is not None:
+            emissions.append(
+                self._client.pairing_code_speaker(pairing_code, languages=self._server_languages())
+            )
+        await asyncio.gather(*emissions)
 
     def _server_languages(self) -> tuple[str, ...]:
         """Operator language preferences declared in the server/hello."""

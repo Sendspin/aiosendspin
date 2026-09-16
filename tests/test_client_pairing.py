@@ -730,6 +730,27 @@ async def test_remote_abort_leaves_the_connection_in_pairing() -> None:
         await connection.disconnect()
 
 
+async def test_out_channel_resumes_when_releasing_the_code_fails() -> None:
+    """A failing release of the out-channel still resumes the suspended output."""
+    events: list[bool] = []
+
+    async def display(pairing_code: str | None) -> None:
+        if pairing_code is None:
+            raise RuntimeError("display gone")
+
+    async def suspend(active: bool) -> None:  # noqa: FBT001
+        events.append(active)
+
+    connection, _ws = _pairing_connection(
+        PairingSupport(pairing_code_display=display, out_channel_suspend=suspend)
+    )
+    await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
+    with pytest.raises(RuntimeError, match="display gone"):
+        await connection._emit_pairing_code(None, pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
+
+    assert events == [True, False]
+
+
 async def test_out_channel_is_suspended_while_the_code_is_emitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

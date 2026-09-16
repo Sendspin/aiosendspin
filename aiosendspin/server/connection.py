@@ -1054,7 +1054,9 @@ class SendspinConnection:
         """Run the pairing this connection was admitted for, alongside the message loops."""
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_message_queue = queue
-        self._start_message_loops()
+        # The writer starts once the first server/activate is out.
+        self._writer_paused = True
+        self._message_loop_task = create_task(self._run_message_loop())
         try:
             return await self._pair(QueuedEncryptedWebSocket(transport, queue))
         finally:
@@ -1781,12 +1783,13 @@ class SendspinConnection:
         if self._client is None or self._declared_activities is None:
             return
         assert self._client_id is not None
+        was_trusted = self._trusted_unpaired
         self._trusted_unpaired = (
             await self._server.pairing_store.trusted_unpaired(self._client_id) is not None
         )
         if self._in_pairing:
             # A server/activate would cancel the attempt; the one ending pairing carries the change.
-            if not self._trusted_unpaired:
+            if was_trusted and not self._trusted_unpaired:
                 await self.end_pairing()
             return
         active_roles = self._roles_to_activate
@@ -1920,7 +1923,7 @@ class SendspinConnection:
         return payload.result
 
     def _start_message_loops(self) -> None:
-        """Spawn the reader/writer tasks, unless they are already running."""
+        """Spawn the reader/writer tasks, unless connect-time pairing already started them."""
         if self._message_loop_task is not None:
             return
         self._writer_task = create_task(self._writer())
@@ -1932,17 +1935,19 @@ class SendspinConnection:
         The priority messages it has queued, such as a ``server/activate``, are sent first so
         that none reaches the client after a message the caller sends directly.
         """
-        # Cancelling mid-send is nonce-safe: no await separates encrypt() from the
-        # transport write.
         if self._writer_task is None or self._writer_task.done():
             return
-        self._writer_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self._writer_task
+        transport = self._transport
+        assert isinstance(transport, EncryptedWebSocket)
+        # Holding the send lock stops the writer between messages, never between the
+        # fragments of one.
+        async with transport.send_lock:
+            self._writer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._writer_task
         self._writer_task = None
         self._writer_paused = True
-        assert self._transport is not None
-        while await self._process_priority_messages(self._transport):
+        while await self._process_priority_messages(transport):
             pass
 
     def _resume_writer(self) -> None:

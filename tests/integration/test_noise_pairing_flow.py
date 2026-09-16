@@ -24,6 +24,7 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientStatePayload,
+    ServerActivatePayload,
     ServerHelloMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
@@ -2543,7 +2544,9 @@ async def test_live_pairing_keeps_the_writer_running_during_exchange() -> None:
             async def provide() -> str:
                 # Mid-exchange: server/pair-init is out and the server awaits the pairing code.
                 during["writer_running"] = conn._writer_task is not None  # noqa: SLF001
-                # An approval granted now waits for the end of pairing instead of cancelling it.
+                # A refresh that changes nothing leaves the attempt alone, and an approval
+                # granted now waits for the end of pairing instead of cancelling it.
+                await conn.refresh_trusted_unpaired()
                 await server.trust_unpaired(client_identity.peer_id)
                 replies = time_replies
                 await sdk_conn._send_time_message()  # noqa: SLF001
@@ -2638,6 +2641,14 @@ async def _pair_while_playing(
     sdk_conn = client._admitted_connection  # noqa: SLF001
     assert sdk_conn is not None
     assert sdk_conn.server_id is not None
+    activations: list[ServerActivatePayload] = []
+    apply_activation = sdk_conn._apply_activation  # noqa: SLF001
+
+    async def recording_apply_activation(payload: ServerActivatePayload) -> Any:
+        activations.append(payload)
+        return await apply_activation(payload)
+
+    sdk_conn._apply_activation = recording_apply_activation  # type: ignore[method-assign]  # noqa: SLF001
     conn = await _find_connection_by_client_id(server, client.identity.peer_id)
     server_client = conn._client  # noqa: SLF001
     assert server_client is not None
@@ -2663,6 +2674,9 @@ async def _pair_while_playing(
 
     await conn.initiate_pairing(attempt(provide))
     await _await_paired_session(client)
+    during["pairing_active_roles"] = [
+        payload.active_roles for payload in activations if payload.pairing is not None
+    ]
     during["after_roles"] = list(server_client.active_role_ids)
     during["after_stream"] = group.has_active_stream and server_client.group is group
     return during
@@ -2707,6 +2721,7 @@ async def test_live_pairing_runs_alongside_playback() -> None:
                 code,
             )
             assert during["activities"] == [Activity.PLAYBACK, Activity.PAIRING]
+            assert during["pairing_active_roles"] == [None]
             assert during["client_roles"] == ["player@v1"]
             assert during["server_roles"] == ["player@v1"]
             assert during["same_group"] is True
@@ -2811,6 +2826,7 @@ async def test_live_pairing_quiesces_a_legacy_generation_client() -> None:
                     code,
                 )
             assert during["activities"] == [Activity.PAIRING]
+            assert during["pairing_active_roles"] == [[]]
             assert during["client_roles"] == []
             assert during["server_roles"] == []
             assert during["stream"] is False

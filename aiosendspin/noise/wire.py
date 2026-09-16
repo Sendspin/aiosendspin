@@ -98,6 +98,11 @@ class EncryptedWebSocket:
         """The underlying ``NoiseSession`` (transport-mode)."""
         return self._session
 
+    @property
+    def send_lock(self) -> asyncio.Lock:
+        """Lock held while a whole message is sent; acquiring it waits for a message boundary."""
+        return self._send_lock
+
     def swap_session(self, new_session: NoiseSession) -> None:
         """Replace the transport session with ``new_session`` after a re-handshake."""
         if not new_session.handshake_complete:
@@ -295,6 +300,11 @@ class QueuedEncryptedWebSocket(EncryptedWebSocket):
     def session(self) -> NoiseSession:
         """The base transport's current session."""
         return self._base.session
+
+    @property
+    def send_lock(self) -> asyncio.Lock:
+        """The base transport's send lock."""
+        return self._base.send_lock
 
     def swap_session(self, new_session: NoiseSession) -> None:
         """Swap the base transport's session."""
