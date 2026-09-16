@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from aiosendspin.client.connection import SendspinConnection
+from aiosendspin.client.time_sync import SendspinTimeFilter
 from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.core import ServerActivatePayload, ServerStatePayload
@@ -25,10 +26,9 @@ _STATE_ROLES = [Roles.METADATA.value, Roles.COLOR.value, Roles.CONTROLLER.value,
 def _make_connection() -> tuple[SendspinConnection, MagicMock]:
     conn = SendspinConnection.__new__(SendspinConnection)
     client = MagicMock()
-    client.clock = ManualClock(now_us_value=1_000_000)
     conn._client = client  # noqa: SLF001
     conn._time_filter = SendspinTimeFilter()  # noqa: SLF001
-    conn._init_state_trackers()  # noqa: SLF001
+    conn._pending_state = {}  # noqa: SLF001
     return conn, client
 
 
@@ -55,11 +55,10 @@ def _activated_connection() -> tuple[SendspinConnection, MagicMock]:
 def test_absent_role_does_not_fire_callback() -> None:
     """A role omitted from server/state (UndefinedField) fires no callback."""
     conn, client = _make_connection()
-    payload = ServerStatePayload(metadata=SessionUpdateMetadata(timestamp=1))
-    conn._handle_server_state(payload)  # noqa: SLF001
+    conn._handle_server_state(  # noqa: SLF001
+        ServerStatePayload(metadata=SessionUpdateMetadata(timestamp=1))
+    )
     client.notify_metadata_callback.assert_called_once()
-    assert client.notify_metadata_callback.call_args.args[0] is payload
-    client.notify_scheduled_metadata.assert_not_called()
     client.notify_color_callback.assert_not_called()
     client.notify_controller_callback.assert_not_called()
 

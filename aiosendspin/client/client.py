@@ -123,7 +123,7 @@ OutputDelayCallback = Callable[[float], None]
 # only `timestamp_us` + `is_downbeat`.
 VisualizerCallback = Callable[[list[VisualizerFrame]], None]
 
-# Callback invoked when artwork becomes current.
+# Callback invoked when artwork binary frames are received.
 ArtworkCallback = Callable[[int, bytes], None]
 
 # Callback invoked with (message_id, data) for binary messages with IDs 192-255, which
@@ -206,17 +206,17 @@ class SendspinClient:
     """server_id of the last server admitted with the playback activity; the discovery tiebreak."""
 
     _metadata_callbacks: list[MetadataCallback]
-    """Callbacks invoked when metadata becomes current."""
+    """Callbacks invoked when server/state metadata becomes current."""
     _scheduled_metadata_callbacks: list[ScheduledMetadataCallback]
-    """Callbacks invoked when future metadata becomes pending."""
+    """Callbacks invoked when server/state metadata is scheduled."""
     _group_callbacks: list[GroupUpdateCallback]
     """Callbacks invoked on group/update messages."""
     _controller_callbacks: list[ControllerStateCallback]
     """Callbacks invoked on server/state messages."""
     _color_callbacks: list[ColorCallback]
-    """Callbacks invoked when color becomes current."""
+    """Callbacks invoked when server/state color becomes current."""
     _scheduled_color_callbacks: list[ScheduledColorCallback]
-    """Callbacks invoked when future color becomes pending."""
+    """Callbacks invoked when server/state color is scheduled."""
     _stream_start_callbacks: list[StreamStartCallback]
     """Callbacks invoked when a stream starts."""
     _stream_end_callbacks: list[StreamEndCallback]
@@ -1117,7 +1117,10 @@ class SendspinClient:
     # --- Listener registration ---
 
     def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:
-        """Add a listener invoked when metadata becomes current.
+        """Add a listener for server/state metadata becoming current.
+
+        A scheduled update is passed once its timestamp is reached, with the message that
+        carried it. A metadata object of None clears the metadata.
 
         The callback receives None when a server/activate removes the metadata role and its
         state is discarded.
@@ -1135,11 +1138,14 @@ class SendspinClient:
     def add_scheduled_metadata_listener(
         self, callback: ScheduledMetadataCallback
     ) -> Callable[[], None]:
-        """Add a listener invoked when future metadata becomes pending.
+        """Add a listener for server/state metadata scheduled to take effect later.
 
-        The callback receives the raw update. Keep at most one pending value,
-        replacing it on each callback. Remove it when ``add_metadata_listener``
-        fires, or when the role is cleared or disconnected.
+        At most one update is scheduled; each call replaces the previous one. The
+        scheduled update is dropped once the metadata listener fires or the connection
+        closes.
+
+        Returns:
+            A function that removes this listener when called.
         """
         self._scheduled_metadata_callbacks.append(callback)
         return lambda: (
@@ -1178,7 +1184,10 @@ class SendspinClient:
         )
 
     def add_color_listener(self, callback: ColorCallback) -> Callable[[], None]:
-        """Add a listener invoked when a color palette becomes current.
+        """Add a listener for server/state color becoming current.
+
+        A scheduled update is passed once its timestamp is reached, with the message that
+        carried it. A color object of None clears the palette.
 
         The callback receives None when a server/activate removes the color role and its
         state is discarded.
@@ -1192,11 +1201,14 @@ class SendspinClient:
         )
 
     def add_scheduled_color_listener(self, callback: ScheduledColorCallback) -> Callable[[], None]:
-        """Add a listener invoked when a future color palette becomes pending.
+        """Add a listener for server/state color scheduled to take effect later.
 
-        The callback receives the raw update. Keep at most one pending value,
-        replacing it on each callback. Remove it when ``add_color_listener`` fires,
-        or when the role is cleared or disconnected.
+        At most one update is scheduled; each call replaces the previous one. The
+        scheduled update is dropped once the color listener fires or the connection
+        closes.
+
+        Returns:
+            A function that removes this listener when called.
         """
         self._scheduled_color_callbacks.append(callback)
         return lambda: (
@@ -1355,7 +1367,7 @@ class SendspinClient:
         )
 
     def add_artwork_listener(self, callback: ArtworkCallback) -> Callable[[], None]:
-        """Add a listener invoked when artwork becomes current."""
+        """Add a listener for artwork binary frame events."""
         self._artwork_callbacks.append(callback)
         return lambda: (
             self._artwork_callbacks.remove(callback)
@@ -1392,7 +1404,7 @@ class SendspinClient:
                 logger.exception("Error in metadata callback %s", callback)
 
     def notify_scheduled_metadata(self, payload: ServerStatePayload) -> None:
-        """Dispatch newly pending metadata."""
+        """Dispatch a server/state with scheduled metadata to the registered listeners."""
         for callback in list(self._scheduled_metadata_callbacks):
             try:
                 callback(payload)
@@ -1424,7 +1436,7 @@ class SendspinClient:
                 logger.exception("Error in color callback %s", callback)
 
     def notify_scheduled_color(self, payload: ServerStatePayload) -> None:
-        """Dispatch a newly pending color palette."""
+        """Dispatch a server/state with scheduled color to the registered listeners."""
         for callback in list(self._scheduled_color_callbacks):
             try:
                 callback(payload)

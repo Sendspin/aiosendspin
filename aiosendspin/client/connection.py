@@ -6,7 +6,7 @@ import asyncio
 import base64
 import logging
 import struct
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from functools import partial
@@ -28,7 +28,6 @@ from aiosendspin.models.artwork import (
     StreamStartArtwork,
     unpack_artwork_announce,
 )
-from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -147,7 +146,6 @@ from .management import (
     with_storage,
 )
 from .models import AudioFormat, PCMFormat, ServerInfo
-from .scheduled_state import ScheduledStateUpdate
 from .time_sync import SendspinTimeFilter
 
 if TYPE_CHECKING:
@@ -228,6 +226,19 @@ class _PendingArtwork:
     # Image data arrived while the client was unavailable; the image is never shown.
     discarded: bool = False
     show_handle: asyncio.TimerHandle | None = None
+
+
+# server/state role objects whose future timestamp schedules them.
+_SCHEDULABLE_ROLE_OBJECTS: tuple[str, ...] = ("metadata", "color")
+
+
+@dataclass(slots=True)
+class _PendingState:
+    """A server/state role object held until its timestamp is reached on the local clock."""
+
+    payload: ServerStatePayload
+    timestamp_us: int
+    apply_handle: asyncio.TimerHandle
 
 
 def _malformed_artwork_message(payload: bytes) -> str | None:
@@ -346,14 +357,9 @@ class SendspinConnection:
     _group_state: GroupUpdateServerPayload | None = None
     """Latest group state received from server."""
     _server_state: ServerStatePayload | None = None
-    """Latest state of each role object received from server."""
-
-    _metadata_state: ScheduledStateUpdate[SessionUpdateMetadata]
-    """Confirmed metadata plus at most one pending update, applied at effective time."""
-    _color_state: ScheduledStateUpdate[SessionUpdateColor]
-    """Confirmed color plus at most one pending update, applied at effective time."""
-    _artwork_channels: dict[int, ScheduledStateUpdate[_ArtworkFrame]]
-    """Per-channel confirmed artwork plus at most one pending update."""
+    """Current state of each role object received from server."""
+    _pending_state: dict[str, _PendingState]
+    """Scheduled metadata and color updates, by role object name."""
 
     def __init__(self, client: SendspinClient) -> None:
         """Create a connection owned by ``client``, seeding per-connection state."""
@@ -381,6 +387,7 @@ class SendspinConnection:
         self._closed = asyncio.Event()
         self._artwork_pending = {}
         self._artwork_shown = set()
+        self._pending_state = {}
 
     @property
     def connected(self) -> bool:
@@ -1054,6 +1061,8 @@ class SendspinConnection:
         self._noise_psk = None
         self._group_state = None
         self._server_state = None
+        for name in list(self._pending_state):
+            self._discard_pending_state(name)
         self._stream_active = False
         self._current_audio_format = None
         self._current_player = None
@@ -1066,10 +1075,6 @@ class SendspinConnection:
         self._current_visualizer_config = None
         self._activities = []
         self._active_roles = []
-        self._metadata_state.discard_pending()
-        self._color_state.discard_pending()
-        for state in self._artwork_channels.values():
-            state.discard_pending()
 
         self._closed.set()
         self._client.on_connection_closed(self)
@@ -1569,9 +1574,11 @@ class SendspinConnection:
         was_source_active = self._is_role_active("source")
         was_artwork_active = self._is_role_active("artwork")
         was_visualizer_active = self._is_role_active("visualizer")
+        previous_roles = self._active_roles
         if (reason := await self._apply_activation(payload)) is not None:
             await self.goodbye_and_disconnect(reason)
             return
+        self._discard_removed_role_state(previous_roles)
         if self.is_pairing:
             self._start_pairing_attempt()
         self._resume_time_sync()
@@ -1607,10 +1614,11 @@ class SendspinConnection:
             - (payload.server_transmitted - payload.server_received)
         ) / 2
         self._time_filter.update(round(offset), round(delay), now_us)
-        self._metadata_state.reschedule_pending()
-        self._color_state.reschedule_pending()
-        for state in self._artwork_channels.values():
-            state.reschedule_pending()
+        for name, pending in self._pending_state.items():
+            pending.apply_handle.cancel()
+            pending.apply_handle = self._call_at_server_time(
+                pending.timestamp_us, partial(self._apply_pending_state, name)
+            )
         if (
             not was_synchronized
             and self._time_filter.is_synchronized
@@ -1743,31 +1751,76 @@ class SendspinConnection:
             notifiers[family](None)
 
     def _handle_server_state(self, payload: ServerStatePayload) -> None:
-        self._server_state = (
-            payload if self._server_state is None else self._server_state.merge(payload)
-        )
-        if not isinstance(payload.controller, UndefinedField):
-            self._client.notify_controller_callback(payload)
-        if not isinstance(payload.metadata, UndefinedField):
-            if payload.metadata is None:
-                self._metadata_state.clear_immediately(
-                    lambda: self._client.notify_metadata_callback(payload)
-                )
-            elif self._metadata_state.handle_update(
-                payload.metadata,
-                lambda: self._client.notify_metadata_callback(payload),
-            ):
+        current = payload
+        for name in _SCHEDULABLE_ROLE_OBJECTS:
+            state = getattr(payload, name)
+            if isinstance(state, UndefinedField):
+                continue
+            self._discard_pending_state(name)
+            if state is None or self._local_delay_us(state.timestamp) <= 0:
+                continue
+            self._pending_state[name] = _PendingState(
+                payload=payload,
+                timestamp_us=state.timestamp,
+                apply_handle=self._call_at_server_time(
+                    state.timestamp, partial(self._apply_pending_state, name)
+                ),
+            )
+            current = replace(current, **{name: undefined_field()})
+            if name == "metadata":
                 self._client.notify_scheduled_metadata(payload)
-        if not isinstance(payload.color, UndefinedField):
-            if payload.color is None:
-                self._color_state.clear_immediately(
-                    lambda: self._client.notify_color_callback(payload)
-                )
-            elif self._color_state.handle_update(
-                payload.color,
-                lambda: self._client.notify_color_callback(payload),
-            ):
+            else:
                 self._client.notify_scheduled_color(payload)
+        self._apply_server_state(current, payload)
+
+    def _apply_server_state(self, current: ServerStatePayload, payload: ServerStatePayload) -> None:
+        """Make the role objects in `current` current, notifying listeners with `payload`."""
+        self._server_state = (
+            current if self._server_state is None else self._server_state.merge(current)
+        )
+        if not isinstance(current.controller, UndefinedField):
+            self._client.notify_controller_callback(payload)
+        if not isinstance(current.metadata, UndefinedField):
+            self._client.notify_metadata_callback(payload)
+        if not isinstance(current.color, UndefinedField):
+            self._client.notify_color_callback(payload)
+
+    def _apply_pending_state(self, name: str) -> None:
+        """Make the scheduled update of role object `name` current."""
+        pending = self._pending_state.pop(name)
+        state = getattr(pending.payload, name)
+        self._apply_server_state(ServerStatePayload(**{name: state}), pending.payload)
+
+    def _discard_pending_state(self, name: str) -> None:
+        """Discard the scheduled update of role object `name`, if any."""
+        if (pending := self._pending_state.pop(name, None)) is not None:
+            pending.apply_handle.cancel()
+
+    def _discard_removed_role_state(self, previous_roles: list[str]) -> None:
+        """Discard current and scheduled state of role objects whose role was removed."""
+        for role_id in previous_roles:
+            name = role_family(role_id)
+            if name not in _SCHEDULABLE_ROLE_OBJECTS or role_id in self._active_roles:
+                continue
+            had_pending = name in self._pending_state
+            self._discard_pending_state(name)
+            current = None if self._server_state is None else getattr(self._server_state, name)
+            if had_pending or not isinstance(current, UndefinedField | None):
+                cleared = ServerStatePayload(**{name: None})
+                self._apply_server_state(cleared, cleared)
+
+    def _local_delay_us(self, server_timestamp_us: int) -> int:
+        """Return how long until `server_timestamp_us` on the local clock, 0 when unsynced."""
+        if self._time_filter.count == 0:
+            return 0
+        return self._time_filter.compute_client_time(server_timestamp_us) - self.now_us()
+
+    def _call_at_server_time(
+        self, server_timestamp_us: int, callback: Callable[[], None]
+    ) -> asyncio.TimerHandle:
+        """Call `callback` once `server_timestamp_us` is reached on the local clock."""
+        delay_us = max(self._local_delay_us(server_timestamp_us), 0)
+        return self._client.loop.call_later(delay_us / 1_000_000, callback)
 
     async def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
@@ -2125,16 +2178,3 @@ class SendspinConnection:
     def now_us(self) -> int:
         """Return current timestamp from the client's clock in microseconds."""
         return self._client.clock.now_us()
-
-    def _map_to_client_time(self, server_timestamp_us: int) -> int:
-        """Map a server-clock timestamp to the client's local clock, for scheduling.
-
-        Unlike `compute_play_time`, this applies no static delay or unsynchronized
-        lead time: it is used to classify server/state and artwork timestamps as
-        future/now/past, not to schedule audio playback.
-        """
-        return self._time_filter.compute_client_time(server_timestamp_us)
-
-    def _commit_artwork(self, channel: int, frame: _ArtworkFrame | None) -> None:
-        payload = b"" if frame is None or frame.image_data is None else frame.image_data
-        self._client.notify_artwork(channel, payload)

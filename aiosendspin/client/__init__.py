@@ -41,6 +41,8 @@ __all__ = [
     "PairingCodeSpeaker",
     "PairingSupport",
     "QRCodeDisplay",
+    "ScheduledColorCallback",
+    "ScheduledMetadataCallback",
     "SendspinClient",
     "SendspinTimeFilter",
     "ServerInfo",
