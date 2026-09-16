@@ -212,6 +212,8 @@ class PlayerV1Role(Role):
             state.buffer_tracker.reset()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
+        # No command may be sent until this connection's client/state declares it.
+        state.state_supported_commands = []
 
     def on_deactivate(self) -> None:
         """End the player stream when the role is deactivated while still connected."""
@@ -447,7 +449,7 @@ class PlayerV1Role(Role):
 
     @property
     def state_supported_commands(self) -> list[PlayerCommand]:
-        """Commands supported via client/state (e.g., set_output_delay)."""
+        """Commands the server may currently send this player, from its latest client/state."""
         return self._state().state_supported_commands
 
     @state_supported_commands.setter
@@ -608,8 +610,7 @@ class PlayerV1Role(Role):
 
     def set_volume(self, volume: int) -> None:
         """Set the volume of this player."""
-        support = self._client.info.player_support
-        if not support or PlayerCommand.VOLUME not in support.supported_commands:
+        if PlayerCommand.VOLUME not in self.state_supported_commands:
             return
 
         self._client.send_message(
@@ -625,8 +626,7 @@ class PlayerV1Role(Role):
 
     def set_mute(self, muted: bool) -> None:  # noqa: FBT001
         """Set the mute state of this player."""
-        support = self._client.info.player_support
-        if not support or PlayerCommand.MUTE not in support.supported_commands:
+        if PlayerCommand.MUTE not in self.state_supported_commands:
             return
 
         self._client.send_message(
@@ -654,8 +654,15 @@ class PlayerV1Role(Role):
             or player.min_buffer_ms is None
         ):
             reasons.append("omitted required player timing fields")
-        support = self._client.info.player_support
-        commands = support.supported_commands if support else []
+        commands = player.supported_commands
+        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+        # A pre-#177 hello's commands count as declared; that client is already flagged.
+        legacy_commands = self._legacy_hello_commands()
+        if legacy_commands is not None:
+            commands = [*legacy_commands, *(commands or [])]
+        elif commands is None:
+            reasons.append("omitted required supported_commands")
+            commands = []
         if PlayerCommand.VOLUME in commands and player.volume is None:
             reasons.append("omitted volume despite declaring the volume command")
         if PlayerCommand.MUTE in commands and player.muted is None:
@@ -667,15 +674,9 @@ class PlayerV1Role(Role):
         state = payload.player
         if state is None:
             return []
-        support = self._client.info.player_support
-        commands = support.supported_commands if support else []
         reasons: list[str] = []
         if state.state is not None:
             reasons.append("used legacy player.state instead of top-level available")
-        if state.volume is not None and PlayerCommand.VOLUME not in commands:
-            reasons.append("sent volume without declaring the volume command")
-        if state.muted is not None and PlayerCommand.MUTE not in commands:
-            reasons.append("sent muted without declaring the mute command")
         if state.legacy_delay_key:
             reasons.append(f"used the pre-rename '{state.legacy_delay_key}' key")
         if state.supported_commands and PlayerCommand.SET_STATIC_DELAY in state.supported_commands:
@@ -695,27 +696,32 @@ class PlayerV1Role(Role):
                 self._client.handle_availability_change(available=state.state != "external_source")
             )
 
-        support = self._client.info.player_support
-        commands = support.supported_commands if support else []
+        # Applied before any event so listeners gate commands on this state.
+        commands = state.supported_commands
+        legacy_commands = self._legacy_hello_commands()
+        if legacy_commands is not None:
+            # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+            # A pre-#177 state list carries only delay commands, so it extends the
+            # hello's volume/mute rather than replacing them, from the first state on.
+            current = self.state_supported_commands if commands is None else commands
+            commands = list(dict.fromkeys([*legacy_commands, *current]))
+        if commands is not None:
+            self.state_supported_commands = list(commands)
+
+        # Reported volume and mute apply even when not settable: supported_commands
+        # only governs which commands the server may send.
         changed = False
 
-        if (
-            state.volume is not None
-            and PlayerCommand.VOLUME in commands
-            and self.volume != state.volume
-        ):
+        if state.volume is not None and self.volume != state.volume:
             self.volume = state.volume
             changed = True
 
-        if state.muted is not None and PlayerCommand.MUTE in commands and self.muted != state.muted:
+        if state.muted is not None and self.muted != state.muted:
             self.muted = state.muted
             changed = True
 
         if changed:
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
-
-        if state.supported_commands is not None:
-            self.state_supported_commands = state.supported_commands
 
         if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
             self.output_delay_ms = state.output_delay_ms
@@ -863,6 +869,12 @@ class PlayerV1Role(Role):
         self._client.group.on_role_format_changed(self)
 
     # ---- Internal helpers ----
+
+    def _legacy_hello_commands(self) -> list[PlayerCommand] | None:
+        """Return the commands a pre-#177 hello declared, or None when it declared none."""
+        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+        support = self._client.info.player_support
+        return support.supported_commands if support is not None else None
 
     def _state(self) -> PlayerPersistentState:
         if self._cached_state is None:

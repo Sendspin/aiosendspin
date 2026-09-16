@@ -286,6 +286,82 @@ class TestEncryptedActivities:
             assert await conn._exchange_hellos() is True  # noqa: SLF001
         assert "unversioned support keys" in caplog.text
 
+    @staticmethod
+    def _player_hello(**support_extra: object) -> str:
+        return orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "client-1",
+                    "supported_roles": ["player@v1"],
+                    "player@v1_support": {
+                        "supported_formats": [
+                            {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+                        ],
+                        "buffer_capacity": 100_000,
+                        **support_extra,
+                    },
+                },
+            }
+        ).decode()
+
+    @staticmethod
+    def _long_term_connection(server: _MockServer, raw_hello: str) -> SendspinConnection:
+        conn = SendspinConnection(server, wsock_client=AsyncMock())
+        psk = generate_psk()
+        conn._client_id = "client-1"  # noqa: SLF001
+        conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+            psk_id=psk_id_for(psk),
+            psk=psk,
+            category=PskCategory.LONG_TERM,
+            counterparty_id="client-1",
+        )
+        conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw_hello, "")])  # type: ignore[assignment]  # noqa: SLF001
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_strict_server_admits_hello_without_player_commands(self) -> None:
+        """A spec-shaped player hello without supported_commands is admitted by a strict server."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = self._long_term_connection(strict_server, self._player_hello())
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "player@v1" in conn._negotiated_roles  # noqa: SLF001
+
+    # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_hello_player_commands_logged_on_ingest(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A hello still declaring player supported_commands is admitted and flagged."""
+        conn = self._long_term_connection(
+            mock_server, self._player_hello(supported_commands=["volume"])
+        )
+
+        with caplog.at_level("WARNING"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "declared player supported_commands" in caplog.text
+        client = mock_server._clients["client-1"]  # noqa: SLF001
+        support = client.info.player_support
+        assert support is not None
+        assert support.supported_commands == [PlayerCommand.VOLUME]
+
+    # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_strict_server_rejects_hello_player_commands(self) -> None:
+        """When noncompliance is disallowed, a hello declaring player commands is rejected."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = self._long_term_connection(strict_server, self._player_hello(supported_commands=[]))
+
+        assert await conn._exchange_hellos() is False  # noqa: SLF001
+        assert "client-1" not in strict_server._clients  # noqa: SLF001
+
     @pytest.mark.asyncio
     async def test_strict_server_excludes_draft_visualizer_without_rejecting(self) -> None:
         """Strict mode does not activate the legacy draft wire, but admits the client."""

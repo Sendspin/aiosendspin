@@ -8,6 +8,7 @@ import logging
 import struct
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, assert_never
 
@@ -262,6 +263,7 @@ class SendspinConnection:
         self._reported_available: bool = True
         self._reported_volume = client.initial_volume
         self._reported_muted = client.initial_muted
+        self._reported_supported_commands: frozenset[PlayerCommand] = frozenset()
         self._reported_source_signal: SignalState | None = None
         self._selected_pairing: ActivatePairing | None = None
         self._pairing_index = 0
@@ -879,6 +881,7 @@ class SendspinConnection:
         await self._update_reported_available(available=available)
         self._reported_volume = volume
         self._reported_muted = muted
+        self._reported_supported_commands = frozenset(self._client.state_supported_commands)
         message = ClientStateMessage(
             payload=ClientStatePayload(
                 available=available,
@@ -888,7 +891,7 @@ class SendspinConnection:
                     output_delay_ms=round(self._output_delay_us / 1_000),
                     required_lead_time_ms=round(self._client.required_lead_time_ms),
                     min_buffer_ms=round(self._client.min_buffer_ms),
-                    supported_commands=self._client.state_supported_commands or None,
+                    supported_commands=list(self._client.state_supported_commands),
                 ),
             )
         )
@@ -1017,11 +1020,16 @@ class SendspinConnection:
         return self._time_filter.is_synchronized
 
     async def _build_client_hello(self) -> ClientHelloMessage:
+        player_support = self._client.player_support
+        if player_support is not None:
+            # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+            # Player commands are declared in client/state, never in the hello.
+            player_support = replace(player_support, supported_commands=None)
         payload = ClientHelloPayload(
             name=self._client.client_name,
             supported_roles=[r.value for r in self._client.roles],
             device_info=self._client.device_info,
-            player_support=self._client.player_support,
+            player_support=player_support,
             artwork_support=self._client.artwork_support,
             visualizer_support=self._client.visualizer_support,
             source_support=self._client.source_support,
@@ -1368,6 +1376,14 @@ class SendspinConnection:
 
     def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
+        if (
+            payload.player is not None
+            and payload.player.command not in self._reported_supported_commands
+        ):
+            logger.debug("Ignoring unsupported player command: %s", payload.player.command)
+            if payload.source is None:
+                return
+            payload = replace(payload, player=None)
         if payload.player is not None:
             player_cmd = payload.player
             if (

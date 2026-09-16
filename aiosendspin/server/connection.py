@@ -1108,6 +1108,12 @@ class SendspinConnection:
             )
         if client_info.artwork_support is not None:
             self._flag_legacy_artwork_wire(client_info.artwork_support)
+        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+        player_support = client_info.player_support
+        if player_support is not None and player_support.supported_commands is not None:
+            self._flag_noncompliance(
+                "client/hello declared player supported_commands, superseded by client/state"
+            )
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
                 "Client offered roles/versions this server does not implement: %s", unimplemented
