@@ -2671,7 +2671,12 @@ class SendspinConnection:
     async def _wait_for_writer_work(self, now_us: int) -> None:
         """Sleep until new work arrives or next delayed role becomes ready."""
         self._writer_wakeup.clear()
-        if self._priority_messages or self._normal_messages or self._ready_roles:
+        if (
+            self._writer_stopping
+            or self._priority_messages
+            or self._normal_messages
+            or self._ready_roles
+        ):
             return
 
         sleep_s = None

@@ -1109,3 +1109,16 @@ async def test_pause_writer_stops_between_messages_not_fragments() -> None:
             await asyncio.sleep(0)
     assert b'"group_name":"next"' in client_session.decrypt(raw.sent[-1])  # type: ignore[arg-type]
     await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_writer_wait_returns_once_a_stop_is_requested() -> None:
+    """A stop requested while the writer yielded is not lost when it next waits for work."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    conn = SendspinConnection(server, wsock_client=MagicMock())
+    conn._writer_stopping = True  # noqa: SLF001
+    conn._writer_wakeup.set()  # noqa: SLF001
+
+    async with asyncio.timeout(1):
+        await conn._wait_for_writer_work(0)  # noqa: SLF001
