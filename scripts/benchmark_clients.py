@@ -373,7 +373,9 @@ async def _connect_clients(
         stats = AudioStats()
         audio_stats[client_id] = stats
 
-        def _on_audio_chunk(timestamp_us: int, payload: bytes, fmt: object) -> None:
+        def _on_audio_chunk(
+            timestamp_us: int, payload: bytes, fmt: object, _send_ahead: int
+        ) -> None:
             stats.chunks += 1
             stats.bytes += len(payload)
             if stats.first_ts_us is None:
