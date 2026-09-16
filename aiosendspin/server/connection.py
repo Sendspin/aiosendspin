@@ -133,9 +133,8 @@ from aiosendspin.noise.pairing import (
     run_pairing_psk_server,
     run_static_pairing_code_server,
 )
-from aiosendspin.noise.session import NoiseSession
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
-from aiosendspin.noise.wire import EncryptedWebSocket
+from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 from aiosendspin.util import create_task
 
 from .client import SendspinClient
@@ -232,25 +231,6 @@ class _RoleQueueEntry:
     enqueued_at_us: int = 0
 
 
-class _QueuedTransport(EncryptedWebSocket):
-    """``EncryptedWebSocket`` whose ``receive()`` pulls from a queue."""
-
-    def __init__(self, base: EncryptedWebSocket, queue: asyncio.Queue[WSMessage]) -> None:
-        super().__init__(base._ws, base._session)  # noqa: SLF001
-        self._base = base
-        self._queue = queue
-        # Only the base decodes, so the legacy receive callback stays there.
-        # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
-        self.legacy_fragment_framing = base.legacy_fragment_framing
-
-    def swap_session(self, session: NoiseSession) -> None:
-        super().swap_session(session)
-        self._base.swap_session(session)
-
-    async def receive(self) -> WSMessage:
-        return await self._queue.get()
-
-
 class SendspinConnection:
     """A single WebSocket connection to a Sendspin client device."""
 
@@ -282,7 +262,6 @@ class SendspinConnection:
         self._pairing_attempt = pairing_attempt
         self._pairing_task: asyncio.Task[bool] | None = None
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
-        self._pairing_messages_started = False
         self._pairing_index = 0
         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
         self._sent_psk_pair_init = False
@@ -325,6 +304,8 @@ class SendspinConnection:
         self._writer_wakeup = asyncio.Event()
         self._writer_idle = asyncio.Event()
         self._writer_task: asyncio.Task[None] | None = None
+        self._writer_paused = False
+        self._writer_stopping = False
         self._message_loop_task: asyncio.Task[None] | None = None
 
         self._noise_psk: ResolvedPsk | None = None
@@ -336,6 +317,7 @@ class SendspinConnection:
         self._client: SendspinClient | None = None
         self._trusted_unpaired = False
         self._credential_mismatch = False
+        self._moved_off_record = False
         # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
         # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
         # Set when the client/hello tripped the spec-pr-177 player commands tolerance.
@@ -926,8 +908,8 @@ class SendspinConnection:
 
     @property
     def _pairing_in_progress(self) -> bool:
-        """Whether operator-initiated pairing is currently being executed."""
-        return self._pairing_message_queue is not None
+        """Whether the connection is in pairing, including between attempts and on connect."""
+        return self._in_pairing or self._pairing_message_queue is not None
 
     async def _establish_transport(
         self, raw: web.WebSocketResponse | ClientWebSocketResponse
@@ -1042,7 +1024,7 @@ class SendspinConnection:
             if self._is_pairing():
                 assert isinstance(transport, EncryptedWebSocket)
                 try:
-                    if not await self._pair(transport):
+                    if not await self._pair_on_connect(transport):
                         return False
                 except ClientComplianceError:
                     await self.disconnect(retry_connection=False)
@@ -1068,6 +1050,18 @@ class SendspinConnection:
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
         return True
+
+    async def _pair_on_connect(self, transport: EncryptedWebSocket) -> bool:
+        """Run the pairing this connection was admitted for, alongside the message loops."""
+        queue: asyncio.Queue[WSMessage] = asyncio.Queue()
+        self._pairing_message_queue = queue
+        # The writer starts once the first server/activate is out.
+        self._writer_paused = True
+        self._message_loop_task = create_task(self._run_message_loop())
+        try:
+            return await self._pair(QueuedEncryptedWebSocket(transport, queue))
+        finally:
+            self._pairing_message_queue = None
 
     async def _send_server_hello_and_recv(self, transport: Transport) -> bool:
         """Send ``server/hello`` and receive+ingest ``client/hello``."""
@@ -1168,7 +1162,7 @@ class SendspinConnection:
                 "Client offered roles/versions this server does not implement: %s", unimplemented
             )
 
-        if self._noise_psk is not None and self._noise_psk.category is PskCategory.SENTINEL:
+        if self._noise_psk is not None and self._noise_psk.category is not PskCategory.LONG_TERM:
             self._trusted_unpaired = (
                 await self._server.pairing_store.trusted_unpaired(client_id) is not None
             )
@@ -1325,9 +1319,14 @@ class SendspinConnection:
             return False
         if self._noise_psk.category is PskCategory.LONG_TERM:
             return True
-        if self._noise_psk.category is PskCategory.SENTINEL:
-            return self._client_info.unpaired_access.enabled and self._trusted_unpaired
-        return False
+        if self._moved_off_record:
+            # A pairing attempt re-keyed the session away from the record this server holds.
+            return False
+        # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+        # Legacy-generation clients admit only ['pairing'] on the pairing PSK.
+        if self._noise_psk.category is PskCategory.PAIRING and self._legacy_hello:
+            return False
+        return self._client_info.unpaired_access.enabled and self._trusted_unpaired
 
     @property
     def _management_capable(self) -> bool:
@@ -1428,6 +1427,9 @@ class SendspinConnection:
     async def initiate_pairing(self, attempt: PairingAttempt) -> None:
         """Run a pairing attempt on a connection.
 
+        An unpaired connection keeps its playback, roles and group during the attempt; a
+        long-term paired one leaves playback and its roles first.
+
         A pair abort raises and leaves the connection for a retry or ``end_pairing``.
         A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
         after leaving pairing, also keeping the connection.
@@ -1439,14 +1441,18 @@ class SendspinConnection:
         if not isinstance(transport, EncryptedWebSocket):
             raise PairingError("cannot pair over an unencrypted connection")
         if not self._in_pairing:
-            await self._quiesce_for_pairing()
-            await self._pause_writer()
-            self._pairing_message_queue = asyncio.Queue()
+            if self._pairing_quiesces:
+                await self._quiesce_for_pairing()
+            # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+            # Legacy-generation clients read only pairing messages during an attempt.
+            if self._legacy_hello:
+                await self._pause_writer()
             self._in_pairing = True
-        assert self._pairing_message_queue is not None
+        # Pairing messages arriving between attempts are discarded rather than queued.
+        queue: asyncio.Queue[WSMessage] = asyncio.Queue()
+        self._pairing_message_queue = queue
         self._pairing_attempt = attempt
-        self._pairing_messages_started = False
-        dispatched = _QueuedTransport(transport, self._pairing_message_queue)
+        dispatched = QueuedEncryptedWebSocket(transport, queue)
         task = create_task(self._pair(dispatched))
         self._pairing_task = task
         try:
@@ -1468,6 +1474,7 @@ class SendspinConnection:
         finally:
             self._pairing_attempt = None
             self._pairing_task = None
+            self._pairing_message_queue = None
         await self._leave_pairing()
 
     async def end_pairing(self) -> None:
@@ -1491,10 +1498,19 @@ class SendspinConnection:
         if not self._in_pairing:  # a success and a concurrent end_pairing
             return
         self._pairing_message_queue = None
-        self._pairing_messages_started = False
         self._in_pairing = False
         await self._activate()
-        self._resume_writer()
+
+    @property
+    def _pairing_quiesces(self) -> bool:
+        """Whether pairing takes the connection out of playback.
+
+        Pairing never runs alongside playback on a long-term PSK: an attempt there either
+        keeps that PSK or moves the session off the record it holds.
+        """
+        # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+        # Legacy-generation clients admit no activity set that mixes pairing and playback.
+        return self._legacy_hello or self._is_long_term_paired
 
     async def _quiesce_for_pairing(self) -> None:
         """Quiesce playback and roles for pairing, then wait for the teardown to flush."""
@@ -1533,19 +1549,21 @@ class SendspinConnection:
             # No gate on the hello-advertised methods: the advertisement may lag the client's
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
+            await self._pause_writer()
             await transport.send_str(
                 ServerActivateMessage(
-                    payload=ServerActivatePayload(
-                        activities=[Activity.PAIRING],
-                        active_roles=[],
-                        pairing=ActivatePairing(
+                    payload=self._pairing_activation(
+                        ActivatePairing(
                             method=method,
                             format=pairing_format.value if pairing_format is not None else None,
                             languages=languages,
-                        ),
+                        )
                     )
                 ).to_json()
             )
+            # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+            if not self._legacy_hello:
+                self._resume_writer()
             record = await self._run_pairing_protocol(method, transport, pairing_format)
         except asyncio.CancelledError:
             # A cancelled attempt ends like any local abort: the task never reports
@@ -1567,6 +1585,24 @@ class SendspinConnection:
             return await asyncio.shield(rehandshake)
         except asyncio.CancelledError:
             return await rehandshake
+
+    def _pairing_activation(self, pairing: ActivatePairing) -> ServerActivatePayload:
+        """Build the ``server/activate`` admitting an attempt.
+
+        A connection that can carry playback alongside pairing keeps its active roles; any
+        other connection, including on its first activation, declares none.
+        """
+        alongside_playback = self._playback_capable and not self._is_long_term_paired
+        # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+        # Legacy-generation clients expect pairing to replace playback and roles.
+        if self._declared_activities is None or self._legacy_hello or not alongside_playback:
+            return ServerActivatePayload(
+                activities=[Activity.PAIRING], active_roles=[], pairing=pairing
+            )
+        activities = [Activity.PAIRING]
+        if Activity.PLAYBACK in self._desired_activities:
+            activities.insert(0, Activity.PLAYBACK)
+        return ServerActivatePayload(activities=activities, pairing=pairing)
 
     async def _run_pairing_protocol(
         self,
@@ -1698,9 +1734,14 @@ class SendspinConnection:
         return await self._rehandshake_to(transport, target)
 
     async def _rehandshake_to(self, transport: EncryptedWebSocket, psk: ResolvedPsk) -> bool:
-        """Re-handshake onto ``psk`` and redo the hello dance."""
+        """Re-handshake onto ``psk`` and redo the hello dance.
+
+        The writer stays paused until the caller resumes it after the next ``server/activate``,
+        which the client awaits right after the hellos.
+        """
         assert self._client_id is not None
         assert self._handshake_hash is not None
+        await self._pause_writer()
         result = await run_rehandshake_server(
             transport,
             local_identity=self._server.identity,
@@ -1709,14 +1750,17 @@ class SendspinConnection:
             prologue=self._handshake_hash,
             psk=psk,
         )
+        if self._is_long_term_paired and result.psk.category is not PskCategory.LONG_TERM:
+            self._moved_off_record = True
         self._noise_psk = result.psk
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         return await self._send_server_hello_and_recv(transport)
 
     async def _activate(self) -> None:
-        """Send ``server/activate`` and reconcile the client's active roles."""
+        """Send ``server/activate``, reconcile the client's active roles, and resume the writer."""
         assert self._transport is not None
+        await self._pause_writer()
         if self._declared_activities is None:
             self._declared_activities = self._initial_activities
         else:
@@ -1732,17 +1776,27 @@ class SendspinConnection:
         )
         assert self._client is not None
         self._client.set_active_roles(active_roles)
+        self._resume_writer()
 
     async def refresh_trusted_unpaired(self) -> None:
-        """Re-read the trusted-unpaired approval and re-activate roles."""
-        if self._noise_psk is None or self._noise_psk.category is not PskCategory.SENTINEL:
+        """Re-read the trusted-unpaired approval and re-activate roles.
+
+        During pairing a grant takes effect when pairing ends, and a revocation ends pairing.
+        """
+        if self._noise_psk is None or self._noise_psk.category is PskCategory.LONG_TERM:
             return
         if self._client is None or self._declared_activities is None:
             return
         assert self._client_id is not None
+        was_trusted = self._trusted_unpaired
         self._trusted_unpaired = (
             await self._server.pairing_store.trusted_unpaired(self._client_id) is not None
         )
+        if self._in_pairing:
+            # A server/activate would cancel the attempt; the one ending pairing carries the change.
+            if was_trusted and not self._trusted_unpaired:
+                await self.end_pairing()
+            return
         active_roles = self._roles_to_activate
         self._declared_activities = self._desired_activities
         self.send_priority_message(
@@ -1810,13 +1864,14 @@ class SendspinConnection:
         return await self._server.pairing_store.record_by_client_id(client_id) is not None
 
     def forget_credential_mismatch(self) -> None:
-        """Release the hold a credential mismatch placed on playback.
+        """Release the hold a credential mismatch or a move off the record placed on playback.
 
         Called once this server's pairing record is gone or replaced: the mismatch says the
         client cannot use that record, so without it what remains is an ordinary unpaired
         client, and a record the two have just agreed on is one the client can use.
         """
         self._credential_mismatch = False
+        self._moved_off_record = False
 
     async def list_records(
         self,
@@ -1873,24 +1928,36 @@ class SendspinConnection:
         return payload.result
 
     def _start_message_loops(self) -> None:
-        """Spawn the reader/writer tasks."""
+        """Spawn the reader/writer tasks, unless connect-time pairing already started them."""
+        if self._message_loop_task is not None:
+            return
         self._writer_task = create_task(self._writer())
         self._message_loop_task = create_task(self._run_message_loop())
 
     async def _pause_writer(self) -> None:
-        """Stop the writer task, leaving the reader loop running."""
-        # Cancelling mid-send is nonce-safe: no await separates encrypt() from the
-        # transport write.
-        if self._writer_task is not None and not self._writer_task.done():
-            self._writer_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._writer_task
-            self._writer_task = None
+        """Stop a running writer task, leaving the reader loop running.
+
+        The priority messages it has queued, such as a ``server/activate``, are sent first so
+        that none reaches the client after a message the caller sends directly.
+        """
+        if self._writer_task is None or self._writer_task.done():
+            return
+        assert self._transport is not None
+        # The writer stops at its next iteration, once any message it has taken is sent.
+        self._writer_paused = True
+        self._writer_stopping = True
+        self._writer_wakeup.set()
+        await asyncio.wait((self._writer_task,))
+        self._writer_task = None
+        while await self._process_priority_messages(self._transport):
+            pass
 
     def _resume_writer(self) -> None:
-        """Restart the writer task, unless the connection is being torn down."""
-        if self._disconnecting or self._closing:
+        """Restart a paused writer task, unless the connection is being torn down."""
+        if not self._writer_paused or self._disconnecting or self._closing:
             return
+        self._writer_paused = False
+        self._writer_stopping = False
         if self._writer_task is None or self._writer_task.done():
             self._writer_task = create_task(self._writer())
 
@@ -1902,15 +1969,12 @@ class SendspinConnection:
         await self.disconnect(retry_connection=not self._closing)
 
     def _try_route_to_pairing_queue(self, msg: WSMessage) -> bool:
-        """Forward a message to the pairing handler; return whether it was routed."""
-        if self._pairing_message_queue is None:
+        """Forward a pairing or re-handshake message to the pairing task; return whether routed."""
+        if self._pairing_message_queue is None or msg.type is not WSMsgType.TEXT:
             return False
-        if msg.type is WSMsgType.TEXT:
-            message_type = self._peek_message_type(cast("str", msg.data))
-            self._note_pairing_frame(message_type)
-            if message_type in _PAIR_TRANSITION_TYPES:
-                self._pairing_messages_started = True
-        if not self._pairing_messages_started:
+        message_type = self._peek_message_type(cast("str", msg.data))
+        self._note_pairing_frame(message_type)
+        if message_type not in _PAIR_TRANSITION_TYPES:
             return False
         self._pairing_message_queue.put_nowait(msg)
         return True
@@ -1936,9 +2000,6 @@ class SendspinConnection:
 
                 if msg.type != WSMsgType.TEXT:
                     self._logger.debug("Ignoring message type: %s", msg.type.name)
-                    continue
-
-                if self._pairing_in_progress:
                     continue
 
                 text = cast("str", msg.data)
@@ -2614,7 +2675,12 @@ class SendspinConnection:
     async def _wait_for_writer_work(self, now_us: int) -> None:
         """Sleep until new work arrives or next delayed role becomes ready."""
         self._writer_wakeup.clear()
-        if self._priority_messages or self._normal_messages or self._ready_roles:
+        if (
+            self._writer_stopping
+            or self._priority_messages
+            or self._normal_messages
+            or self._ready_roles
+        ):
             return
 
         sleep_s = None
@@ -2643,7 +2709,7 @@ class SendspinConnection:
         now_us = clock_now_us()
 
         try:
-            while not wsock.closed and not self._closing:
+            while not wsock.closed and not self._closing and not self._writer_stopping:
                 # Periodic yield to prevent event loop starvation
                 if iterations_since_yield >= 50:
                     await asyncio.sleep(0)

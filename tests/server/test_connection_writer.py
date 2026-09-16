@@ -13,6 +13,8 @@ import pytest
 
 from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.core import (
+    GroupUpdateServerMessage,
+    GroupUpdateServerPayload,
     ServerTimeMessage,
     ServerTimePayload,
     StreamEndMessage,
@@ -28,6 +30,12 @@ from aiosendspin.models.player import (
     unpack_player_audio_header,
 )
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
+from aiosendspin.noise.constants import (
+    FRAGMENT_FLAG_LAST,
+    MAX_TRANSPORT_PLAINTEXT,
+    MSG_TYPE_FRAGMENT,
+)
+from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server import connection as connection_module
 from aiosendspin.server.audio import BufferTracker
 from aiosendspin.server.clock import LoopClock, ManualClock
@@ -39,6 +47,7 @@ from aiosendspin.server.connection import (
 )
 from aiosendspin.server.roles.base import AudioChunk, BinaryHandling
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
+from tests.noise.conftest import FakeWebSocket, make_paired_sessions
 
 
 @dataclass(slots=True)
@@ -1059,3 +1068,57 @@ async def test_writer_sends_prepacked_binary_unchanged(message_type: int) -> Non
     assert sent == [frame]
 
     await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_pause_writer_stops_between_messages_not_fragments() -> None:
+    """Pausing the writer mid-way through a fragmented message lets the message finish."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    server_session, client_session = make_paired_sessions()
+
+    class _SlowWebSocket(FakeWebSocket):
+        async def send_bytes(self, data: bytes) -> None:
+            await super().send_bytes(data)
+            await asyncio.sleep(0)
+
+    raw = _SlowWebSocket()
+    conn = SendspinConnection(server, wsock_client=MagicMock())
+    conn._transport = EncryptedWebSocket(raw, server_session)  # noqa: SLF001
+    for name in ("x" * (2 * MAX_TRANSPORT_PLAINTEXT), "next"):
+        conn.send_message(
+            GroupUpdateServerMessage(payload=GroupUpdateServerPayload(group_name=name))
+        )
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+    async with asyncio.timeout(1):
+        while not raw.sent:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+
+    await conn._pause_writer()  # noqa: SLF001
+
+    frames = [client_session.decrypt(ct) for ct in raw.sent]  # type: ignore[arg-type]
+    assert all(frame[0] == MSG_TYPE_FRAGMENT for frame in frames)
+    assert len(frames) > 1
+    assert frames[-1][1] & FRAGMENT_FLAG_LAST
+    assert conn._writer_task is None  # noqa: SLF001
+
+    # The message queued behind it is kept for the resumed writer.
+    conn._resume_writer()  # noqa: SLF001
+    async with asyncio.timeout(1):
+        while len(raw.sent) == len(frames):  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    assert b'"group_name":"next"' in client_session.decrypt(raw.sent[-1])  # type: ignore[arg-type]
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_writer_wait_returns_once_a_stop_is_requested() -> None:
+    """A stop requested while the writer yielded is not lost when it next waits for work."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    conn = SendspinConnection(server, wsock_client=MagicMock())
+    conn._writer_stopping = True  # noqa: SLF001
+    conn._writer_wakeup.set()  # noqa: SLF001
+
+    async with asyncio.timeout(1):
+        await conn._wait_for_writer_work(0)  # noqa: SLF001

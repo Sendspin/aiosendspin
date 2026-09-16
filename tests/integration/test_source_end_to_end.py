@@ -91,8 +91,12 @@ async def test_paired_source_client_streams_pcm_end_to_end() -> None:
             source_support=_source_support(),
         )
         await pair_client.connect(url)
-        assert pair_client.noise_psk is not None
-        assert pair_client.noise_psk.category is PskCategory.LONG_TERM
+        async with asyncio.timeout(5):
+            while (  # noqa: ASYNC110
+                pair_client.noise_psk is None
+                or pair_client.noise_psk.category is not PskCategory.LONG_TERM
+            ):
+                await asyncio.sleep(0.01)
         await pair_client.disconnect()
 
         # Reconnect on the long-term PSK; source@v1 is now activatable.

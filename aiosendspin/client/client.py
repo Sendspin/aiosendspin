@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import replace
 
@@ -39,7 +39,6 @@ from aiosendspin.models.visualizer import (
 )
 from aiosendspin.noise.driver import HandshakeAbortedError
 from aiosendspin.noise.keys import Identity
-from aiosendspin.noise.pairing import PairingError
 from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
 
@@ -443,6 +442,13 @@ class SendspinClient:
         return self._pairing_support.qr_code_display if self._pairing_support is not None else None
 
     @property
+    def out_channel_suspend(self) -> Callable[[bool], Awaitable[None]] | None:
+        """Hook suspending a role output that doubles as the pairing-code out-channel."""
+        return (
+            self._pairing_support.out_channel_suspend if self._pairing_support is not None else None
+        )
+
+    @property
     def pairing_code_out_channels(self) -> tuple[str, ...]:
         """Channels the dynamic pairing code is conveyed through, in descriptor order."""
         channels = []
@@ -684,7 +690,7 @@ class SendspinClient:
 
         The user explicitly chose this server, so the new connection is admitted
         unconditionally — an explicit switch. Returns once admitted; the reader and
-        time-sync loops then run in the background.
+        time-sync loops, and any pairing attempt the server requests, then run in the background.
         """
         if self._session is None:
             self._session = ClientSession()
@@ -754,7 +760,7 @@ class SendspinClient:
             raise
         try:
             await connection.start()
-        except (PairingError, OSError, RuntimeError, TimeoutError) as exc:
+        except (OSError, RuntimeError, TimeoutError) as exc:
             logger.debug("Admitted connection did not reach steady state: %s", exc)
             return
         await connection.wait_closed()

@@ -586,6 +586,9 @@ class SendspinServer:
     async def initiate_pairing(self, client_id: str, attempt: PairingAttempt) -> None:
         """Run a pairing attempt on a connected client.
 
+        An unpaired client keeps its playback, roles and group during the attempt; a long-term
+        paired one leaves playback and its roles first.
+
         A pair abort raises and leaves the connection open (retry with another
         ``initiate_pairing`` or drop out with ``end_pairing``); a server-side timeout or
         ``InvalidPairingCodeError`` raises with pairing already left; other failures disconnect.

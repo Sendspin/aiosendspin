@@ -1380,8 +1380,8 @@ async def test_dynamic_pairing_code_client_rejects_nonce_a_in_later_round() -> N
     assert not isinstance(excinfo.value, PairingAbortError)
 
 
-async def test_client_relays_leave_pairing_without_storing() -> None:
-    """A server that leaves pairing makes the client relay the server/activate and store nothing."""
+async def test_client_stores_nothing_without_the_finalize_ack() -> None:
+    """A non-pairing frame in place of the finalize ack fails the attempt and stores nothing."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
@@ -1413,22 +1413,21 @@ async def test_client_relays_leave_pairing_without_storing() -> None:
             ).to_json(),
         )
 
-    leftover, _ = await asyncio.gather(
-        run_dynamic_pairing_code_client(
-            client_ews,
-            handshake_hash=_HANDSHAKE_HASH,
-            pairing_index=0,
-            pairing_format=PairingCodeFormat.DIGITS,
-            pairing_code_emitter=emit,
-            server_id="server-X",
-            store=client_store,
-        ),
-        server_leaves_pairing(),
-    )
+    with pytest.raises(PairingError, match="malformed message awaiting ServerPairFinalizeMessage"):
+        await asyncio.gather(
+            run_dynamic_pairing_code_client(
+                client_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_format=PairingCodeFormat.DIGITS,
+                pairing_code_emitter=emit,
+                server_id="server-X",
+                store=client_store,
+            ),
+            server_leaves_pairing(),
+        )
 
-    # The client relayed the raw server/activate frame and stored nothing on either side.
-    assert leftover is not None
-    assert "server/activate" in leftover
+    # Neither side stored a record.
     assert _added_records(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
     # server_kc verified, so the round count resets like any other attempt.

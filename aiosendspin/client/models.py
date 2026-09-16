@@ -67,6 +67,14 @@ class PairingSupport:
 
     Applies to every static-secret method the client offers.
     """
+    out_channel_suspend: Callable[[bool], Awaitable[None]] | None = None
+    """Optional hook for an out-channel that is also a role's output (the speaker playing the
+    stream, the display showing artwork): awaited with ``True`` before a dynamic pairing code is
+    first emitted, and with ``False`` when the attempt ends.
+
+    Suspend that output locally meanwhile. Streams stay open and their timeline runs on, so a
+    player discards the audio scheduled while suspended and resumes in sync.
+    """
 
     def __post_init__(self) -> None:
         """Reject a secret location the descriptor cannot carry."""
