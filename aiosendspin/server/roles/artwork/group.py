@@ -113,6 +113,22 @@ class ArtworkGroupRole(GroupRole):
         async with self._send_lock(role, channel):
             await self._encode_and_send(role, image, channel, channel_config, timestamp_us)
 
+    # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+    async def _restate_and_send_to_role_channel(
+        self,
+        role: ArtworkRoleProtocol,
+        current: Image.Image | None,
+        now_us: int,
+        image: Image.Image | None,
+        channel: int,
+        channel_config: ArtworkChannel,
+        timestamp_us: int,
+    ) -> None:
+        """Send the current image, discarding the client's scheduled one, then `image`."""
+        async with self._send_lock(role, channel):
+            await self._encode_and_send(role, current, channel, channel_config, now_us)
+            await self._encode_and_send(role, image, channel, channel_config, timestamp_us)
+
     async def _encode_and_send(
         self,
         role: ArtworkRoleProtocol,
@@ -201,22 +217,38 @@ class ArtworkGroupRole(GroupRole):
         """Set, schedule or clear artwork for a source type."""
         now_us = self._now_us()
         state = self._artwork.setdefault(source, ScheduledRoleState())
-        state.current(now_us)
+        current = state.current(now_us)
+        replaces_scheduled = False
         if timestamp_us is not None and timestamp_us > now_us:
             event_timestamp_us = timestamp_us
+            replaces_scheduled = state.pending_timestamp_us is not None
             state.schedule(image, event_timestamp_us)
         else:
             event_timestamp_us = now_us if timestamp_us is None else timestamp_us
             state.apply(image)
 
-        await asyncio.gather(
-            *(
+        sends = []
+        for role, channel_num, channel_config in self._member_channels(source):
+            # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+            if replaces_scheduled and role.uses_single_message_framing():
+                sends.append(
+                    self._restate_and_send_to_role_channel(
+                        role,
+                        current,
+                        now_us,
+                        image,
+                        channel_num,
+                        channel_config,
+                        event_timestamp_us,
+                    )
+                )
+                continue
+            sends.append(
                 self._send_artwork_to_role_channel(
                     role, image, channel_num, channel_config, event_timestamp_us
                 )
-                for role, channel_num, channel_config in self._member_channels(source)
             )
-        )
+        await asyncio.gather(*sends)
 
         if image is None:
             self.emit_group_event(

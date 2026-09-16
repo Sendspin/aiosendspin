@@ -12,10 +12,12 @@ import pytest
 from PIL import Image
 
 from aiosendspin.clock import ManualClock
-from aiosendspin.models.artwork import ArtworkChannel
+from aiosendspin.models import BINARY_HEADER_SIZE
+from aiosendspin.models.artwork import ArtworkChannel, ClientHelloArtworkSupport
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.events import ArtworkClearedEvent, ArtworkUpdatedEvent
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
+from aiosendspin.server.roles.artwork.v1 import MAX_ANNOUNCE_LEAD_US, ArtworkV1Role
 
 
 def _make_group_stub() -> MagicMock:
@@ -110,6 +112,9 @@ class _Member:
     def cancel_scheduled_artwork(self, _channel: int) -> bool:
         self.sent.append(("cancel",))
         return self._can_cancel
+
+    def uses_single_message_framing(self) -> bool:
+        return not self._can_cancel
 
 
 def _make_scheduling_group() -> tuple[MagicMock, ManualClock]:
@@ -277,3 +282,43 @@ async def test_cancel_scheduled_artwork() -> None:
     current = agr.get_album_artwork()
     assert current is not None
     assert current.getpixel((0, 0)) == (1, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_replacing_scheduled_artwork_restates_current_for_single_message_clients() -> None:
+    """A single-message client drops a sent scheduled image before a farther one is held."""
+    group, clock = _make_scheduling_group()
+    agr = ArtworkGroupRole(group)
+    client = MagicMock()
+    client.info.artwork_support = ClientHelloArtworkSupport(channels=[_CHANNEL])
+    client._server.clock = clock  # noqa: SLF001
+    client.group.group_role.return_value = agr
+    legacy_sent: list[tuple[int | None, int]] = []
+
+    def _record(data: bytes, *, timestamp_us: int, **_: Any) -> None:
+        image = data[BINARY_HEADER_SIZE:]
+        if not image:
+            legacy_sent.append((None, timestamp_us))
+            return
+        with Image.open(BytesIO(image)) as decoded:
+            legacy_sent.append((decoded.getpixel((0, 0))[0], timestamp_us))
+
+    client.send_binary.side_effect = _record
+    legacy = ArtworkV1Role(client=client)
+    legacy.on_connect()
+    member = _Member()
+    agr.subscribe(member)  # type: ignore[arg-type]
+    await agr.set_album_artwork(_image(1))
+    await agr.set_album_artwork(_image(2), timestamp_us=2_000_000)
+    far_us = 31_000_000
+
+    await agr.set_album_artwork(_image(3), timestamp_us=far_us)
+    await _settle()
+
+    assert legacy_sent == [(1, 1_000_000), (2, 2_000_000), (1, 1_000_000)]
+    assert member.sent == [(1, 1_000_000), (2, 2_000_000), (3, far_us)]
+    clock.now_us_value = far_us - MAX_ANNOUNCE_LEAD_US
+    legacy._queue_changed.set()  # noqa: SLF001
+    await _settle()
+    assert legacy_sent[3:] == [(3, far_us)]
+    legacy.on_disconnect()

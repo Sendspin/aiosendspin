@@ -174,7 +174,7 @@ class ArtworkV1Role(Role):
             return
         now_us = self._client._server.clock.now_us()  # noqa: SLF001
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-        if self._uses_single_message_framing():
+        if self.uses_single_message_framing():
             self._queued.pop(channel, None)
             if timestamp_us - MAX_ANNOUNCE_LEAD_US <= now_us:
                 self._send_single_message(channel, image_data, timestamp_us)
@@ -214,7 +214,7 @@ class ArtworkV1Role(Role):
         if not self.has_connection() or channel not in self.get_channel_configs():
             return True
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-        if self._uses_single_message_framing():
+        if self.uses_single_message_framing():
             self._queued.pop(channel, None)
             return False
         now_us = self._client._server.clock.now_us()  # noqa: SLF001
@@ -225,6 +225,11 @@ class ArtworkV1Role(Role):
         if self._discard_client_scheduled(channel, now_us, keep_current=True):
             self._start_transfers()
         return True
+
+    # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+    def uses_single_message_framing(self) -> bool:
+        """Whether the client predates transfers, having declared its channels in the hello."""
+        return self._client.info.artwork_support is not None
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def on_stream_request_format(
@@ -331,11 +336,6 @@ class ArtworkV1Role(Role):
         self._channels = []
 
     # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-    def _uses_single_message_framing(self) -> bool:
-        """Whether the client predates transfers, having declared its channels in the hello."""
-        return self._client.info.artwork_support is not None
-
-    # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
     def _send_single_message(self, channel: int, image_data: bytes, timestamp_us: int) -> None:
         """Send `image_data` as one `[type][timestamp][image]` message."""
         message_type = artwork_message_type(channel)
@@ -349,7 +349,7 @@ class ArtworkV1Role(Role):
     def _send_clear_now(self, channel: int, timestamp_us: int) -> None:
         """Enqueue a clear for `channel` at once; no transfer may be in flight."""
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-        if self._uses_single_message_framing():
+        if self.uses_single_message_framing():
             self._send_single_message(channel, b"", timestamp_us)
             return
         self._send_transfer_message(channel, pack_artwork_announce(channel, timestamp_us, 0))
@@ -434,7 +434,7 @@ class ArtworkV1Role(Role):
             if not queued:
                 del self._queued[channel]
             # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-            if self._uses_single_message_framing():
+            if self.uses_single_message_framing():
                 self._send_single_message(channel, image, timestamp_us)
                 continue
             self._in_flight = channel
