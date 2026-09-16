@@ -25,6 +25,8 @@ from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, Visualiz
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.color.group import ColorGroupRole
+from aiosendspin.server.roles.color.state import Color
 
 
 @dataclass(slots=True)
@@ -213,3 +215,22 @@ async def test_removing_sole_player_from_streamless_playing_group_sends_stream_e
     await group.remove_client(player)
 
     assert any(isinstance(msg, StreamEndMessage) for _, msg in connection.role_messages)
+
+
+@pytest.mark.asyncio
+async def test_deleting_group_cancels_deferred_scheduled_send() -> None:
+    """A group emptied while holding back a scheduled state stops its deferred send."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    mover = _make_client(server, "mover", supported_roles=[Roles.PLAYER.value])
+    target = _make_client(server, "target", supported_roles=[Roles.PLAYER.value])
+    color_role = mover.group.group_role("color")
+    assert isinstance(color_role, ColorGroupRole)
+    color_role.set_color(Color(primary=(1, 2, 3)), timestamp_us=server.clock.now_us() + 60_000_000)
+    handle = color_role._send_scheduled_handle  # noqa: SLF001
+    assert handle is not None
+
+    await target.group.add_client(mover)
+
+    assert handle.cancelled()
+    assert color_role._send_scheduled_handle is None  # noqa: SLF001

@@ -135,6 +135,9 @@ class GroupRole(ABC):
     def on_client_removed(self, client: SendspinClient) -> None:  # noqa: B027
         """Handle a client being removed from this group."""
 
+    def on_group_deleted(self) -> None:  # noqa: B027
+        """Handle the group being deleted after its last client left."""
+
     def emit_group_event(self, event: GroupRoleEvent) -> None:
         """Emit a GroupRole event on the owning group's event stream."""
         self._group._signal_event(event)  # noqa: SLF001

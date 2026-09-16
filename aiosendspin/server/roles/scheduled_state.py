@@ -80,6 +80,10 @@ class ScheduledStateGroupRole[S](GroupRole):
         if scheduled_us is not None and self._scheduled_sent:
             role.send_message(self._state_message(self._state.pending, scheduled_us))
 
+    def on_group_deleted(self) -> None:
+        """Stop a deferred send of the scheduled state."""
+        self._cancel_send_scheduled()
+
     def cancel_scheduled(self) -> None:
         """Cancel the scheduled state, if any, keeping the current one.
 
