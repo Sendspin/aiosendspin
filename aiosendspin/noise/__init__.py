@@ -1,5 +1,7 @@
 """Noise Protocol Framework (KKpsk2) transport for Sendspin."""
 
+from aiosendspin.models.types import ServerErrorReason
+
 from .constants import (
     ERROR_TYPE_SERVER,
     HANDSHAKE_TYPE,
@@ -128,6 +130,7 @@ __all__ = [
     "ResolvedPsk",
     "ServerErrorMessage",
     "ServerErrorPayload",
+    "ServerErrorReason",
     "ServerInitMessage",
     "ServerInitPayload",
     "ServerPairFinalizeMessage",

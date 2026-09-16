@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from aiosendspin import noise
 from aiosendspin.models.types import ServerErrorReason
 from aiosendspin.noise.models import (
     ClientInitMessage,
@@ -67,6 +68,16 @@ def test_server_error_reasons_match_the_spec() -> None:
         "unsupported_suite",
         "malformed",
     }
+
+
+def test_server_error_names_are_public() -> None:
+    """The server/error models, reason and rejection are importable from the noise package."""
+    for name in ("ServerErrorMessage", "ServerErrorPayload", "ServerErrorReason"):
+        assert name in noise.__all__
+    assert noise.ServerErrorMessage is ServerErrorMessage
+    assert noise.ServerErrorPayload is ServerErrorPayload
+    assert noise.ServerErrorReason is ServerErrorReason
+    assert "InitRejectedError" in noise.__all__
 
 
 def test_noise_integer_fields_serialize_as_integers() -> None:
