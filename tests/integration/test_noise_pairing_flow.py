@@ -13,6 +13,7 @@ from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestServer
 
 from aiosendspin.client.client import SendspinClient as SdkClient
+from aiosendspin.client.connection import SendspinConnection as SdkConnection
 from aiosendspin.client.models import PairingSupport
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -68,6 +69,7 @@ def _make_server(
     store: InMemoryServerPairingStore,
     *,
     allow_unencrypted: bool = False,
+    languages: tuple[str, ...] | None = None,
 ) -> SendspinServer:
     return SendspinServer(
         loop=asyncio.get_running_loop(),
@@ -75,6 +77,7 @@ def _make_server(
         server_name="test-server",
         pairing_store=store,
         allow_unencrypted=allow_unencrypted,
+        languages=languages,
     )
 
 
@@ -507,42 +510,39 @@ async def test_live_pairing_dynamic_pairing_code() -> None:
             await client.disconnect()
 
 
-@pytest.mark.parametrize(
-    ("languages", "expected"),
-    [(("ca", "es", "en"), ["ca", "es", "en"]), ((), None)],
-)
-async def test_live_pairing_dynamic_pairing_code_language_hint(
-    languages: tuple[str, ...], expected: list[str] | None
-) -> None:
-    """The attempt's languages reach the client on the pairing server/activate, or are omitted."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
+async def _pair_via_spoken_dynamic_code(
+    server: SendspinServer, *, player_support: ClientHelloPlayerSupport | None = None
+) -> tuple[ActivatePairing, tuple[str, ...]]:
+    """Pair a speaker-only client; return its pairing activation and the languages it spoke."""
     client_identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
 
     loop = asyncio.get_running_loop()
-    shown: asyncio.Future[str] = loop.create_future()
+    spoken: asyncio.Future[tuple[str, ...]] = loop.create_future()
+    code: asyncio.Future[str] = loop.create_future()
     activation: asyncio.Future[ActivatePairing] = loop.create_future()
 
-    async def display(pairing_code: str | None) -> None:
-        if pairing_code is None or shown.done():
+    async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
+        if pairing_code is None or code.done():
             return
-        shown.set_result(pairing_code)
+        spoken.set_result(languages)
+        code.set_result(pairing_code)
         conn = client._admitted_connection  # noqa: SLF001 - assert on the received activation
         assert conn is not None
         assert conn._selected_pairing is not None  # noqa: SLF001
         activation.set_result(conn._selected_pairing)  # noqa: SLF001
 
     async def provide() -> str:
-        return await shown
+        return await code
 
     async with _serve(server) as url:
         client = make_sdk_client(
             identity=client_identity,
             pairing_store=client_store,
             client_name="c",
-            roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=display),
+            roles=[Roles.PLAYER] if player_support is not None else [Roles.CONTROLLER],
+            player_support=player_support,
+            pairing_support=PairingSupport(pairing_code_speaker=speak),
         )
         try:
             await client.connect(url)
@@ -551,14 +551,50 @@ async def test_live_pairing_dynamic_pairing_code_language_hint(
                 PairingAttempt(
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
-                    languages=languages,
                     pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
             await _await_long_term_record(client_store, server.id)
-            assert activation.result().languages == expected
         finally:
             await client.disconnect()
+    return activation.result(), spoken.result()
+
+
+@pytest.mark.parametrize("languages", [("ca", "es", "en"), None])
+async def test_live_pairing_language_hint_rides_server_hello(
+    languages: tuple[str, ...] | None,
+) -> None:
+    """The server's languages reach the speaker from server/hello, never the activation."""
+    server = _make_server(InMemoryServerPairingStore(), languages=languages)
+    activation, spoken = await _pair_via_spoken_dynamic_code(server)
+    assert activation.languages is None
+    assert spoken == (languages or ())
+
+
+# DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+async def test_live_pairing_language_hint_on_activation_for_pre_spec_177_hello() -> None:
+    """A client whose hello predates spec PR 177 also gets the languages on the activation."""
+    server = _make_server(InMemoryServerPairingStore(), languages=("ca", "en"))
+    build_client_hello = SdkConnection._build_client_hello  # noqa: SLF001
+
+    async def pre_spec_177_hello(self: SdkConnection) -> ClientHelloMessage:
+        hello = await build_client_hello(self)
+        assert hello.payload.player_support is not None
+        hello.payload.player_support.supported_commands = [PlayerCommand.VOLUME]
+        return hello
+
+    player_support = ClientHelloPlayerSupport(
+        supported_formats=[
+            SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=44100, bit_depth=16)
+        ],
+        buffer_capacity=1_000_000,
+    )
+    with patch.object(SdkConnection, "_build_client_hello", pre_spec_177_hello):
+        activation, spoken = await _pair_via_spoken_dynamic_code(
+            server, player_support=player_support
+        )
+    assert activation.languages == ["ca", "en"]
+    assert spoken == ("ca", "en")
 
 
 async def test_live_pairing_updates_connection_security_trust() -> None:

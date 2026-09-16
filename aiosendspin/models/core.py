@@ -393,6 +393,13 @@ class ServerHelloPayload(SendspinModel):
 
     name: str
     """Friendly name of the server"""
+    languages: list[str] | None = None
+    """BCP 47 tags in descending operator preference, informing operator-facing output."""
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 @dataclass
@@ -449,6 +456,7 @@ class ActivatePairing(SendspinModel):
     """Pairing method the server picked, drawn from the client's supported_pair_methods."""
     format: str | None = None
     """The dynamic pairing-code emission format; required for dynamic_pairing_code."""
+    # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
     languages: list[str] | None = None
     """BCP 47 tags in descending operator preference, for spoken pairing-code emission."""
 

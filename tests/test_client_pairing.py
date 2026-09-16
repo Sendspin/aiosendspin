@@ -11,7 +11,7 @@ import pytest
 from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.client.connection import SendspinConnection
-from aiosendspin.client.models import PairingSupport
+from aiosendspin.client.models import PairingSupport, ServerInfo
 from aiosendspin.models.core import ActivatePairing, ServerActivateMessage, ServerActivatePayload
 from aiosendspin.models.types import (
     Activity,
@@ -431,8 +431,8 @@ async def test_hello_descriptors_carry_the_wired_channels_and_locations() -> Non
     assert descriptors[PairMethod.PAIRING_PSK].out_channels is None
 
 
-async def test_pairing_code_speaker_receives_the_activation_languages() -> None:
-    """The activation's language preferences reach the spoken channel, which the display omits."""
+async def test_pairing_code_speaker_receives_the_server_hello_languages() -> None:
+    """The server/hello language preferences reach the spoken channel, not the activation's."""
     spoken: list[tuple[str | None, tuple[str, ...]]] = []
     displayed: list[str | None] = []
 
@@ -448,8 +448,11 @@ async def test_pairing_code_speaker_receives_the_activation_languages() -> None:
         pairing_support=PairingSupport(pairing_code_display=display, pairing_code_speaker=speak),
     )
     connection = SendspinConnection(client)
+    connection._server_info = ServerInfo(  # noqa: SLF001
+        server_id="server", name="Server", languages=("ca", "en")
+    )
     connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits", languages=["ca", "en"]
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits", languages=["es"]
     )
     await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
     assert spoken == [("123456", ("ca", "en"))]

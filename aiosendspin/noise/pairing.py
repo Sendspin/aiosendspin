@@ -114,11 +114,6 @@ class PairingAttempt:
     """Re-verify an already-paired client instead of pairing anew."""
     on_pair_pending: Callable[[], None] | None = None
     """Called when the client reports the attempt gesture-gated."""
-    languages: tuple[str, ...] = ()
-    """Dynamic pairing code only: BCP 47 tags in descending operator preference.
-
-    Used for spoken emission.
-    """
     owner: str | None = None
     """Application-defined authorization id the resulting record is bound to."""
 
@@ -154,15 +149,6 @@ class PairingAttempt:
             elif self.pairing_format is not None:
                 msg = f"{self.method.value} does not use pairing_format"
                 raise ValueError(msg)
-        if self.languages and self.method is not PairMethod.DYNAMIC_PAIRING_CODE:
-            msg = f"{self.method.value} does not use languages"
-            raise ValueError(msg)
-        if self.languages and self.pairing_format is PairingCodeFormat.QR_CODE:
-            msg = "languages apply to the digits format only"
-            raise ValueError(msg)
-        if not all(self.languages):
-            msg = "languages must not contain a blank tag"
-            raise ValueError(msg)
 
 
 if TYPE_CHECKING:
