@@ -34,11 +34,15 @@ class Metadata:
     """Ignored. Use `ControllerGroupRole.set_shuffle` instead."""
 
     # Progress fields:
-    # When sending to clients, all three fields must be set or none will be sent
+    # A track_progress requires a playback_speed; progress is sent whenever both are set
     track_progress: int | None = None
-    """Track progress in milliseconds at the last update time."""
+    """Track progress in milliseconds at the last update time. Requires `playback_speed`."""
     track_duration: int | None = None
-    """Track duration in milliseconds. Use 0 for unlimited/unknown duration (e.g., live streams)."""
+    """
+    Track duration in milliseconds.
+
+    Use 0 or None for unlimited/unknown duration (e.g., live streams); None is sent as 0.
+    """
     playback_speed: int | None = None
     """Playback speed multiplier * 1000 (e.g., 1000 = normal, 1500 = 1.5x, 0 = paused)."""
 
@@ -49,6 +53,11 @@ class Metadata:
     You don't need to set this, since it will be set automatically by set_metadata() if not
     provided.
     """
+
+    def __post_init__(self) -> None:
+        """Reject a playback position that has no playback speed."""
+        if self.track_progress is not None and self.playback_speed is None:
+            raise ValueError("playback_speed is required when track_progress is set")
 
     def equals(self, other: Metadata | None, progress_tolerance_ms: int = 500) -> bool:
         """
@@ -107,14 +116,10 @@ class Metadata:
     def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
         """Build a SessionUpdateMetadata carrying the full current state."""
         progress = None
-        if (
-            self.track_progress is not None
-            and self.track_duration is not None
-            and self.playback_speed is not None
-        ):
+        if self.track_progress is not None and self.playback_speed is not None:
             progress = Progress(
                 track_progress=self.track_progress,
-                track_duration=self.track_duration,
+                track_duration=self.track_duration or 0,
                 playback_speed=self.playback_speed,
             )
         return SessionUpdateMetadata(

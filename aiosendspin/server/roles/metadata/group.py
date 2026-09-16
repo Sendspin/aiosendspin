@@ -154,6 +154,10 @@ class MetadataGroupRole(GroupRole):
         """Batch update multiple metadata fields.
 
         Fields set to `_UNSET` are left unchanged. Passing `None` clears a field.
+        A supplied `track_progress` is taken as the position now. Otherwise, during an
+        active stream, the update carries the current extrapolated position.
+
+        Raises ValueError if the result has a `track_progress` without a `playback_speed`.
         """
         current = self._current_metadata or Metadata()
         kwargs: dict[str, object] = {}
@@ -180,6 +184,13 @@ class MetadataGroupRole(GroupRole):
 
         if not kwargs:
             return
+
+        if track_progress is not _UNSET or current.track_progress is None:
+            kwargs["timestamp_us"] = None
+        elif self._group.has_active_stream:
+            # The stored position is only valid at its own timestamp, so move it to now.
+            kwargs["track_progress"] = self._get_current_track_progress()
+            kwargs["timestamp_us"] = None
 
         new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
         self.set_metadata(new_metadata)

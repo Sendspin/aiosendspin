@@ -327,6 +327,94 @@ def test_update_omits_progress_when_position_cleared() -> None:
     assert _sent_metadata(member) == {"timestamp": 1_000_000, "title": "Loading next track..."}
 
 
+def _playing_group_role() -> tuple[MagicMock, MetadataGroupRole, MagicMock]:
+    """Return a group role playing at 30s, observed 10s later, with one member."""
+    group = _make_group_stub()
+    group.has_active_stream = True
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(
+        Metadata(title="Song", track_progress=30_000, track_duration=180_000, playback_speed=1000)
+    )
+    member.reset_mock()
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+    return group, mgr, member
+
+
+def test_update_during_active_stream_sends_current_position() -> None:
+    """A non-position update during playback carries the extrapolated position, stamped now."""
+    _, mgr, member = _playing_group_role()
+
+    mgr.update(title="New Title")
+
+    assert _sent_metadata(member) == {
+        "timestamp": 11_000_000,
+        "title": "New Title",
+        "progress": {"track_progress": 40_000, "track_duration": 180_000, "playback_speed": 1000},
+    }
+
+
+def test_update_with_explicit_position_is_stamped_now() -> None:
+    """A supplied position is taken as the position at the time of the update."""
+    _, mgr, member = _playing_group_role()
+
+    mgr.update(track_progress=5_000)
+
+    sent = _sent_metadata(member)
+    assert sent["timestamp"] == 11_000_000
+    assert sent["progress"] == {
+        "track_progress": 5_000,
+        "track_duration": 180_000,
+        "playback_speed": 1000,
+    }
+
+
+def test_update_pause_during_active_stream_freezes_current_position() -> None:
+    """Pausing mid-stream sends the position reached at the old speed, with speed 0."""
+    _, mgr, member = _playing_group_role()
+
+    mgr.update(playback_speed=0)
+
+    sent = _sent_metadata(member)
+    assert sent["timestamp"] == 11_000_000
+    assert sent["progress"] == {
+        "track_progress": 40_000,
+        "track_duration": 180_000,
+        "playback_speed": 0,
+    }
+
+
+def test_update_without_position_is_stamped_now() -> None:
+    """An update to metadata without a position carries the time of the update."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(Metadata(title="Song"))
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+
+    mgr.update(title="New Title")
+
+    assert _sent_metadata(member) == {"timestamp": 11_000_000, "title": "New Title"}
+
+
+def test_update_without_active_stream_keeps_stored_position() -> None:
+    """Without an active stream the stored position is sent with its own timestamp."""
+    group, mgr, member = _playing_group_role()
+    group.has_active_stream = False
+
+    mgr.update(title="New Title")
+
+    sent = _sent_metadata(member)
+    assert sent["timestamp"] == 1_000_000
+    assert sent["progress"] == {
+        "track_progress": 30_000,
+        "track_duration": 180_000,
+        "playback_speed": 1000,
+    }
+
+
 # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
 def test_repeat_and_shuffle_are_accepted_but_never_sent() -> None:
     """Metadata still accepts repeat/shuffle but ignores them on the wire and in equality."""
