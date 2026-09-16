@@ -21,7 +21,14 @@ HANDSHAKE_TYPE: Final[str] = "noise/handshake"
 # Transport-mode binary message type at byte 0 of decrypted plaintext.
 MSG_TYPE_JSON_BODY: Final[int] = 0
 
-# Fragment frame types (bit 0 is the last-fragment flag).
+# Fragment frame type; byte 1 is a flags byte, and the first fragment carries orig_type at byte 2.
+MSG_TYPE_FRAGMENT: Final[int] = 1
+FRAGMENT_FLAG_LAST: Final[int] = 0x01
+FRAGMENT_FLAG_FIRST: Final[int] = 0x02
+FRAGMENT_FLAGS_RESERVED: Final[int] = 0xFC
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+# Legacy fragment framing without a flags byte: 2 starts or continues a message, 3 ends it.
 MSG_TYPE_FRAGMENT_MORE: Final[int] = 2
 MSG_TYPE_FRAGMENT_END: Final[int] = 3
 

@@ -229,6 +229,9 @@ class _QueuedTransport(EncryptedWebSocket):
         super().__init__(base._ws, base._session)  # noqa: SLF001
         self._base = base
         self._queue = queue
+        # Only the base decodes, so the legacy receive callback stays there.
+        # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+        self.legacy_fragment_framing = base.legacy_fragment_framing
 
     def swap_session(self, session: NoiseSession) -> None:
         super().swap_session(session)
@@ -896,6 +899,9 @@ class SendspinConnection:
         assert raw is not None
         if self._transport is None:
             self._transport = await self._establish_transport(raw)
+            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+            if isinstance(self._transport, EncryptedWebSocket):
+                self._transport.on_legacy_fragment = self._flag_legacy_fragment
 
         self._logger.debug("Connection established")
 
@@ -1080,6 +1086,11 @@ class SendspinConnection:
             raise ClientComplianceError(reason)
         self._logger.warning("non-compliant client: %s", reason)
 
+    # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+    def _flag_legacy_fragment(self) -> None:
+        """Report a fragment that used the legacy binary message IDs 2/3."""
+        self._flag_noncompliance("fragment used legacy binary message IDs 2/3")
+
     async def _ingest_client_hello(self, text: str) -> bool:
         """Validate and record the client/hello, attaching the client; False if rejected."""
         try:
@@ -1155,6 +1166,10 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
             # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
             self._legacy_hello = True
+            # A pre-#177 client also predates the type 1 fragment framing.
+            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+            if isinstance(self._transport, EncryptedWebSocket):
+                self._transport.legacy_fragment_framing = True
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
                 "Client offered roles/versions this server does not implement: %s", unimplemented
@@ -2575,5 +2590,8 @@ class SendspinConnection:
             self._logger.debug("Noise handshake aborted: %s", exc)
         except PairingError as exc:
             self._logger.debug("Pairing aborted: %s", exc)
+        except ClientComplianceError:
+            # Strict mode: hard-reject (no warm reconnect); already logged at error.
+            self._closing = True
         finally:
             await self._cleanup_connection()

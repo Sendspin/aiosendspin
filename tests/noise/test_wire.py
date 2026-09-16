@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.noise.constants import (
+    FRAGMENT_FLAG_FIRST,
+    FRAGMENT_FLAG_LAST,
     MAX_TRANSPORT_PLAINTEXT,
+    MSG_TYPE_FRAGMENT,
     MSG_TYPE_FRAGMENT_END,
     MSG_TYPE_FRAGMENT_MORE,
 )
@@ -14,6 +19,26 @@ from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.session import NoiseCipherSuite, NoiseSession
 from aiosendspin.noise.wire import EncryptedWebSocket
 from tests.noise.conftest import FakeWebSocket, make_paired_sessions
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+FIRST = FRAGMENT_FLAG_FIRST
+LAST = FRAGMENT_FLAG_LAST
+
+
+async def _receive_frames(
+    plaintexts: list[bytes], *, on_legacy_fragment: Callable[[], None] | None = None
+) -> tuple[list[WSMessage], EncryptedWebSocket]:
+    """Encrypt ``plaintexts`` as raw frames and return what a receiver yields for them."""
+    initiator, responder = make_paired_sessions()
+    ws = FakeWebSocket()
+    wrapper = EncryptedWebSocket(ws, responder)
+    wrapper.on_legacy_fragment = on_legacy_fragment
+    for plaintext in plaintexts:
+        await ws.push(WSMessage(WSMsgType.BINARY, initiator.encrypt(plaintext), ""))
+    await ws.push(None)
+    return [m async for m in wrapper], wrapper
 
 
 def test_wrapper_refuses_pre_handshake_session() -> None:
@@ -64,6 +89,17 @@ async def test_send_bytes_rejects_empty_payload() -> None:
     wrapper = EncryptedWebSocket(FakeWebSocket(), initiator)
     with pytest.raises(ValueError, match="leading type byte"):
         await wrapper.send_bytes(b"")
+
+
+@pytest.mark.parametrize("type_byte", [1, 2, 3])
+async def test_send_bytes_rejects_transport_reserved_type(type_byte: int) -> None:
+    """A payload whose type byte the transport owns (fragment or reserved) is refused."""
+    initiator, _ = make_paired_sessions()
+    ws = FakeWebSocket()
+    wrapper = EncryptedWebSocket(ws, initiator)
+    with pytest.raises(ValueError, match="reserved for the transport"):
+        await wrapper.send_bytes(bytes([type_byte]) + b"data")
+    assert ws.sent == []
 
 
 async def test_iter_decodes_type_zero_into_synthesized_text_message() -> None:
@@ -148,7 +184,7 @@ async def test_send_bytes_below_limit_is_a_single_frame() -> None:
 
 
 async def test_send_bytes_fragments_oversized_payload() -> None:
-    """An oversized payload is split into more/end frames that reassemble exactly."""
+    """An oversized payload is split into first/middle/last type 1 frames."""
     initiator, responder = make_paired_sessions()
     ws = FakeWebSocket()
     wrapper = EncryptedWebSocket(ws, initiator)
@@ -157,16 +193,34 @@ async def test_send_bytes_fragments_oversized_payload() -> None:
     payload = b"\x04" + body
     await wrapper.send_bytes(payload)
 
-    assert len(ws.sent) > 1
     frames = [responder.decrypt(ct) for ct in ws.sent]
-    assert all(len(f) <= MAX_TRANSPORT_PLAINTEXT for f in frames)
-    assert frames[0][0] == MSG_TYPE_FRAGMENT_MORE
-    assert frames[0][1] == 0x04  # orig_type carried on the opening frame only
-    assert all(f[0] == MSG_TYPE_FRAGMENT_MORE for f in frames[1:-1])
-    assert frames[-1][0] == MSG_TYPE_FRAGMENT_END
+    assert len(frames) == 3
+    assert all(len(f) == MAX_TRANSPORT_PLAINTEXT for f in frames[:-1])
+    assert len(frames[-1]) <= MAX_TRANSPORT_PLAINTEXT
+    assert [f[:2] for f in frames] == [
+        bytes([MSG_TYPE_FRAGMENT, 0x02]),
+        bytes([MSG_TYPE_FRAGMENT, 0x00]),
+        bytes([MSG_TYPE_FRAGMENT, 0x01]),
+    ]
+    assert frames[0][2] == 0x04  # orig_type carried on the first frame only
 
-    reassembled = frames[0][2:] + b"".join(f[1:] for f in frames[1:])
+    reassembled = frames[0][3:] + b"".join(f[2:] for f in frames[1:])
     assert reassembled == body
+
+
+async def test_two_frame_message_sets_first_and_last_flags() -> None:
+    """A message spanning exactly two frames has no middle frame."""
+    initiator, responder = make_paired_sessions()
+    ws = FakeWebSocket()
+    wrapper = EncryptedWebSocket(ws, initiator)
+
+    await wrapper.send_bytes(b"\x04" + b"x" * MAX_TRANSPORT_PLAINTEXT)
+
+    frames = [responder.decrypt(ct) for ct in ws.sent]
+    assert [f[:2] for f in frames] == [
+        bytes([MSG_TYPE_FRAGMENT, FIRST]),
+        bytes([MSG_TYPE_FRAGMENT, LAST]),
+    ]
 
 
 async def test_receive_reassembles_fragmented_round_trip() -> None:
@@ -220,8 +274,8 @@ async def test_receive_rejects_fragmented_message_exceeding_cap(
     ws = FakeWebSocket()
     wrapper = EncryptedWebSocket(ws, responder)
 
-    start = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT_MORE, 0x04]) + b"12345")
-    overflow = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT_MORE]) + b"67890ABC")
+    start = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT, FIRST, 0x04]) + b"12345")
+    overflow = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT, 0]) + b"67890ABC")
     await ws.push(WSMessage(WSMsgType.BINARY, start, ""))
     await ws.push(WSMessage(WSMsgType.BINARY, overflow, ""))
     await ws.push(None)
@@ -231,19 +285,91 @@ async def test_receive_rejects_fragmented_message_exceeding_cap(
     assert "maximum reassembly size" in str(seen[0].data)
 
 
-async def test_receive_rejects_fragment_end_with_nothing_in_flight() -> None:
-    """A fragment-end frame with no message in flight surfaces as ERROR."""
-    initiator, responder = make_paired_sessions()
-    ws = FakeWebSocket()
-    wrapper = EncryptedWebSocket(ws, responder)
+async def test_receive_rejects_first_frame_data_exceeding_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap also applies to the data carried by the first fragment."""
+    monkeypatch.setattr("aiosendspin.noise.wire.MAX_REASSEMBLED_MESSAGE_BYTES", 4)
+    seen, _ = await _receive_frames([bytes([MSG_TYPE_FRAGMENT, FIRST, 0x04]) + b"12345"])
+    assert seen[0].type is WSMsgType.ERROR
+    assert "maximum reassembly size" in str(seen[0].data)
 
-    ct = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT_END]) + b"orphan")
-    await ws.push(WSMessage(WSMsgType.BINARY, ct, ""))
-    await ws.push(None)
 
-    seen = [m async for m in wrapper]
+@pytest.mark.parametrize("flags", [0x00, LAST])
+async def test_receive_rejects_continuation_with_nothing_in_flight(flags: int) -> None:
+    """A non-first fragment with no message in flight surfaces as ERROR."""
+    seen, _ = await _receive_frames([bytes([MSG_TYPE_FRAGMENT, flags]) + b"orphan"])
     assert seen[0].type is WSMsgType.ERROR
     assert "no fragmented message in flight" in str(seen[0].data)
+
+
+@pytest.mark.parametrize("flags", [FIRST, FIRST | LAST])
+async def test_receive_rejects_first_fragment_while_in_flight(flags: int) -> None:
+    """A second first fragment before the in-flight message completes surfaces as ERROR."""
+    seen, wrapper = await _receive_frames(
+        [
+            bytes([MSG_TYPE_FRAGMENT, FIRST, 0x04]) + b"start",
+            bytes([MSG_TYPE_FRAGMENT, flags, 0x04]) + b"again",
+        ]
+    )
+    assert seen[0].type is WSMsgType.ERROR
+    assert "first fragment while a fragmented message is in flight" in str(seen[0].data)
+    assert wrapper._reasm_buf is None  # noqa: SLF001
+
+
+async def test_receive_dispatches_single_frame_with_first_and_last_flags() -> None:
+    """A lone fragment with both flags set is a complete message."""
+    seen, _ = await _receive_frames([bytes([MSG_TYPE_FRAGMENT, FIRST | LAST, 0x04]) + b"whole"])
+    assert len(seen) == 1
+    assert seen[0].type is WSMsgType.BINARY
+    assert seen[0].data == b"\x04whole"
+
+
+async def test_receive_dispatches_single_frame_json_as_text() -> None:
+    """A lone fragment with orig_type 0 is delivered as TEXT."""
+    seen, _ = await _receive_frames([bytes([MSG_TYPE_FRAGMENT, FIRST | LAST, 0x00]) + b'{"a":1}'])
+    assert seen[0].type is WSMsgType.TEXT
+    assert seen[0].data == '{"a":1}'
+
+
+@pytest.mark.parametrize("flags", [0x04, 0x80, FIRST | 0x10, LAST | 0x40])
+async def test_receive_rejects_reserved_flag_bits(flags: int) -> None:
+    """Any of flag bits 2-7 set surfaces as ERROR."""
+    seen, _ = await _receive_frames([bytes([MSG_TYPE_FRAGMENT, flags, 0x04]) + b"data"])
+    assert seen[0].type is WSMsgType.ERROR
+    assert "reserved bits" in str(seen[0].data)
+
+
+async def test_receive_rejects_orig_type_one() -> None:
+    """A first fragment whose orig_type is itself a fragment surfaces as ERROR."""
+    seen, _ = await _receive_frames(
+        [bytes([MSG_TYPE_FRAGMENT, FIRST | LAST, MSG_TYPE_FRAGMENT]) + b"data"]
+    )
+    assert seen[0].type is WSMsgType.ERROR
+    assert "orig_type 1" in str(seen[0].data)
+
+
+async def test_receive_rejects_fragment_missing_flags_byte() -> None:
+    """A bare type 1 byte surfaces as ERROR."""
+    seen, _ = await _receive_frames([bytes([MSG_TYPE_FRAGMENT])])
+    assert seen[0].type is WSMsgType.ERROR
+    assert "missing flags byte" in str(seen[0].data)
+
+
+async def test_receive_rejects_first_fragment_missing_orig_type() -> None:
+    """A first fragment that ends after the flags byte surfaces as ERROR."""
+    seen, _ = await _receive_frames([bytes([MSG_TYPE_FRAGMENT, FIRST | LAST])])
+    assert seen[0].type is WSMsgType.ERROR
+    assert "missing orig_type" in str(seen[0].data)
+
+
+@pytest.mark.parametrize("type_byte", [2, 3])
+async def test_receive_rejects_legacy_fragment_ids_without_opt_in(type_byte: int) -> None:
+    """Without the legacy opt-in (the client SDK default), IDs 2 and 3 are a protocol error."""
+    seen, _ = await _receive_frames([bytes([type_byte, 0x04]) + b"data"])
+    assert len(seen) == 1
+    assert seen[0].type is WSMsgType.ERROR
+    assert "reserved binary message type" in str(seen[0].data)
 
 
 async def test_receive_rejects_non_fragment_frame_mid_reassembly() -> None:
@@ -252,7 +378,7 @@ async def test_receive_rejects_non_fragment_frame_mid_reassembly() -> None:
     ws = FakeWebSocket()
     wrapper = EncryptedWebSocket(ws, responder)
 
-    more = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT_MORE, 0x04]) + b"start")
+    more = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT, FIRST, 0x04]) + b"start")
     interloper = initiator.encrypt(b"\x00" + b'{"type":"x"}')
     await ws.push(WSMessage(WSMsgType.BINARY, more, ""))
     await ws.push(WSMessage(WSMsgType.BINARY, interloper, ""))
@@ -374,8 +500,8 @@ async def test_corrupt_frame_mid_reassembly_clears_partial_plaintext() -> None:
     ws = FakeWebSocket()
     wrapper = EncryptedWebSocket(ws, responder)
 
-    start = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT_MORE, 0x04]) + b"partial")  # nonce 0
-    corrupt = _tamper_tag(initiator.encrypt(bytes([MSG_TYPE_FRAGMENT_MORE]) + b"more"))  # nonce 1
+    start = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT, FIRST, 0x04]) + b"partial")  # nonce 0
+    corrupt = _tamper_tag(initiator.encrypt(bytes([MSG_TYPE_FRAGMENT, 0]) + b"more"))  # nonce 1
     await ws.push(WSMessage(WSMsgType.BINARY, start, ""))
     await ws.push(WSMessage(WSMsgType.BINARY, corrupt, ""))
     await ws.push(None)
@@ -393,7 +519,8 @@ async def test_corrupt_frame_mid_reassembly_clears_partial_plaintext() -> None:
     [
         0,
         1,
-        MAX_TRANSPORT_PLAINTEXT - 2,  # last byte that fits before the type byte forces a split
+        MAX_TRANSPORT_PLAINTEXT - 3,  # largest body the first fragment could carry
+        MAX_TRANSPORT_PLAINTEXT - 2,
         MAX_TRANSPORT_PLAINTEXT - 1,
         MAX_TRANSPORT_PLAINTEXT,  # first size that must fragment
         MAX_TRANSPORT_PLAINTEXT + 1,
@@ -420,6 +547,139 @@ async def test_fragmentation_round_trip_at_boundaries(body_len: int) -> None:
     assert len(seen) == 1
     assert seen[0].type is WSMsgType.BINARY
     assert seen[0].data == payload
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+async def test_legacy_fragments_reassemble_with_opt_in() -> None:
+    """With the opt-in, legacy 2/3 frames reassemble and the callback fires once per message."""
+    calls: list[None] = []
+    seen, _ = await _receive_frames(
+        [
+            bytes([MSG_TYPE_FRAGMENT_MORE, 0x04]) + b"one",
+            bytes([MSG_TYPE_FRAGMENT_MORE]) + b"two",
+            bytes([MSG_TYPE_FRAGMENT_END]) + b"three",
+            bytes([MSG_TYPE_FRAGMENT_MORE, 0x00]) + b'{"a":',
+            bytes([MSG_TYPE_FRAGMENT_END]) + b"1}",
+        ],
+        on_legacy_fragment=lambda: calls.append(None),
+    )
+    assert [(m.type, m.data) for m in seen] == [
+        (WSMsgType.BINARY, b"\x04onetwothree"),
+        (WSMsgType.TEXT, '{"a":1}'),
+    ]
+    assert len(calls) == 2
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+@pytest.mark.parametrize(
+    ("frame", "error"),
+    [
+        (bytes([MSG_TYPE_FRAGMENT_END]) + b"orphan", "no fragmented message in flight"),
+        (bytes([MSG_TYPE_FRAGMENT_MORE]), "missing orig_type"),
+        (bytes([MSG_TYPE_FRAGMENT_MORE, 1]) + b"data", "reserved orig_type 1"),
+        (bytes([MSG_TYPE_FRAGMENT_MORE, 2]) + b"data", "reserved orig_type 2"),
+        (bytes([MSG_TYPE_FRAGMENT_MORE, 3]) + b"data", "reserved orig_type 3"),
+    ],
+)
+async def test_malformed_legacy_fragment_is_rejected(frame: bytes, error: str) -> None:
+    """With the opt-in, a malformed legacy start frame surfaces as ERROR before the callback."""
+    calls: list[None] = []
+    seen, _ = await _receive_frames([frame], on_legacy_fragment=lambda: calls.append(None))
+    assert seen[0].type is WSMsgType.ERROR
+    assert error in str(seen[0].data)
+    assert calls == []
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+async def test_legacy_fragment_callback_exception_propagates() -> None:
+    """An exception raised by the legacy callback escapes receive()."""
+
+    def reject() -> None:
+        raise RuntimeError("rejected")
+
+    initiator, responder = make_paired_sessions()
+    ws = FakeWebSocket()
+    wrapper = EncryptedWebSocket(ws, responder)
+    wrapper.on_legacy_fragment = reject
+    ct = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT_MORE, 0x04]) + b"data")
+    await ws.push(WSMessage(WSMsgType.BINARY, ct, ""))
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        await wrapper.receive()
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+@pytest.mark.parametrize(
+    ("frames", "error"),
+    [
+        (
+            [bytes([MSG_TYPE_FRAGMENT, FIRST, 0x04]) + b"a", bytes([MSG_TYPE_FRAGMENT_END]) + b"b"],
+            "legacy fragment inside a type 1 fragmented message",
+        ),
+        (
+            [bytes([MSG_TYPE_FRAGMENT_MORE, 0x04]) + b"a", bytes([MSG_TYPE_FRAGMENT, LAST]) + b"b"],
+            "type 1 fragment inside a legacy fragmented message",
+        ),
+        (
+            [
+                bytes([MSG_TYPE_FRAGMENT_MORE, 0x04]) + b"a",
+                bytes([MSG_TYPE_FRAGMENT, FIRST | LAST, 0x04]) + b"b",
+            ],
+            "first fragment while a fragmented message is in flight",
+        ),
+    ],
+)
+async def test_mixed_legacy_and_type_1_fragments_are_rejected(
+    frames: list[bytes], error: str
+) -> None:
+    """Legacy and type 1 fragments share one in-flight message and cannot be interleaved."""
+    seen, _ = await _receive_frames(frames, on_legacy_fragment=lambda: None)
+    assert seen[0].type is WSMsgType.ERROR
+    assert error in str(seen[0].data)
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+async def test_legacy_fragment_framing_emits_ids_2_and_3() -> None:
+    """With legacy framing on, an oversized payload is sent as 2/2/3 frames without flags."""
+    initiator, responder = make_paired_sessions()
+    ws = FakeWebSocket()
+    wrapper = EncryptedWebSocket(ws, initiator)
+    wrapper.legacy_fragment_framing = True
+
+    body = bytes(range(256)) * 600
+    await wrapper.send_bytes(b"\x04" + body)
+
+    frames = [responder.decrypt(ct) for ct in ws.sent]
+    assert all(len(f) <= MAX_TRANSPORT_PLAINTEXT for f in frames)
+    assert [f[0] for f in frames] == [
+        MSG_TYPE_FRAGMENT_MORE,
+        MSG_TYPE_FRAGMENT_MORE,
+        MSG_TYPE_FRAGMENT_END,
+    ]
+    assert frames[0][1] == 0x04
+    assert frames[0][2:] + b"".join(f[1:] for f in frames[1:]) == body
+
+
+# DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+async def test_legacy_fragment_framing_round_trips_through_opted_in_receiver() -> None:
+    """A legacy-framed send reassembles on a receiver that accepts legacy fragments."""
+    initiator, responder = make_paired_sessions()
+    sender_ws = FakeWebSocket()
+    sender = EncryptedWebSocket(sender_ws, initiator)
+    sender.legacy_fragment_framing = True
+    receiver_ws = FakeWebSocket()
+    receiver = EncryptedWebSocket(receiver_ws, responder)
+    receiver.on_legacy_fragment = lambda: None
+
+    payload = b"\x04" + bytes(i % 251 for i in range(3 * MAX_TRANSPORT_PLAINTEXT))
+    await sender.send_bytes(payload)
+    for ct in sender_ws.sent:
+        assert isinstance(ct, bytes)
+        await receiver_ws.push(WSMessage(WSMsgType.BINARY, ct, ""))
+    await receiver_ws.push(None)
+
+    seen = [m async for m in receiver]
+    assert [(m.type, m.data) for m in seen] == [(WSMsgType.BINARY, payload)]
 
 
 def test_swap_session_refuses_pre_handshake_session() -> None:
