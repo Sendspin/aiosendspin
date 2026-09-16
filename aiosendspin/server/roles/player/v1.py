@@ -212,9 +212,8 @@ class PlayerV1Role(Role):
             state.buffer_tracker.reset()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
-        # Commands are declared per connection; only a pre-#177 hello's carry into it.
-        # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
-        state.state_supported_commands = list(self._legacy_hello_commands() or [])
+        # No command may be sent until this connection's client/state declares it.
+        state.state_supported_commands = []
 
     def on_deactivate(self) -> None:
         """End the player stream when the role is deactivated while still connected."""
@@ -712,17 +711,16 @@ class PlayerV1Role(Role):
         if changed:
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
 
-        if state.supported_commands is not None:
-            legacy_commands = self._legacy_hello_commands()
+        commands = state.supported_commands
+        legacy_commands = self._legacy_hello_commands()
+        if legacy_commands is not None:
             # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
             # A pre-#177 state list carries only delay commands, so it extends the
-            # hello's volume/mute rather than replacing them.
-            if legacy_commands is not None:
-                self.state_supported_commands = list(
-                    dict.fromkeys([*legacy_commands, *state.supported_commands])
-                )
-            else:
-                self.state_supported_commands = list(state.supported_commands)
+            # hello's volume/mute rather than replacing them, from the first state on.
+            current = self.state_supported_commands if commands is None else commands
+            commands = list(dict.fromkeys([*legacy_commands, *current]))
+        if commands is not None:
+            self.state_supported_commands = list(commands)
 
         if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
             self.output_delay_ms = state.output_delay_ms

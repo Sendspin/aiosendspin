@@ -1212,15 +1212,27 @@ def test_on_connect_resets_supported_commands() -> None:
 
 
 # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
-def test_legacy_hello_commands_seed_and_extend_state_list() -> None:
-    """A pre-#177 hello's commands apply on connect and are kept alongside the state list."""
+def test_legacy_hello_commands_apply_from_first_state() -> None:
+    """A pre-#177 hello's commands apply once a client/state arrives, even one without a list."""
     client = _stub_with_player_support([PlayerCommand.VOLUME, PlayerCommand.MUTE])
     role = PlayerV1Role(client=client)
 
     role.on_connect()
+    role.set_volume(30)
+    client.send_message.assert_not_called()
+
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(volume=50)))
     assert role.state_supported_commands == [PlayerCommand.VOLUME, PlayerCommand.MUTE]
     role.set_volume(30)
     client.send_message.assert_called_once()
+
+
+# DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+def test_legacy_hello_commands_extend_state_list() -> None:
+    """A pre-#177 state list is kept alongside the hello's commands, not in place of them."""
+    client = _stub_with_player_support([PlayerCommand.VOLUME, PlayerCommand.MUTE])
+    role = PlayerV1Role(client=client)
+    role.on_connect()
 
     role.on_client_state(
         ClientStatePayload(
