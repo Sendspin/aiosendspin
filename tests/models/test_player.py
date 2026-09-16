@@ -11,13 +11,14 @@ from aiosendspin.models.player import (
     PlayerAudioHeader,
     PlayerCommandPayload,
     PlayerStatePayload,
+    SupportedAudioFormat,
     compute_send_ahead,
     pack_player_audio_frame,
     pack_player_audio_header,
     stamp_send_ahead,
     unpack_player_audio_header,
 )
-from aiosendspin.models.types import BinaryMessageType, PlayerCommand
+from aiosendspin.models.types import AudioCodec, BinaryMessageType, PlayerCommand
 
 
 def test_player_state_output_delay_serializes_when_set() -> None:
@@ -305,3 +306,50 @@ def test_stamped_player_audio_frame_matches_packed_header() -> None:
     stamp_send_ahead(frame, SEND_AHEAD_MAX)
 
     assert frame == pack_player_audio_header(1_500_000, SEND_AHEAD_MAX) + b"audio"
+
+
+def test_player_state_format_round_trips() -> None:
+    """The player format preference round-trips through JSON."""
+    fmt = SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=24)
+    data = PlayerStatePayload(format=fmt).to_dict()
+    assert data["format"] == {
+        "codec": "flac",
+        "channels": 2,
+        "sample_rate": 48000,
+        "bit_depth": 24,
+    }
+    assert PlayerStatePayload.from_dict(data).format == fmt
+
+
+def test_player_state_format_omitted_when_unset() -> None:
+    """An unset format is absent from the wire, which means no preference."""
+    assert "format" not in PlayerStatePayload().to_dict()
+    assert PlayerStatePayload.from_json('{"volume": 50}').format is None
+
+
+@pytest.mark.parametrize(
+    ("codec", "other_bit_depth", "expected"),
+    [(AudioCodec.OPUS, 24, True), (AudioCodec.FLAC, 24, False), (AudioCodec.PCM, 16, True)],
+)
+def test_supported_audio_format_matches_ignores_opus_bit_depth(
+    codec: AudioCodec,
+    other_bit_depth: int,
+    expected: bool,  # noqa: FBT001
+) -> None:
+    """Formats match on every field, except that bit_depth is not compared for opus."""
+    fmt = SupportedAudioFormat(codec=codec, channels=2, sample_rate=48000, bit_depth=16)
+    other = SupportedAudioFormat(
+        codec=codec, channels=2, sample_rate=48000, bit_depth=other_bit_depth
+    )
+    assert fmt.matches(other) is expected
+
+
+def test_supported_audio_format_matches_compares_codec_rate_and_channels() -> None:
+    """A different codec, sample rate or channel count never matches."""
+    fmt = SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
+    for other in (
+        SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=16),
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=1, sample_rate=48000, bit_depth=16),
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=44100, bit_depth=16),
+    ):
+        assert not fmt.matches(other)

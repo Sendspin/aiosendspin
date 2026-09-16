@@ -737,8 +737,9 @@ class StreamClearMessage(ServerMessage):
 class StreamRequestFormatPayload(SendspinModel):
     """Request different stream format (upgrade or downgrade)."""
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     player: StreamRequestFormatPlayer | None = None
-    """Player format request (only for clients with player role)."""
+    """Pre-#195 player format request, superseded by the client/state player `format`."""
     artwork: StreamRequestFormatArtwork | None = None
     """Artwork format request (only for clients with artwork role)."""
     visualizer: StreamRequestFormatVisualizer | None = None
