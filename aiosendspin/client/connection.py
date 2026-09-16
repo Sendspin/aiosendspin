@@ -259,7 +259,7 @@ class SendspinConnection:
     _group_state: GroupUpdateServerPayload | None = None
     """Latest group state received from server."""
     _server_state: ServerStatePayload | None = None
-    """Latest server state received from server."""
+    """Latest state of each role object received from server."""
 
     def __init__(self, client: SendspinClient) -> None:
         """Create a connection owned by ``client``, seeding per-connection state."""
@@ -1395,7 +1395,9 @@ class SendspinConnection:
         self._client.notify_group_callback(payload)
 
     def _handle_server_state(self, payload: ServerStatePayload) -> None:
-        self._server_state = payload
+        self._server_state = (
+            payload if self._server_state is None else self._server_state.merge(payload)
+        )
         if not isinstance(payload.controller, UndefinedField):
             self._client.notify_controller_callback(payload)
         if not isinstance(payload.metadata, UndefinedField):

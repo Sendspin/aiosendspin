@@ -103,15 +103,6 @@ class ControllerStatePayload(SendspinModel):
         if not 0 <= self.volume <= 100:
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
 
-    @classmethod
-    def __pre_deserialize__(cls, d: dict[str, object]) -> dict[str, object]:
-        """Backfill repeat/shuffle for pre-spec servers."""
-        # Deprecated: drop with metadata dual-emit.
-        data = dict(d)
-        data.setdefault("repeat", RepeatMode.OFF.value)
-        data.setdefault("shuffle", False)
-        return data
-
     class Config(SendspinConfig):
         """Config for serializing state messages."""
 

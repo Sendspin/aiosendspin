@@ -7,11 +7,10 @@ receive color palettes derived from the current audio.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import ClassVar
 
 from .base import SendspinConfig, SendspinModel
-from .types import UndefinedField, undefined_field
 
 _RGB = tuple[int, int, int]
 _RGB_LEN = 3
@@ -41,32 +40,27 @@ class SessionUpdateColor(SendspinModel):
 
     timestamp: int
     """Server clock time in microseconds for when these colors are valid."""
-    background_dark: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Background color for dark mode as `(R, G, B)`. Null clears the field."""
-    background_light: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Background color for light mode as `(R, G, B)`. Null clears the field."""
-    primary: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Dominant color as `(R, G, B)`. Null clears the field."""
-    accent: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Secondary or complementary color as `(R, G, B)`. Null clears the field."""
-    on_dark: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Light color for use on dark backgrounds as `(R, G, B)`. Null clears the field."""
-    on_light: _RGB | None | UndefinedField = field(default_factory=undefined_field)
-    """Dark color for use on light backgrounds as `(R, G, B)`. Null clears the field."""
+    background_dark: _RGB | None = None
+    """Background color for dark mode as `(R, G, B)`."""
+    background_light: _RGB | None = None
+    """Background color for light mode as `(R, G, B)`."""
+    primary: _RGB | None = None
+    """Dominant color as `(R, G, B)`."""
+    accent: _RGB | None = None
+    """Secondary or complementary color as `(R, G, B)`."""
+    on_dark: _RGB | None = None
+    """Light color for use on dark backgrounds as `(R, G, B)`."""
+    on_light: _RGB | None = None
+    """Dark color for use on light backgrounds as `(R, G, B)`."""
 
     def __post_init__(self) -> None:
         """Validate RGB fields."""
         for name in self._RGB_FIELDS:
             value = getattr(self, name)
-            if not isinstance(value, UndefinedField) and value is not None:
+            if value is not None:
                 _validate_rgb(name, value)
-
-    @classmethod
-    def cleared(cls, timestamp: int) -> SessionUpdateColor:
-        """Build a SessionUpdateColor that explicitly clears all color fields."""
-        return cls(timestamp=timestamp, **dict.fromkeys(cls._RGB_FIELDS))
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
 
-        omit_default = True
+        omit_none = True

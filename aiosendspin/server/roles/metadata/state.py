@@ -8,14 +8,6 @@ from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.types import RepeatMode
 
 
-def _progress_fields_changed(last: Metadata, current: Metadata) -> bool:
-    return (
-        last.track_progress != current.track_progress
-        or last.track_duration != current.track_duration
-        or last.playback_speed != current.playback_speed
-    )
-
-
 @dataclass
 class Metadata:
     """Metadata for media playback."""
@@ -34,19 +26,23 @@ class Metadata:
     """Release year of the current media."""
     track: int | None = None
     """Track number of the current media."""
-    # Deprecated: use ControllerGroupRole.set_repeat. Still emitted for backwards compatibility.
+    # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
     repeat: RepeatMode | None = None
-    """Current repeat mode."""
-    # Deprecated: use ControllerGroupRole.set_shuffle. Still emitted for backwards compatibility.
+    """Ignored. Use `ControllerGroupRole.set_repeat` instead."""
+    # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
     shuffle: bool | None = None
-    """Whether shuffle is enabled."""
+    """Ignored. Use `ControllerGroupRole.set_shuffle` instead."""
 
     # Progress fields:
-    # When sending to clients, all three fields must be set or none will be sent
+    # A track_progress requires a playback_speed; progress is sent whenever both are set
     track_progress: int | None = None
-    """Track progress in milliseconds at the last update time."""
+    """Track progress in milliseconds at the last update time. Requires `playback_speed`."""
     track_duration: int | None = None
-    """Track duration in milliseconds. Use 0 for unlimited/unknown duration (e.g., live streams)."""
+    """
+    Track duration in milliseconds.
+
+    Use 0 or None for unlimited/unknown duration (e.g., live streams); None is sent as 0.
+    """
     playback_speed: int | None = None
     """Playback speed multiplier * 1000 (e.g., 1000 = normal, 1500 = 1.5x, 0 = paused)."""
 
@@ -57,6 +53,11 @@ class Metadata:
     You don't need to set this, since it will be set automatically by set_metadata() if not
     provided.
     """
+
+    def __post_init__(self) -> None:
+        """Reject a playback position that has no playback speed."""
+        if self.track_progress is not None and self.playback_speed is None:
+            raise ValueError("playback_speed is required when track_progress is set")
 
     def equals(self, other: Metadata | None, progress_tolerance_ms: int = 500) -> bool:
         """
@@ -83,8 +84,6 @@ class Metadata:
             and self.track == other.track
             and self.track_duration == other.track_duration
             and self.playback_speed == other.playback_speed
-            and self.repeat == other.repeat
-            and self.shuffle == other.shuffle
         ):
             return False
 
@@ -114,87 +113,23 @@ class Metadata:
         progress_drift = abs(actual_progress_change - expected_progress_change)
         return progress_drift <= progress_tolerance_ms
 
-    def diff_update(self, last: Metadata | None, timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata containing only changed fields compared to last."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-
-        # Only include fields that have changed since the last metadata update
-        if last is None or last.title != self.title:
-            metadata_update.title = self.title
-        if last is None or last.artist != self.artist:
-            metadata_update.artist = self.artist
-        if last is None or last.album_artist != self.album_artist:
-            metadata_update.album_artist = self.album_artist
-        if last is None or last.album != self.album:
-            metadata_update.album = self.album
-        if last is None or last.artwork_url != self.artwork_url:
-            metadata_update.artwork_url = self.artwork_url
-        if last is None or last.year != self.year:
-            metadata_update.year = self.year
-        if last is None or last.track != self.track:
-            metadata_update.track = self.track
-        if last is None or last.repeat != self.repeat:
-            metadata_update.repeat = self.repeat
-        if last is None or last.shuffle != self.shuffle:
-            metadata_update.shuffle = self.shuffle
-
-        # Emit progress=null to clear when the previous state had progress and the new state
-        # doesn't (spec: omitted = unchanged, null = clear). Emit a full Progress object on the
-        # first update or when any progress field changed.
-        last_had_progress = last is not None and last.track_progress is not None
-        if (
-            self.track_progress is not None
-            and self.track_duration is not None
-            and self.playback_speed is not None
-        ):
-            if last is None or _progress_fields_changed(last, self):
-                metadata_update.progress = Progress(
-                    track_progress=self.track_progress,
-                    track_duration=self.track_duration,
-                    playback_speed=self.playback_speed,
-                )
-        elif last_had_progress:
-            metadata_update.progress = None
-
-        return metadata_update
-
-    @staticmethod
-    def cleared_update(timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata that clears all metadata fields."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-        metadata_update.title = None
-        metadata_update.artist = None
-        metadata_update.album_artist = None
-        metadata_update.album = None
-        metadata_update.artwork_url = None
-        metadata_update.year = None
-        metadata_update.track = None
-        metadata_update.progress = None
-        metadata_update.repeat = None
-        metadata_update.shuffle = None
-        return metadata_update
-
     def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
-        """Build a SessionUpdateMetadata snapshot with all current values."""
-        metadata_update = SessionUpdateMetadata(timestamp=timestamp)
-        metadata_update.title = self.title
-        metadata_update.artist = self.artist
-        metadata_update.album_artist = self.album_artist
-        metadata_update.album = self.album
-        metadata_update.artwork_url = self.artwork_url
-        metadata_update.year = self.year
-        metadata_update.track = self.track
-        metadata_update.repeat = self.repeat
-        metadata_update.shuffle = self.shuffle
-        # Build progress object if all progress fields are set
-        if (
-            self.track_progress is not None
-            and self.track_duration is not None
-            and self.playback_speed is not None
-        ):
-            metadata_update.progress = Progress(
+        """Build a SessionUpdateMetadata carrying the full current state."""
+        progress = None
+        if self.track_progress is not None and self.playback_speed is not None:
+            progress = Progress(
                 track_progress=self.track_progress,
-                track_duration=self.track_duration,
+                track_duration=self.track_duration or 0,
                 playback_speed=self.playback_speed,
             )
-        return metadata_update
+        return SessionUpdateMetadata(
+            timestamp=timestamp,
+            title=self.title,
+            artist=self.artist,
+            album_artist=self.album_artist,
+            album=self.album,
+            artwork_url=self.artwork_url,
+            year=self.year,
+            track=self.track,
+            progress=progress,
+        )

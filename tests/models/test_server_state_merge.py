@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
@@ -43,7 +44,7 @@ def test_server_state_merge_whole_role_null_clears_role() -> None:
 
 
 def test_server_state_merge_absent_role_preserved() -> None:
-    """An incoming delta that omits a role leaves the existing role state intact."""
+    """An incoming message that omits a role leaves the existing role state intact."""
     existing = ServerStateMessage(
         payload=ServerStatePayload(
             metadata=SessionUpdateMetadata(timestamp=100, title="Song Title"),
@@ -63,76 +64,59 @@ def test_server_state_merge_absent_role_preserved() -> None:
     assert merged.payload.color is None
 
 
-def test_server_state_merge_preserves_metadata_fields_omitted_by_undefined() -> None:
-    """Keep existing metadata fields when a later delta omits them with UndefinedField."""
+def test_server_state_merge_replaces_metadata_object_wholesale() -> None:
+    """A later metadata object replaces the earlier one; no stale field survives."""
     existing = ServerStateMessage(
         payload=ServerStatePayload(
             metadata=SessionUpdateMetadata(
                 timestamp=100,
                 title="Song Title",
                 album="Some Album",
-            )
-        )
-    )
-    incoming = ServerStateMessage(
-        payload=ServerStatePayload(
-            metadata=SessionUpdateMetadata(
-                timestamp=200,
                 progress=Progress(
-                    track_progress=1_234,
-                    track_duration=5_678,
+                    track_progress=30_000,
+                    track_duration=213_000,
                     playback_speed=1_000,
                 ),
             )
         )
     )
-
-    merged = existing.merge(incoming)
-
-    assert isinstance(merged, ServerStateMessage)
-    assert merged.payload.metadata is not None
-    assert merged.payload.metadata.timestamp == 200
-    assert merged.payload.metadata.title == "Song Title"
-    assert merged.payload.metadata.album == "Some Album"
-    assert merged.payload.metadata.progress == Progress(
-        track_progress=1_234,
-        track_duration=5_678,
-        playback_speed=1_000,
-    )
-
-
-def test_server_state_merge_null_clears_existing_field() -> None:
-    """Per the spec, fields set to null should be cleared from state."""
-    existing = ServerStateMessage(
-        payload=ServerStatePayload(
-            metadata=SessionUpdateMetadata(
-                timestamp=100,
-                title="Song Title",
-                artist="Artist Name",
-                album="Some Album",
-            )
-        )
-    )
     incoming = ServerStateMessage(
         payload=ServerStatePayload(
-            metadata=SessionUpdateMetadata(
-                timestamp=200,
-                title=None,
-                artist=None,
-            )
+            metadata=SessionUpdateMetadata(timestamp=200, title="Other Title"),
         )
     )
 
     merged = existing.merge(incoming)
 
     assert isinstance(merged, ServerStateMessage)
-    assert merged.payload.metadata is not None
-    assert merged.payload.metadata.timestamp == 200
-    # Explicitly set to None → should be cleared
-    assert merged.payload.metadata.title is None
-    assert merged.payload.metadata.artist is None
-    # Not included in delta (UndefinedField) → should be preserved
-    assert merged.payload.metadata.album == "Some Album"
+    assert merged.payload.metadata == SessionUpdateMetadata(timestamp=200, title="Other Title")
+    assert merged.payload.to_dict() == {"metadata": {"timestamp": 200, "title": "Other Title"}}
+
+
+def test_server_state_merge_replaces_each_role_object_independently() -> None:
+    """Each role object is replaced or kept on its own; omitted roles keep queued state."""
+    controller = ControllerStatePayload(
+        supported_commands=[MediaCommand.PLAY],
+        volume=50,
+        muted=False,
+        repeat=RepeatMode.OFF,
+        shuffle=False,
+    )
+    color = SessionUpdateColor(timestamp=100, primary=(1, 2, 3))
+    existing = ServerStateMessage(
+        payload=ServerStatePayload(
+            metadata=SessionUpdateMetadata(timestamp=100, title="Song Title"),
+            color=color,
+        )
+    )
+    incoming = ServerStateMessage(payload=ServerStatePayload(metadata=None, controller=controller))
+
+    merged = existing.merge(incoming)
+
+    assert isinstance(merged, ServerStateMessage)
+    assert merged.payload.metadata is None
+    assert merged.payload.controller == controller
+    assert merged.payload.color == color
 
 
 def test_server_state_merge_controller_overwrites_repeat_and_shuffle() -> None:
@@ -168,32 +152,15 @@ def test_server_state_merge_controller_overwrites_repeat_and_shuffle() -> None:
     assert merged.payload.controller.shuffle is True
 
 
-def test_server_state_merge_null_clears_nested_progress() -> None:
-    """Setting progress to None should clear it, not preserve the old value."""
-    existing = ServerStateMessage(
-        payload=ServerStatePayload(
-            metadata=SessionUpdateMetadata(
-                timestamp=100,
-                progress=Progress(
-                    track_progress=30_000,
-                    track_duration=213_000,
-                    playback_speed=1_000,
-                ),
-            )
-        )
+def test_legacy_metadata_repeat_and_shuffle_are_ignored_on_parse() -> None:
+    """A metadata object that still carries repeat/shuffle parses without them."""
+    decoded = ServerStatePayload.from_dict(
+        {"metadata": {"timestamp": 1, "title": "X", "repeat": "all", "shuffle": True}}
     )
-    incoming = ServerStateMessage(
-        payload=ServerStatePayload(
-            metadata=SessionUpdateMetadata(
-                timestamp=200,
-                progress=None,
-            )
-        )
-    )
+    assert decoded.metadata == SessionUpdateMetadata(timestamp=1, title="X")
 
-    merged = existing.merge(incoming)
 
-    assert isinstance(merged, ServerStateMessage)
-    assert merged.payload.metadata is not None
-    assert merged.payload.metadata.timestamp == 200
-    assert merged.payload.metadata.progress is None
+def test_metadata_object_never_carries_leaf_nulls() -> None:
+    """Unset metadata fields are omitted rather than sent as null."""
+    payload = ServerStatePayload(metadata=SessionUpdateMetadata(timestamp=1, title=None))
+    assert payload.to_dict() == {"metadata": {"timestamp": 1}}

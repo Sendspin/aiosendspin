@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from mashumaro.exceptions import MissingField
 
 from aiosendspin.models.controller import ControllerCommandPayload, ControllerStatePayload
 from aiosendspin.models.types import MediaCommand, RepeatMode
@@ -44,6 +45,12 @@ def test_non_seek_command_rejects_offset_ms() -> None:
     """Commands other than seek must not carry offset_ms."""
     with pytest.raises(ValueError, match="offset_ms"):
         ControllerCommandPayload(command=MediaCommand.PLAY, offset_ms=500)
+
+
+def test_state_requires_repeat_and_shuffle() -> None:
+    """Controller state without repeat/shuffle is rejected rather than backfilled."""
+    with pytest.raises(MissingField):
+        ControllerStatePayload.from_dict({"supported_commands": [], "volume": 0, "muted": False})
 
 
 def test_state_omits_seek_max_ms_when_absent() -> None:

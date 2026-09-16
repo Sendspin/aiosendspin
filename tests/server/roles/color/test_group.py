@@ -73,7 +73,7 @@ def test_set_color_no_op_when_equal() -> None:
 
 
 def test_clear_color() -> None:
-    """clear() sets color to None and sends cleared update."""
+    """clear() sets color to None and sends a color null."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
 
@@ -90,8 +90,7 @@ def test_clear_color() -> None:
     member.send_message.assert_called_once()
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
-    assert msg.payload.color is not None
-    assert msg.payload.color.primary is None
+    assert msg.payload.to_dict() == {"color": None}
 
     event = group._signal_event.call_args.args[0]  # noqa: SLF001
     assert isinstance(event, ColorClearedEvent)
@@ -113,8 +112,8 @@ def test_on_member_join_sends_current_color() -> None:
     assert msg.payload.color.primary == (100, 150, 200)
 
 
-def test_on_member_join_sends_cleared_when_no_color() -> None:
-    """on_member_join sends a cleared update when no color is set."""
+def test_on_member_join_sends_null_when_no_color() -> None:
+    """on_member_join sends a color null when no color is set."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
 
@@ -124,5 +123,24 @@ def test_on_member_join_sends_cleared_when_no_color() -> None:
     member.send_message.assert_called_once()
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
-    assert msg.payload.color is not None
-    assert msg.payload.color.primary is None
+    assert msg.payload.to_dict() == {"color": None}
+
+
+def test_set_color_sends_full_state_on_partial_change() -> None:
+    """A change to one field still sends every set field, with no leaf nulls."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+
+    member = MagicMock()
+    cgr._members = [member]  # noqa: SLF001
+
+    cgr.set_color(Color(primary=(255, 0, 0), accent=(0, 255, 0)))
+    member.send_message.reset_mock()
+
+    cgr.set_color(Color(primary=(255, 0, 0), accent=(0, 0, 255)))
+
+    msg = member.send_message.call_args.args[0]
+    assert isinstance(msg, ServerStateMessage)
+    assert msg.payload.to_dict() == {
+        "color": {"timestamp": 1_000_000, "primary": [255, 0, 0], "accent": [0, 0, 255]}
+    }
