@@ -1192,3 +1192,20 @@ async def test_set_visualizer_state_requires_visualizer_role() -> None:
 
     with pytest.raises(ValueError, match="VISUALIZER role"):
         await client.set_visualizer_state(_VISUALIZER_STATE)
+
+
+async def test_initial_state_carries_artwork_and_visualizer_objects() -> None:
+    """With artwork and visualizer active, one initial client/state carries both objects."""
+    connection, sent = await _state_connection(
+        [Roles.PLAYER.value, Roles.ARTWORK.value, Roles.VISUALIZER.value],
+        roles=[Roles.PLAYER, Roles.ARTWORK, Roles.VISUALIZER],
+        visualizer_support=_visualizer_support(),
+        visualizer_state=_VISUALIZER_STATE,
+    )
+
+    await connection.start()
+
+    assert len(sent) == 1
+    assert "player" in sent[0]
+    assert sent[0]["artwork"] == _ARTWORK_STATE
+    assert sent[0]["visualizer"] == _VISUALIZER_STATE.to_dict()
