@@ -7,12 +7,15 @@ import contextlib
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import orjson
 import pytest
-from aiohttp import WSMsgType
+from aiohttp import WSMessage, WSMsgType
 
+from aiosendspin.models.types import ServerErrorReason
 from aiosendspin.noise.constants import PROTOCOL_VERSION
 from aiosendspin.noise.driver import (
     HandshakeAbortedError,
+    InitRejectedError,
     PskProvider,
     PskResolver,
     _exchange_as_responder,
@@ -34,6 +37,8 @@ from aiosendspin.noise.models import (
     ClientInitPayload,
     NoiseHandshakeMessage,
     NoiseHandshakePayload,
+    ServerErrorMessage,
+    ServerErrorPayload,
     ServerInitMessage,
     ServerInitPayload,
 )
@@ -276,47 +281,207 @@ async def test_psk_lookup_miss_completes_under_the_sentinel() -> None:
     assert server_result.handshake_hash == client_result.handshake_hash
 
 
-async def test_server_rejects_unknown_suite() -> None:
-    """run_server raises HandshakeAbortedError if the client picks an unsupported suite."""
-    server_id = Identity.generate()
-    client_id = Identity.generate()
+_CLIENT_ID = Identity.generate().peer_id
+_SUITE = NoiseCipherSuite.CHACHAPOLY.value
 
-    server_ws, client_ws = make_ws_pair()
 
-    async def bogus_client() -> None:
-        # Send a hand-crafted client/init with an unsupported suite.
-        bad = (
-            '{"payload":{"client_id":"' + client_id.peer_id + '",'
-            '"version":1,"suite":"25519_AESGCM_SHA512"},"type":"client/init"}'
-        )
-        await client_ws.send_str(bad)
+def _client_init(**payload: object) -> str:
+    return orjson.dumps({"type": "client/init", "payload": payload}).decode()
 
-    client_task = asyncio.create_task(bogus_client())
-    with pytest.raises(HandshakeAbortedError, match="unsupported suite"):
+
+_MALFORMED = ServerErrorReason.MALFORMED
+_UNSUPPORTED_VERSION = ServerErrorReason.UNSUPPORTED_VERSION
+_UNSUPPORTED_SUITE = ServerErrorReason.UNSUPPORTED_SUITE
+
+
+@pytest.mark.parametrize(
+    ("client_init_text", "reason"),
+    [
+        pytest.param("this is not json", _MALFORMED, id="not-json"),
+        pytest.param("[]", _MALFORMED, id="not-object"),
+        pytest.param('{"type":"client/hello","payload":{}}', _MALFORMED, id="wrong-type"),
+        pytest.param('{"type":"client/init"}', _MALFORMED, id="no-payload"),
+        pytest.param('{"type":"client/init","payload":[]}', _MALFORMED, id="list-payload"),
+        pytest.param(_client_init(client_id=_CLIENT_ID, suite=_SUITE), _MALFORMED, id="no-version"),
+        pytest.param(
+            _client_init(client_id=_CLIENT_ID, version="1", suite=_SUITE),
+            _MALFORMED,
+            id="string-version",
+        ),
+        pytest.param(
+            _client_init(client_id=_CLIENT_ID, version=True, suite=_SUITE),
+            _MALFORMED,
+            id="bool-version",
+        ),
+        pytest.param(
+            _client_init(client_id=_CLIENT_ID, version=1.0, suite=_SUITE),
+            _MALFORMED,
+            id="float-version",
+        ),
+        pytest.param(
+            _client_init(client_id=_CLIENT_ID, version=None, suite=_SUITE),
+            _MALFORMED,
+            id="null-version",
+        ),
+        pytest.param(_client_init(version=2), _UNSUPPORTED_VERSION, id="future-version-bare"),
+        pytest.param(
+            _client_init(client_id=5, version=0, suite=5),
+            _UNSUPPORTED_VERSION,
+            id="other-version-bad-fields",
+        ),
+        pytest.param(
+            _client_init(client_id=_CLIENT_ID, version=1, suite="25519_AESGCM_SHA512"),
+            _UNSUPPORTED_SUITE,
+            id="unknown-suite",
+        ),
+        pytest.param(
+            _client_init(version=1, suite="25519_AESGCM_SHA512"),
+            _UNSUPPORTED_SUITE,
+            id="unknown-suite-no-client-id",
+        ),
+        pytest.param(_client_init(client_id=_CLIENT_ID, version=1), _MALFORMED, id="no-suite"),
+        pytest.param(
+            _client_init(client_id=_CLIENT_ID, version=1, suite=1),
+            _MALFORMED,
+            id="non-string-suite",
+        ),
+        pytest.param(_client_init(version=1, suite=_SUITE), _MALFORMED, id="no-client-id"),
+        pytest.param(
+            _client_init(client_id=5, version=1, suite=_SUITE),
+            _MALFORMED,
+            id="non-string-client-id",
+        ),
+        pytest.param(
+            _client_init(client_id="tooshort", version=1, suite=_SUITE),
+            _MALFORMED,
+            id="short-client-id",
+        ),
+        pytest.param(
+            _client_init(client_id="*" * PEER_ID_SIZE, version=1, suite=_SUITE),
+            _MALFORMED,
+            id="undecodable-client-id",
+        ),
+    ],
+)
+async def test_server_rejects_client_init_with_server_error(
+    client_init_text: str,
+    reason: ServerErrorReason,
+) -> None:
+    """An unacceptable client/init gets exactly one server/error with the spec-order reason."""
+    server_ws = FakeWebSocket()
+    with pytest.raises(InitRejectedError) as exc_info:
         await run_handshake_server(
             server_ws,
-            local_identity=server_id,
+            local_identity=Identity.generate(),
             psk_provider=_provider(None),
+            client_init_text=client_init_text,
         )
-    await client_task
+    assert exc_info.value.reason is reason
+    assert server_ws.sent == [
+        ServerErrorMessage(payload=ServerErrorPayload(reason=reason)).to_json(),
+    ]
+    assert orjson.loads(server_ws.sent[0]) == {
+        "type": "server/error",
+        "payload": {"reason": reason.value},
+    }
 
 
-async def test_server_wraps_malformed_client_init_as_handshake_aborted() -> None:
-    """A malformed (non-JSON) client/init surfaces as HandshakeAbortedError, not a raw error."""
-    server_id = Identity.generate()
+async def test_server_receives_client_init_before_rejecting_it() -> None:
+    """A rejected client/init read from the socket is answered with server/error."""
     server_ws, client_ws = make_ws_pair()
-
-    async def bogus_client() -> None:
-        await client_ws.send_str("this is not json")
-
-    client_task = asyncio.create_task(bogus_client())
-    with pytest.raises(HandshakeAbortedError, match="malformed client/init"):
+    await client_ws.send_str(_client_init(version=2))
+    with pytest.raises(InitRejectedError):
         await run_handshake_server(
             server_ws,
-            local_identity=server_id,
+            local_identity=Identity.generate(),
             psk_provider=_provider(None),
         )
-    await client_task
+    reply = await client_ws.receive()
+    assert reply.type is WSMsgType.TEXT
+    assert ServerErrorMessage.from_json(reply.data).payload.reason is _UNSUPPORTED_VERSION
+
+
+async def test_server_rejection_survives_a_dropped_peer() -> None:
+    """A peer gone before server/error is sent still yields the typed rejection."""
+    server_ws = FakeWebSocket()
+
+    async def send_str(_data: str) -> None:
+        raise ConnectionResetError
+
+    with (
+        patch.object(server_ws, "send_str", send_str),
+        pytest.raises(InitRejectedError) as exc_info,
+    ):
+        await run_handshake_server(
+            server_ws,
+            local_identity=Identity.generate(),
+            psk_provider=_provider(None),
+            client_init_text=_client_init(version=2),
+        )
+    assert exc_info.value.reason is _UNSUPPORTED_VERSION
+
+
+async def _abort_non_text_first(server_ws: FakeWebSocket) -> None:
+    await server_ws.push(WSMessage(WSMsgType.BINARY, b"\x00", ""))
+    await run_handshake_server(
+        server_ws, local_identity=Identity.generate(), psk_provider=_provider(None)
+    )
+
+
+async def _abort_closed_first(server_ws: FakeWebSocket) -> None:
+    await server_ws.push(None)
+    await run_handshake_server(
+        server_ws, local_identity=Identity.generate(), psk_provider=_provider(None)
+    )
+
+
+async def _abort_timeout(server_ws: FakeWebSocket) -> None:
+    await run_handshake_server(
+        server_ws,
+        local_identity=Identity.generate(),
+        psk_provider=_provider(None),
+        timeout_s=0.01,
+    )
+
+
+async def _abort_client_id_mismatch(server_ws: FakeWebSocket) -> None:
+    await run_handshake_server(
+        server_ws,
+        local_identity=Identity.generate(),
+        psk_provider=_provider(None),
+        client_init_text=_client_init(client_id=_CLIENT_ID, version=1, suite=_SUITE),
+        expected_client_id=Identity.generate().peer_id,
+    )
+
+
+async def _abort_psk_miss(server_ws: FakeWebSocket) -> None:
+    await run_handshake_server(
+        server_ws,
+        local_identity=Identity.generate(),
+        psk_provider=_provider(None),
+        client_init_text=_client_init(client_id=_CLIENT_ID, version=1, suite=_SUITE),
+    )
+
+
+@pytest.mark.parametrize(
+    "abort",
+    [
+        _abort_non_text_first,
+        _abort_closed_first,
+        _abort_timeout,
+        _abort_client_id_mismatch,
+        _abort_psk_miss,
+    ],
+)
+async def test_server_non_init_failures_send_nothing(
+    abort: Callable[[FakeWebSocket], Awaitable[None]],
+) -> None:
+    """Handshake-phase failures other than init failures close without a message."""
+    server_ws = FakeWebSocket()
+    with pytest.raises(HandshakeAbortedError) as exc_info:
+        await abort(server_ws)
+    assert not isinstance(exc_info.value, InitRejectedError)
+    assert server_ws.sent == []
 
 
 async def test_handshake_timeout_aborts() -> None:
@@ -581,6 +746,16 @@ async def _send_bad_version_init(server_ws: FakeWebSocket, server_id: Identity) 
     await server_ws.send_str(_valid_server_init(server_id.peer_id, version=PROTOCOL_VERSION + 1))
 
 
+def _send_server_init_version(
+    version: object,
+) -> Callable[[FakeWebSocket, Identity], Awaitable[None]]:
+    async def send(server_ws: FakeWebSocket, server_id: Identity) -> None:
+        payload = {"server_id": server_id.peer_id, "version": version}
+        await server_ws.send_str(orjson.dumps({"type": "server/init", "payload": payload}).decode())
+
+    return send
+
+
 async def _send_short_server_id(server_ws: FakeWebSocket, _server_id: Identity) -> None:
     await server_ws.send_str(
         '{"type":"server/init","payload":{"server_id":"tooshort","version":1}}',
@@ -626,6 +801,9 @@ async def _send_malformed_msg1(server_ws: FakeWebSocket, server_id: Identity) ->
         (_send_malformed_init, "malformed server/init"),
         (_send_wrong_type_init, "server/init"),
         (_send_bad_version_init, "unsupported protocol version"),
+        (_send_server_init_version("1"), "malformed server/init version"),
+        (_send_server_init_version(True), "malformed server/init version"),  # noqa: FBT003
+        (_send_server_init_version(1.0), "malformed server/init version"),
         (_send_short_server_id, "invalid server_id length"),
         (_send_undecodable_server_id, "invalid server_id"),
         (_send_undecodable_msg1, "payload encoding"),
@@ -664,6 +842,39 @@ async def test_client_rejects_malicious_server_frame(
             timeout_s=1.0,
         )
     await server_task
+
+
+@pytest.mark.parametrize(
+    ("raw_reason", "reason"),
+    [
+        ("unsupported_version", ServerErrorReason.UNSUPPORTED_VERSION),
+        ("unsupported_suite", ServerErrorReason.UNSUPPORTED_SUITE),
+        ("malformed", ServerErrorReason.MALFORMED),
+        ("from_the_future", None),
+        (None, None),
+    ],
+)
+async def test_client_raises_init_rejected_on_server_error(
+    raw_reason: str | None,
+    reason: ServerErrorReason | None,
+) -> None:
+    """A server/error in place of server/init aborts the client with its reason."""
+    server_ws, client_ws = make_ws_pair()
+    await server_ws.send_str(
+        orjson.dumps({"type": "server/error", "payload": {"reason": raw_reason}}).decode()
+    )
+    with pytest.raises(InitRejectedError) as exc_info:
+        await run_handshake_client(
+            client_ws,
+            local_identity=Identity.generate(),
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=_resolver({}),
+            timeout_s=1.0,
+        )
+    assert exc_info.value.reason is reason
+    assert repr(raw_reason) in str(exc_info.value)
+    # The client sent only its client/init and nothing in reply.
+    assert len(client_ws.sent) == 1
 
 
 async def test_server_rejects_bad_base64_msg2() -> None:

@@ -36,16 +36,20 @@ from aiosendspin.models.types import (
     PairMethod,
     PlayerCommand,
     Roles,
+    ServerErrorReason,
     ServerMessage,
     TrustLevel,
 )
 from aiosendspin.noise import pairing as pairing_module
+from aiosendspin.noise.driver import InitRejectedError
 from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
     ClientPairFinalizeMessage,
     ClientPairFinalizePayload,
     ClientPairInitMessage,
     ClientPairInitPayload,
+    ServerErrorMessage,
+    ServerErrorPayload,
 )
 from aiosendspin.noise.pairing import (
     PairingAbortError,
@@ -190,17 +194,80 @@ async def test_transition_mode_accepts_legacy_client() -> None:
         assert isinstance(ServerMessage.from_json(msg.data), ServerHelloMessage)
 
 
-async def test_default_server_rejects_legacy_client() -> None:
-    """Without transition mode, a legacy client/hello is closed without a server/hello."""
+@pytest.mark.parametrize(
+    "first_text",
+    [
+        pytest.param(_legacy_hello(), id="legacy-hello"),
+        pytest.param("this is not json", id="not-json"),
+        pytest.param("[]", id="not-object"),
+        pytest.param('{"type":"client/goodbye","payload":{}}', id="unknown-type"),
+    ],
+)
+async def test_default_server_answers_non_init_first_frame_with_server_error(
+    first_text: str,
+) -> None:
+    """Without transition mode, a TEXT first frame other than client/init gets malformed."""
     server = _make_server(InMemoryServerPairingStore())
     async with (
         _serve(server) as url,
         ClientSession() as session,
         session.ws_connect(url) as ws,
     ):
-        await ws.send_str(_legacy_hello())
+        await ws.send_str(first_text)
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type is WSMsgType.TEXT
+        assert ServerErrorMessage.from_json(msg.data).payload.reason is ServerErrorReason.MALFORMED
         msg = await asyncio.wait_for(ws.receive(), timeout=5)
         assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+
+
+async def test_server_closes_silently_on_binary_first_frame() -> None:
+    """A non-TEXT first frame closes the connection without a server/error."""
+    server = _make_server(InMemoryServerPairingStore(), allow_unencrypted=True)
+    async with (
+        _serve(server) as url,
+        ClientSession() as session,
+        session.ws_connect(url) as ws,
+    ):
+        await ws.send_bytes(b"\x00")
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+
+
+async def test_client_surfaces_server_error_as_init_rejected(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The SDK raises InitRejectedError with the reason, logs it, and closes the socket."""
+    closed = asyncio.Event()
+
+    async def handler(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.receive()  # client/init
+        error = ServerErrorMessage(
+            payload=ServerErrorPayload(reason=ServerErrorReason.UNSUPPORTED_VERSION)
+        )
+        await ws.send_str(error.to_json())
+        msg = await ws.receive()
+        assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+        closed.set()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/sendspin", handler)
+    test_server = TestServer(app)
+    await test_server.start_server()
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER])
+    try:
+        with pytest.raises(InitRejectedError) as exc_info:
+            await client.connect(f"ws://127.0.0.1:{test_server.port}/sendspin")
+        assert exc_info.value.reason is ServerErrorReason.UNSUPPORTED_VERSION
+        await asyncio.wait_for(closed.wait(), timeout=5)
+        assert "unsupported_version" in caplog.text
+        assert not client.connected
+    finally:
+        await client.disconnect()
+        await test_server.close()
 
 
 async def test_transition_mode_rejects_paired_client_downgrade() -> None:

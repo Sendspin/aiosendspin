@@ -306,6 +306,14 @@ class PairAbortReason(Enum):
     USER_CANCELLED = "user_cancelled"
 
 
+class ServerErrorReason(Enum):
+    """Reason the server rejected a ``client/init``."""
+
+    UNSUPPORTED_VERSION = "unsupported_version"
+    UNSUPPORTED_SUITE = "unsupported_suite"
+    MALFORMED = "malformed"
+
+
 # The sender closes the connection after these abort reasons; every other reason keeps it open.
 CLOSING_ABORT_REASONS: frozenset[PairAbortReason] = frozenset({PairAbortReason.CONCURRENT_ATTEMPT})
 

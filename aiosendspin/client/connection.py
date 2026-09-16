@@ -96,6 +96,7 @@ from aiosendspin.models.visualizer import StreamStartVisualizer, VisualizerFrame
 from aiosendspin.noise.constants import SENTINEL_PSK
 from aiosendspin.noise.driver import (
     HandshakeAbortedError,
+    InitRejectedError,
     run_handshake_client,
     run_rehandshake_client,
 )
@@ -364,7 +365,8 @@ class SendspinConnection:
 
         On success ``self._ws`` is the ``EncryptedWebSocket`` and the
         connection is marked live. On failure the raw socket is closed silently
-        (spec) and ``HandshakeAbortedError`` propagates to the caller.
+        (spec) and ``HandshakeAbortedError`` propagates to the caller; a server
+        that answered with ``server/error`` raises ``InitRejectedError``.
         """
         try:
             result = await run_handshake_client(
@@ -374,7 +376,9 @@ class SendspinConnection:
                 psk_resolver=self._resolve_psk,
                 expected_server_id=expected_server_id,
             )
-        except HandshakeAbortedError:
+        except HandshakeAbortedError as exc:
+            if isinstance(exc, InitRejectedError):
+                logger.warning("Server rejected the connection: %s", exc)
             await raw_ws.close()
             raise
         self._ws = result.encrypted_ws

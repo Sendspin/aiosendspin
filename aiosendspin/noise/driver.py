@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Final, Protocol, cast
 
+import orjson
 from aiohttp import WSMsgType
 from noise.exceptions import (
     NoiseHandshakeError,
@@ -14,7 +16,9 @@ from noise.exceptions import (
     NoiseValueError,
 )
 
-from .constants import PROTOCOL_VERSION, SENTINEL_PSK
+from aiosendspin.models.types import ServerErrorReason
+
+from .constants import ERROR_TYPE_SERVER, INIT_TYPE_CLIENT, PROTOCOL_VERSION, SENTINEL_PSK
 from .keys import (
     PEER_ID_SIZE,
     X25519_KEY_SIZE,
@@ -30,6 +34,8 @@ from .models import (
     NoiseHandshakePayload,
     NoiseMsg1Payload,
     NoiseMsg2Payload,
+    ServerErrorMessage,
+    ServerErrorPayload,
     ServerInitMessage,
     ServerInitPayload,
 )
@@ -60,6 +66,20 @@ class HandshakeAbortedError(Exception):
     The caller is expected to close the underlying WebSocket without sending
     any application-level error message.
     """
+
+
+class InitRejectedError(HandshakeAbortedError):
+    """Raised when a ``client/init`` is rejected with ``server/error``.
+
+    The server raises it after sending ``server/error``; the client raises it on
+    receiving one. On the client, ``reason`` is ``None`` when the server sent a
+    reason this implementation does not know.
+    """
+
+    def __init__(self, reason: ServerErrorReason | None, detail: str) -> None:
+        """Initialize with the rejection reason and a human-readable detail."""
+        super().__init__(detail)
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,14 +113,19 @@ async def run_handshake_server(
     """Run the server-side (Noise initiator) handshake."""
     if client_init_text is None:
         client_init_text = await receive_text_frame(ws, what="client/init", timeout_s=timeout_s)
-    client_init = _parse_client_init(client_init_text)
-    suite = _select_suite(client_init.payload.suite)
-    client_id = client_init.payload.client_id
+    try:
+        client_id, suite, client_static_pub = _parse_client_init(client_init_text)
+    except InitRejectedError as exc:
+        if exc.reason is not None:
+            error = ServerErrorMessage(payload=ServerErrorPayload(reason=exc.reason))
+            # A peer that already dropped must not mask the rejection.
+            with suppress(ConnectionError):
+                await ws.send_str(error.to_json())
+        raise
     if expected_client_id is not None and client_id != expected_client_id:
         raise HandshakeAbortedError(
             f"client_id mismatch: expected {expected_client_id!r}, got {client_id!r}",
         )
-    client_static_pub = _peer_pub_bytes(client_id, "client_id")
 
     # Resolve the PSK and build message 1 *before* sending anything, so
     # server/init and noise/handshake go out back-to-back, and so a client
@@ -377,26 +402,78 @@ async def _exchange_as_responder(
     return resolved, credential_mismatch
 
 
-def _parse_client_init(text: str) -> ClientInitMessage:
+def _parse_client_init(text: str) -> tuple[str, NoiseCipherSuite, bytes]:
+    """Return ``client_id``, suite and client static key from a ``client/init``.
+
+    Checks run in spec order (envelope, version, suite, remaining fields) on the raw
+    JSON, so the first failure decides the ``InitRejectedError`` reason.
+    """
+    malformed = ServerErrorReason.MALFORMED
     try:
-        msg = ClientInitMessage.from_json(text)
-    except Exception as exc:
-        raise HandshakeAbortedError(f"malformed client/init: {exc}") from exc
-    if msg.type != "client/init":
-        raise HandshakeAbortedError(f"expected client/init, got {msg.type!r}")
-    _check_version(msg.payload.version)
-    return msg
+        decoded = orjson.loads(text)
+    except orjson.JSONDecodeError as exc:
+        raise InitRejectedError(malformed, f"malformed client/init: {exc}") from exc
+    payload = decoded.get("payload") if isinstance(decoded, dict) else None
+    if not isinstance(payload, dict) or decoded.get("type") != INIT_TYPE_CLIENT:
+        raise InitRejectedError(malformed, "malformed client/init: not a client/init envelope")
+    version = payload.get("version")
+    # type() rather than isinstance(): a JSON true must not pass as version 1.
+    if type(version) is not int:
+        raise InitRejectedError(malformed, f"malformed client/init version {version!r}")
+    if version != PROTOCOL_VERSION:
+        raise InitRejectedError(
+            ServerErrorReason.UNSUPPORTED_VERSION, f"unsupported protocol version {version}"
+        )
+    suite_name = payload.get("suite")
+    if not isinstance(suite_name, str):
+        raise InitRejectedError(malformed, f"malformed client/init suite {suite_name!r}")
+    try:
+        suite = NoiseCipherSuite(suite_name)
+    except ValueError as exc:
+        raise InitRejectedError(
+            ServerErrorReason.UNSUPPORTED_SUITE, f"unsupported suite {suite_name!r}"
+        ) from exc
+    client_id = payload.get("client_id")
+    if not isinstance(client_id, str):
+        raise InitRejectedError(malformed, f"malformed client/init client_id {client_id!r}")
+    try:
+        client_static_pub = _peer_pub_bytes(client_id, "client_id")
+    except HandshakeAbortedError as exc:
+        raise InitRejectedError(malformed, str(exc)) from exc
+    return client_id, suite, client_static_pub
 
 
 def _parse_server_init(text: str) -> ServerInitMessage:
+    """Parse ``server/init``, raising ``InitRejectedError`` if ``server/error`` came instead."""
     try:
-        msg = ServerInitMessage.from_json(text)
+        decoded = orjson.loads(text)
+    except orjson.JSONDecodeError as exc:
+        raise HandshakeAbortedError(f"malformed server/init: {exc}") from exc
+    if isinstance(decoded, dict) and decoded.get("type") == ERROR_TYPE_SERVER:
+        raise _server_error_rejection(decoded.get("payload"))
+    try:
+        msg = ServerInitMessage.from_dict(decoded)
     except Exception as exc:
         raise HandshakeAbortedError(f"malformed server/init: {exc}") from exc
     if msg.type != "server/init":
         raise HandshakeAbortedError(f"expected server/init, got {msg.type!r}")
-    _check_version(msg.payload.version)
+    # The parsed model coerces the version, so check the raw value.
+    version = decoded["payload"]["version"]
+    if type(version) is not int:
+        raise HandshakeAbortedError(f"malformed server/init version {version!r}")
+    if version != PROTOCOL_VERSION:
+        raise HandshakeAbortedError(f"unsupported protocol version {version}")
     return msg
+
+
+def _server_error_rejection(payload: object) -> InitRejectedError:
+    """Build the client-side rejection for a received ``server/error`` payload."""
+    raw_reason = payload.get("reason") if isinstance(payload, dict) else None
+    try:
+        reason: ServerErrorReason | None = ServerErrorReason(raw_reason)
+    except ValueError:
+        reason = None
+    return InitRejectedError(reason, f"server rejected client/init: {raw_reason!r}")
 
 
 def _read_handshake_message(session: NoiseSession, text: str, what: str) -> bytes:
@@ -453,18 +530,6 @@ def _pack_handshake(noise_bytes: bytes) -> str:
     return NoiseHandshakeMessage(
         payload=NoiseHandshakePayload(data=b64url_encode(noise_bytes)),
     ).to_json()
-
-
-def _select_suite(name: str) -> NoiseCipherSuite:
-    try:
-        return NoiseCipherSuite(name)
-    except ValueError as exc:
-        raise HandshakeAbortedError(f"unsupported suite {name!r}") from exc
-
-
-def _check_version(version: int) -> None:
-    if version != PROTOCOL_VERSION:
-        raise HandshakeAbortedError(f"unsupported protocol version {version}")
 
 
 def _peer_pub_bytes(peer_id: str, what: str) -> bytes:

@@ -15,6 +15,7 @@ PSK_ID_LABEL: Final[bytes] = b"sendspin-psk-id-v1"
 # Cleartext init / handshake JSON message-type tags.
 INIT_TYPE_CLIENT: Final[str] = "client/init"
 INIT_TYPE_SERVER: Final[str] = "server/init"
+ERROR_TYPE_SERVER: Final[str] = "server/error"
 HANDSHAKE_TYPE: Final[str] = "noise/handshake"
 
 # Transport-mode binary message type at byte 0 of decrypted plaintext.
