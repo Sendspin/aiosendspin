@@ -34,6 +34,7 @@ class _FakeClient:
             return 1_000_000
 
     clock = _Clock()
+    roles: tuple[Roles, ...] = ()
 
     async def note_playback_activity(self, _conn: object) -> None:
         pass
@@ -66,6 +67,7 @@ def _connection(
     conn._active_roles = active_roles  # noqa: SLF001
     conn._source_stream_active = stream_active  # noqa: SLF001
     conn._reported_available = True  # noqa: SLF001
+    conn._initial_state_sent = False  # noqa: SLF001
     conn._reported_source_signal = None  # noqa: SLF001
     conn._time_filter = _FakeTimeFilter(synchronized=synchronized)  # type: ignore[assignment]  # noqa: SLF001
     conn._selected_pairing = None  # noqa: SLF001

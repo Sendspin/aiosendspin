@@ -261,6 +261,7 @@ class SendspinConnection:
         self._activities: list[Activity] = []
         self._active_roles: list[str] = []
         self._reported_available: bool = True
+        self._initial_state_sent = False
         self._reported_volume = client.initial_volume
         self._reported_muted = client.initial_muted
         self._reported_supported_commands: frozenset[PlayerCommand] = frozenset()
@@ -524,14 +525,23 @@ class SendspinConnection:
 
     async def _send_full_client_state(self) -> None:
         """Push the client's full state to the server, (re)populating its role instances."""
-        if Roles.PLAYER in self._client.roles and self._is_role_active("player"):
+        player_active = Roles.PLAYER in self._client.roles and self._is_role_active("player")
+        source_active = self._is_role_active("source")
+        if player_active:
             await self.send_player_state(
                 available=self._reported_available,
                 volume=self._reported_volume,
                 muted=self._reported_muted,
             )
-        if self._is_role_active("source") and self.is_time_synchronized():
+            self._initial_state_sent = True
+        if source_active and self.is_time_synchronized():
             await self._send_source_state()
+            self._initial_state_sent = True
+        if player_active or source_active or not self._active_roles:
+            return
+        message = ClientStateMessage(payload=ClientStatePayload(available=self._wire_available()))
+        await self._send_message(message.to_json())
+        self._initial_state_sent = True
 
     async def _pair(self) -> None:
         """Run one pairing attempt; on a non-closing abort stay in pairing for a retry."""
@@ -884,7 +894,7 @@ class SendspinConnection:
         self._reported_supported_commands = frozenset(self._client.state_supported_commands)
         message = ClientStateMessage(
             payload=ClientStatePayload(
-                available=available,
+                available=self._wire_available(),
                 player=PlayerStatePayload(
                     volume=volume,
                     muted=muted,
@@ -907,13 +917,19 @@ class SendspinConnection:
                 return
             await self._send_source_state()
             return
-        message = ClientStateMessage(payload=ClientStatePayload(available=available))
+        message = ClientStateMessage(payload=ClientStatePayload(available=self._wire_available()))
         await self._send_message(message.to_json())
 
     async def _update_reported_available(self, *, available: bool) -> None:
         if not available and self._source_stream_active:
             await self.send_client_stream_end()
         self._reported_available = available
+
+    def _wire_available(self) -> bool:
+        """Return the availability to report; an active player is unavailable until synced."""
+        return self._reported_available and (
+            not self._is_role_active("player") or self.is_time_synchronized()
+        )
 
     async def send_group_command(
         self,
@@ -999,7 +1015,7 @@ class SendspinConnection:
         """Send current source state."""
         message = ClientStateMessage(
             payload=ClientStatePayload(
-                available=self._reported_available,
+                available=self._wire_available(),
                 source=SourceStatePayload(signal=self._reported_source_signal),
             )
         )
@@ -1247,7 +1263,8 @@ class SendspinConnection:
         self._resume_time_sync()
         player_activated = not was_player_active and self._is_role_active("player")
         source_activated = not was_source_active and self._is_role_active("source")
-        if resync or player_activated or source_activated:
+        initial_state_due = bool(self._active_roles) and not self._initial_state_sent
+        if resync or player_activated or source_activated or initial_state_due:
             await self._send_full_client_state()
 
     async def _pause_time_sync(self) -> None:
@@ -1277,9 +1294,9 @@ class SendspinConnection:
         if (
             not was_synchronized
             and self._time_filter.is_synchronized
-            and self._is_role_active("source")
+            and (self._is_role_active("player") or self._is_role_active("source"))
         ):
-            await self._send_source_state()
+            await self._send_full_client_state()
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
         if message.payload.visualizer is not None:

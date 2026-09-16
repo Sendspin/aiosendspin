@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import struct
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
@@ -24,6 +25,7 @@ from aiosendspin.models.core import (
     ServerActivatePayload,
     ServerCommandPayload,
     ServerHelloPayload,
+    ServerTimePayload,
     StreamStartMessage,
     StreamStartPayload,
 )
@@ -668,3 +670,120 @@ async def test_server_command_without_player_only_notifies() -> None:
 
     assert connection.output_delay_ms == 0.0
     assert received == [payload]
+
+
+_SERVER_TIME = ServerTimePayload(client_transmitted=0, server_received=0, server_transmitted=0)
+
+
+class _FakeTimeFilter:
+    def __init__(self) -> None:
+        self.is_synchronized = False
+
+    def update(self, _offset: int, _delay: int, _now_us: int) -> None:
+        self.is_synchronized = True
+
+
+async def _state_connection(
+    active_roles: list[str],
+) -> tuple[SendspinConnection, list[dict[str, Any]]]:
+    """Return a connected, unsynchronized connection and the client/state payloads it sends."""
+    connection = await _connection(PskCategory.LONG_TERM)
+    sent: list[dict[str, Any]] = []
+
+    async def _capture(payload: str) -> None:
+        message = json.loads(payload)
+        if message["type"] == "client/state":
+            sent.append(message["payload"])
+
+    async def _idle() -> None: ...
+
+    connection._ws = MagicMock(closed=False)  # noqa: SLF001
+    connection._connected = True  # noqa: SLF001
+    connection._send_message = _capture  # type: ignore[method-assign]  # noqa: SLF001
+    connection._time_filter = _FakeTimeFilter()  # type: ignore[assignment]  # noqa: SLF001
+    connection._active_roles = active_roles  # noqa: SLF001
+    connection._reader_loop = _idle  # type: ignore[method-assign]  # noqa: SLF001
+    connection._time_sync_loop = _idle  # type: ignore[method-assign]  # noqa: SLF001
+    return connection, sent
+
+
+async def test_player_initial_state_unavailable_until_clock_synchronizes() -> None:
+    """A player's initial state is unavailable; convergence sends it again as available."""
+    connection, sent = await _state_connection([Roles.PLAYER.value])
+
+    await connection.start()
+    await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
+
+    assert [(state["available"], "player" in state) for state in sent] == [
+        (False, True),
+        (True, True),
+    ]
+
+
+async def test_player_reported_unavailable_stays_unavailable_after_sync() -> None:
+    """Clock convergence keeps the availability the application reported."""
+    connection, sent = await _state_connection([Roles.PLAYER.value])
+
+    await connection.send_player_state(available=False, volume=50, muted=False)
+    await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
+
+    assert [(state["available"], "player" in state) for state in sent] == [
+        (False, True),
+        (False, True),
+    ]
+
+
+async def _report_player_state(connection: SendspinConnection) -> None:
+    await connection.send_player_state(available=True, volume=50, muted=False)
+
+
+async def _report_available(connection: SendspinConnection) -> None:
+    await connection.send_available(available=True)
+
+
+@pytest.mark.parametrize("report", [_report_player_state, _report_available])
+async def test_player_available_withheld_until_clock_synchronizes(
+    report: Callable[[SendspinConnection], Awaitable[None]],
+) -> None:
+    """An active player reports available only once its clock has converged."""
+    connection, sent = await _state_connection([Roles.PLAYER.value])
+
+    await report(connection)
+    assert sent[-1]["available"] is False
+
+    await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
+    await report(connection)
+    assert sent[-1]["available"] is True
+
+
+@pytest.mark.parametrize(
+    "role", [Roles.CONTROLLER, Roles.METADATA, Roles.ARTWORK, Roles.VISUALIZER]
+)
+async def test_stateless_roles_send_initial_state(role: Roles) -> None:
+    """A client with only stateless roles active still sends its initial client/state."""
+    connection, sent = await _state_connection([role.value])
+
+    await connection.start()
+
+    assert sent == [{"available": True}]
+
+
+async def test_initial_state_sent_once_when_roles_first_activate() -> None:
+    """Only the first activation with roles sends client/state for stateless roles."""
+    connection, sent = await _state_connection([])
+    counts = []
+
+    for roles in (
+        [],
+        [Roles.CONTROLLER.value],
+        [Roles.CONTROLLER.value, Roles.METADATA.value],
+        [],
+        [Roles.CONTROLLER.value],
+    ):
+        await connection._handle_server_activate(  # noqa: SLF001
+            ServerActivatePayload(activities=[], active_roles=roles)
+        )
+        counts.append(len(sent))
+
+    assert counts == [0, 1, 1, 1, 1]
+    assert sent == [{"available": True}]
