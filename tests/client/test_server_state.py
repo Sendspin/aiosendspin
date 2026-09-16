@@ -8,6 +8,7 @@ import pytest
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.time_sync import SendspinTimeFilter
+from aiosendspin.clock import ManualClock
 from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.core import ServerActivatePayload, ServerStatePayload

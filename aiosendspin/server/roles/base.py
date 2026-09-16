@@ -10,13 +10,12 @@ This module contains:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Coroutine
 
     from aiosendspin.models import AudioCodec
@@ -37,9 +36,6 @@ if TYPE_CHECKING:
 # Default startup lead time used when a role does not report its own. Matches the
 # push stream's no-roles fallback so default behavior is unchanged.
 DEFAULT_REQUIRED_LEAD_TIME_US = 250_000
-
-# A scheduled update is sent at most this long before it takes effect.
-MAX_SCHEDULED_LEAD_US = 20_000_000
 
 
 @dataclass(frozen=True)
@@ -143,23 +139,6 @@ class GroupRole(ABC):
         """Emit a GroupRole event on the owning group's event stream."""
         self._group._signal_event(event)  # noqa: SLF001
 
-    def _now_us(self) -> int:
-        """Return the server clock time in microseconds."""
-        return self._group._server.clock.now_us()  # noqa: SLF001
-
-    def _call_before(
-        self, timestamp_us: int, callback: Callable[[], None]
-    ) -> asyncio.TimerHandle | None:
-        """Call `callback` once `timestamp_us` is at most `MAX_SCHEDULED_LEAD_US` away.
-
-        Returns the handle of a deferred call, or None when `callback` already ran.
-        """
-        delay_us = timestamp_us - MAX_SCHEDULED_LEAD_US - self._now_us()
-        if delay_us <= 0:
-            callback()
-            return None
-        return self._group._server.loop.call_later(delay_us / 1_000_000, callback)  # noqa: SLF001
-
     def get_group_volume(self) -> int | None:
         """Return group volume (0-100) if supported."""
         return None
@@ -175,6 +154,10 @@ class GroupRole(ABC):
     def set_group_muted(self, _muted: bool) -> bool | None:  # noqa: FBT001
         """Set group mute state if supported, return True/False or None if unsupported."""
         return None
+
+    def _now_us(self) -> int:
+        """Return the server clock time in microseconds."""
+        return self._group._server.clock.now_us()  # noqa: SLF001
 
 
 @dataclass(frozen=True)

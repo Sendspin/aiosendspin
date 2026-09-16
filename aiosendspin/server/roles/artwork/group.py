@@ -207,7 +207,7 @@ class ArtworkGroupRole(GroupRole):
             state.schedule(image, event_timestamp_us)
         else:
             event_timestamp_us = now_us if timestamp_us is None else timestamp_us
-            state.apply(image, event_timestamp_us)
+            state.apply(image)
 
         await asyncio.gather(
             *(
@@ -232,8 +232,11 @@ class ArtworkGroupRole(GroupRole):
             )
         )
 
-    async def cancel_scheduled_artwork(self, source: ArtworkSource) -> None:
-        """Cancel the artwork scheduled for a source type, if any, keeping the current one."""
+    async def cancel_scheduled(self, source: ArtworkSource) -> None:
+        """Cancel the artwork scheduled for a source type, if any, keeping the current one.
+
+        No event fires for the cancellation.
+        """
         state = self._artwork.get(source)
         if state is None:
             return
@@ -241,7 +244,7 @@ class ArtworkGroupRole(GroupRole):
         current = state.current(now_us)
         if state.pending_timestamp_us is None:
             return
-        state.apply(current, now_us)
+        state.apply(current)
         await asyncio.gather(
             *(
                 self._cancel_role_channel(role, current, channel_num, channel_config, now_us)

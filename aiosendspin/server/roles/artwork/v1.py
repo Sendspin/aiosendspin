@@ -172,11 +172,16 @@ class ArtworkV1Role(Role):
         # TODO: should we raise instead of swallowing when no transport?
         if not self.has_connection() or channel not in self.get_channel_configs():
             return
+        now_us = self._client._server.clock.now_us()  # noqa: SLF001
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self._uses_single_message_framing():
-            self._send_single_message(channel, image_data, timestamp_us)
+            self._queued.pop(channel, None)
+            if timestamp_us - MAX_ANNOUNCE_LEAD_US <= now_us:
+                self._send_single_message(channel, image_data, timestamp_us)
+            else:
+                self._queued[channel] = [(image_data, timestamp_us)]
+                self._start_transfers()
             return
-        now_us = self._client._server.clock.now_us()  # noqa: SLF001
         scheduled = timestamp_us > now_us
         queued = self._current_queued(channel, now_us) if scheduled else []
         queued.append((image_data, timestamp_us))
@@ -210,6 +215,7 @@ class ArtworkV1Role(Role):
             return True
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self._uses_single_message_framing():
+            self._queued.pop(channel, None)
             return False
         now_us = self._client._server.clock.now_us()  # noqa: SLF001
         if queued := self._current_queued(channel, now_us):
@@ -427,6 +433,10 @@ class ArtworkV1Role(Role):
             image, timestamp_us = queued.pop(0)
             if not queued:
                 del self._queued[channel]
+            # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+            if self._uses_single_message_framing():
+                self._send_single_message(channel, image, timestamp_us)
+                continue
             self._in_flight = channel
             self._in_flight_timestamp_us = timestamp_us
             if timestamp_us > clock.now_us():

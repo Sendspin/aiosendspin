@@ -113,7 +113,7 @@ def _record(client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     group_role = ArtworkGroupRole(group)
     for source in (ArtworkSource.ALBUM, ArtworkSource.ARTIST):
         state: ScheduledRoleState[Image.Image] = ScheduledRoleState()
-        state.apply(Image.new("RGB", (10, 10)), 0)
+        state.apply(Image.new("RGB", (10, 10)))
         group_role._artwork[source] = state  # noqa: SLF001
     client.group.group_role.return_value = group_role
 
@@ -948,6 +948,38 @@ def test_legacy_hello_client_gets_single_message_artwork() -> None:
         1000,
         1001,
         2000,
+    ]
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_legacy_hello_client_gets_scheduled_artwork_at_most_20s_ahead() -> None:
+    """A single-message client gets a far-future image only 20 s ahead, unless replaced."""
+    client = _make_legacy_client_stub(_ALBUM)
+    clock = client._server.clock  # noqa: SLF001
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    client.send_binary.reset_mock()
+    later_us = _NOW_US + MAX_ANNOUNCE_LEAD_US + 1_000
+
+    role.send_artwork(channel=0, image_data=b"later", timestamp_us=later_us)
+    await asyncio.sleep(0)
+    client.send_binary.assert_not_called()
+
+    clock.advance_us(1_000)
+    role._queue_changed.set()  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert [call.args[0] for call in client.send_binary.call_args_list] == [
+        pack_binary_header_raw(8, later_us) + b"later"
+    ]
+
+    role.send_artwork(channel=0, image_data=b"much later", timestamp_us=later_us + 1_000)
+    role.send_artwork(channel=0, image_data=b"now", timestamp_us=clock.now_us())
+    clock.advance_us(1_000)
+    role._queue_changed.set()  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert [call.args[0] for call in client.send_binary.call_args_list][1:] == [
+        pack_binary_header_raw(8, _NOW_US + 1_000) + b"now"
     ]
 
 

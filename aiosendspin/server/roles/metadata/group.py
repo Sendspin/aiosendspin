@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 from aiosendspin.models.core import (
     LegacyServerStateClearMessage,
@@ -14,30 +13,18 @@ from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.state import Metadata
-from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
-
-if TYPE_CHECKING:
-    import asyncio
-
-    from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.scheduled_state import ScheduledStateGroupRole
 
 _UNSET = object()
 
 
-class MetadataGroupRole(GroupRole):
+class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
     """Coordinate metadata across a group.
 
     Stores current metadata state and pushes updates to subscribed MetadataRoles.
     """
 
     role_family = "metadata"
-
-    def __init__(self, group: SendspinGroup) -> None:
-        """Initialize MetadataGroupRole."""
-        super().__init__(group)
-        self._state: ScheduledRoleState[Metadata] = ScheduledRoleState()
-        # Defers sending the scheduled metadata until it is close enough to its timestamp.
-        self._send_scheduled_handle: asyncio.TimerHandle | None = None
 
     @property
     def metadata(self) -> Metadata | None:

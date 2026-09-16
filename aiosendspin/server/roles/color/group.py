@@ -20,20 +20,13 @@ if TYPE_CHECKING:
     from aiosendspin.server.group import SendspinGroup
 
 
-class ColorGroupRole(GroupRole):
+class ColorGroupRole(ScheduledStateGroupRole[Color]):
     """Coordinate color palette across a group.
 
     Stores current color state and pushes updates to subscribed ColorV1Roles.
     """
 
     role_family = "color"
-
-    def __init__(self, group: SendspinGroup) -> None:
-        """Initialize ColorGroupRole."""
-        super().__init__(group)
-        self._state: ScheduledRoleState[Color] = ScheduledRoleState()
-        # Defers sending the scheduled palette until it is close enough to its timestamp.
-        self._send_scheduled_handle: asyncio.TimerHandle | None = None
 
     @property
     def color(self) -> Color | None:
@@ -114,59 +107,10 @@ class ColorGroupRole(GroupRole):
             )
         )
 
-    def cancel_scheduled(self) -> None:
-        """Cancel the scheduled palette, if any, keeping the current one."""
-        now_us = self._now_us()
-        current = self._state.current(now_us)
-        if self._state.pending_timestamp_us is None:
-            return
-        if self._send_scheduled_handle is not None:
-            self._state.apply(current, now_us)
-            self._cancel_send_scheduled()
-            return
-        self._apply(current, now_us)
-
     def clear(self) -> None:
         """Clear the color palette, and any scheduled palette, at once."""
         self.set_color(None)
 
-    def _apply(self, color: Color | None, timestamp_us: int) -> None:
-        """Make `color` current and send it to all members."""
-        self._state.apply(color, timestamp_us)
-        self._cancel_send_scheduled()
-        self._send_to_members(_state_message(color, timestamp_us))
-
-    def _schedule(self, color: Color, timestamp_us: int) -> None:
-        """Hold `color` as the scheduled palette and send it once within the lead limit."""
-        replaced_sent = (
-            self._state.pending_timestamp_us is not None and self._send_scheduled_handle is None
-        )
-        self._state.schedule(color, timestamp_us)
-        self._cancel_send_scheduled()
-        self._send_scheduled_handle = self._call_before(timestamp_us, self._send_scheduled)
-        if replaced_sent and self._send_scheduled_handle is not None:
-            # Clients still hold the replaced palette; the current one discards it.
-            now_us = self._now_us()
-            self._send_to_members(_state_message(self._state.current(now_us), now_us))
-
-    def _send_scheduled(self) -> None:
-        """Send the scheduled palette to all members."""
-        self._send_scheduled_handle = None
-        scheduled_us = self._state.pending_timestamp_us
-        if scheduled_us is not None:
-            self._send_to_members(_state_message(self._state.pending, scheduled_us))
-
-    def _cancel_send_scheduled(self) -> None:
-        if self._send_scheduled_handle is not None:
-            self._send_scheduled_handle.cancel()
-            self._send_scheduled_handle = None
-
-    def _send_to_members(self, message: ServerStateMessage) -> None:
-        for role in self._members:
-            role.send_message(message)
-
-
-def _state_message(color: Color | None, timestamp_us: int) -> ServerStateMessage:
-    """Return the server/state carrying `color` as of `timestamp_us`."""
-    color_update = None if color is None else color.snapshot_update(timestamp_us)
-    return ServerStateMessage(ServerStatePayload(color=color_update))
+    def _state_message(self, state: Color | None, timestamp_us: int) -> ServerStateMessage:
+        color_update = None if state is None else state.snapshot_update(timestamp_us)
+        return ServerStateMessage(ServerStatePayload(color=color_update))

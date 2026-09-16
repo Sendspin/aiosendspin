@@ -17,12 +17,11 @@ from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.models.types import ArtworkSource, PictureFormat, UndefinedField
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.roles.artwork.v1 import MAX_ANNOUNCE_LEAD_US, ArtworkV1Role
-from aiosendspin.server.roles.base import MAX_SCHEDULED_LEAD_US
 from aiosendspin.server.roles.color.group import ColorGroupRole
 from aiosendspin.server.roles.color.state import Color
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 from aiosendspin.server.roles.metadata.state import Metadata
-from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
+from aiosendspin.server.roles.scheduled_state import MAX_SCHEDULED_LEAD_US, ScheduledRoleState
 
 _FUZZ_SEED = 0x5EED5A7E
 _SCENARIO_COUNT = 400
@@ -378,7 +377,7 @@ async def _run_artwork_scenario(rng: random.Random) -> None:
         action = rng.randrange(6)
         image = rng.choice([b"", b"x" * rng.randint(1, 40_000)])
         if action == 0:
-            intents[target].apply(image or None, now_us)
+            intents[target].apply(image or None)
             role.send_artwork(target, image, now_us)
         elif action in (1, 2):
             timestamp_us = now_us + rng.choice([1_000, 1_000_000, MAX_ANNOUNCE_LEAD_US + 1])
@@ -386,7 +385,7 @@ async def _run_artwork_scenario(rng: random.Random) -> None:
             role.send_artwork(target, image, timestamp_us)
         elif action == 3:
             if intents[target].pending_timestamp_us is not None:
-                intents[target].apply(intents[target].current(now_us), now_us)
+                intents[target].apply(intents[target].current(now_us))
                 assert role.cancel_scheduled_artwork(target)
         else:
             clock.advance_us(rng.choice([1, 500_000, 2_000_000]))

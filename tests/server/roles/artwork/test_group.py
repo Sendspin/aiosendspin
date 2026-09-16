@@ -246,9 +246,9 @@ async def test_cancel_scheduled_artwork() -> None:
     await agr.set_album_artwork(_image(2), timestamp_us=1_500_000)
     clock.advance_us(100_000)
 
-    await agr.cancel_scheduled_artwork(ArtworkSource.ALBUM)
-    await agr.cancel_scheduled_artwork(ArtworkSource.ALBUM)
-    await agr.cancel_scheduled_artwork(ArtworkSource.ARTIST)
+    await agr.cancel_scheduled(ArtworkSource.ALBUM)
+    await agr.cancel_scheduled(ArtworkSource.ALBUM)
+    await agr.cancel_scheduled(ArtworkSource.ARTIST)
 
     assert member.sent[2:] == [("cancel",)]
     assert legacy.sent[2:] == [("cancel",), (1, 1_100_000)]
