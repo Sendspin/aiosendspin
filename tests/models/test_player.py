@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from aiosendspin.models.player import PlayerCommandPayload, PlayerStatePayload
+from aiosendspin.models.player import (
+    ClientHelloPlayerSupport,
+    PlayerCommandPayload,
+    PlayerStatePayload,
+)
 from aiosendspin.models.types import PlayerCommand
 
 
@@ -105,10 +109,65 @@ def test_player_command_volume_rejects_output_delay() -> None:
         PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=50, output_delay_ms=100)
 
 
-def test_player_state_rejects_invalid_supported_commands() -> None:
-    """State-level supported_commands only allows set_output_delay."""
-    with pytest.raises(ValueError, match="Invalid state-level"):
-        PlayerStatePayload(supported_commands=[PlayerCommand.VOLUME])
+def test_player_state_accepts_full_supported_command_set() -> None:
+    """State-level supported_commands accepts volume, mute and set_output_delay."""
+    payload = PlayerStatePayload.from_dict(
+        {"supported_commands": ["volume", "mute", "set_output_delay"]}
+    )
+    assert payload.supported_commands == [
+        PlayerCommand.VOLUME,
+        PlayerCommand.MUTE,
+        PlayerCommand.SET_OUTPUT_DELAY,
+    ]
+
+
+def test_player_state_rejects_unknown_supported_command() -> None:
+    """An unknown state-level command fails to parse."""
+    with pytest.raises(ValueError, match="supported_commands"):
+        PlayerStatePayload.from_dict({"supported_commands": ["reboot"]})
+
+
+def test_player_state_empty_supported_commands_round_trips() -> None:
+    """An empty supported_commands list is serialized, not omitted."""
+    data = PlayerStatePayload(supported_commands=[]).to_dict()
+    assert data["supported_commands"] == []
+    assert PlayerStatePayload.from_dict(data).supported_commands == []
+
+
+def test_player_state_supported_commands_omitted_when_unset() -> None:
+    """supported_commands is omitted when unset so incremental updates leave it unchanged."""
+    assert "supported_commands" not in PlayerStatePayload().to_dict()
+
+
+def _hello_support(**extra: object) -> dict[str, object]:
+    return {
+        "supported_formats": [
+            {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+        ],
+        "buffer_capacity": 100_000,
+        **extra,
+    }
+
+
+def test_hello_player_support_parses_without_supported_commands() -> None:
+    """A spec-shaped player support object without supported_commands parses."""
+    support = ClientHelloPlayerSupport.from_dict(_hello_support())
+    assert support.supported_commands is None
+    assert "supported_commands" not in support.to_dict()
+
+
+# DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+def test_hello_player_support_accepts_legacy_supported_commands() -> None:
+    """A pre-#177 hello-level supported_commands list is still parsed."""
+    support = ClientHelloPlayerSupport.from_dict(_hello_support(supported_commands=["volume"]))
+    assert support.supported_commands == [PlayerCommand.VOLUME]
+
+
+# DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+def test_hello_player_support_rejects_legacy_delay_command() -> None:
+    """The legacy hello-level list only ever held volume and mute."""
+    with pytest.raises(ValueError, match="Invalid hello supported_commands"):
+        ClientHelloPlayerSupport.from_dict(_hello_support(supported_commands=["set_output_delay"]))
 
 
 def test_player_state_accepts_pre_rename_delay_key() -> None:

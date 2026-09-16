@@ -128,47 +128,83 @@ def test_player_role_initial_state_deviations_accepts_complete_timing() -> None:
     role = PlayerV1Role(client=_make_client_stub())
     payload = ClientStatePayload(
         available=True,
-        player=PlayerStatePayload(output_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200),
+        player=PlayerStatePayload(
+            output_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200, supported_commands=[]
+        ),
     )
     assert role.initial_state_deviations(payload) == []
 
 
-def _stub_with_player_support(*commands: PlayerCommand) -> MagicMock:
+def _stub_with_player_support(legacy_commands: list[PlayerCommand] | None = None) -> MagicMock:
     client = _make_client_stub()
     client.info.player_support = ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
         ],
         buffer_capacity=100_000,
-        supported_commands=list(commands),
+        supported_commands=legacy_commands,
     )
     return client
 
 
 def _complete_timing_state(**overrides: object) -> ClientStatePayload:
-    fields = {"output_delay_ms": 0, "required_lead_time_ms": 100, "min_buffer_ms": 200}
+    fields: dict[str, object] = {
+        "output_delay_ms": 0,
+        "required_lead_time_ms": 100,
+        "min_buffer_ms": 200,
+        "supported_commands": [],
+    }
     fields.update(overrides)
     return ClientStatePayload(available=True, player=PlayerStatePayload(**fields))  # type: ignore[arg-type]
 
 
+def test_player_role_initial_state_deviations_flags_missing_supported_commands() -> None:
+    """An initial player state without supported_commands is reported incomplete."""
+    role = PlayerV1Role(client=_stub_with_player_support())
+    reasons = role.initial_state_deviations(_complete_timing_state(supported_commands=None))
+    assert any("supported_commands" in r for r in reasons)
+
+
 def test_player_role_initial_state_deviations_flags_missing_volume() -> None:
-    """A player that declared the volume command but omits volume is reported incomplete."""
-    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.VOLUME))
-    reasons = role.initial_state_deviations(_complete_timing_state())
+    """A player whose initial state declares the volume command but omits volume is flagged."""
+    role = PlayerV1Role(client=_stub_with_player_support())
+    reasons = role.initial_state_deviations(
+        _complete_timing_state(supported_commands=[PlayerCommand.VOLUME])
+    )
     assert any("volume" in r for r in reasons)
 
 
 def test_player_role_initial_state_deviations_flags_missing_muted() -> None:
-    """A player that declared the mute command but omits muted is reported incomplete."""
-    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.MUTE))
-    reasons = role.initial_state_deviations(_complete_timing_state())
+    """A player whose initial state declares the mute command but omits muted is flagged."""
+    role = PlayerV1Role(client=_stub_with_player_support())
+    reasons = role.initial_state_deviations(
+        _complete_timing_state(supported_commands=[PlayerCommand.MUTE])
+    )
     assert any("muted" in r for r in reasons)
 
 
 def test_player_role_initial_state_deviations_accepts_declared_commands_reported() -> None:
     """Declared volume/mute commands with their values present are accepted."""
-    role = PlayerV1Role(client=_stub_with_player_support(PlayerCommand.VOLUME, PlayerCommand.MUTE))
-    assert role.initial_state_deviations(_complete_timing_state(volume=50, muted=False)) == []
+    role = PlayerV1Role(client=_stub_with_player_support())
+    payload = _complete_timing_state(
+        volume=50, muted=False, supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE]
+    )
+    assert role.initial_state_deviations(payload) == []
+
+
+def test_player_role_initial_state_deviations_reads_payload_commands() -> None:
+    """The initial state's own list is checked, not the role's previously stored one."""
+    role = PlayerV1Role(client=_stub_with_player_support())
+    role.state_supported_commands = [PlayerCommand.VOLUME]
+    assert role.initial_state_deviations(_complete_timing_state()) == []
+
+
+# DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+def test_player_role_initial_state_deviations_legacy_hello_commands() -> None:
+    """A pre-#177 hello's commands stand in for an omitted state list, without a second flag."""
+    role = PlayerV1Role(client=_stub_with_player_support([PlayerCommand.VOLUME]))
+    reasons = role.initial_state_deviations(_complete_timing_state(supported_commands=None))
+    assert reasons == ["omitted volume despite declaring the volume command"]
 
 
 def test_player_role_flags_undeclared_format_request() -> None:
@@ -191,22 +227,38 @@ def test_player_role_no_flag_for_declared_format_request() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
-def test_player_role_flags_volume_without_declared_support() -> None:
-    """A volume field sent with no declared volume command is a deviation."""
-    role = PlayerV1Role(client=_make_client_stub())  # player_support is None
-    reasons = role.client_state_deviations(
-        ClientStatePayload(available=True, player=PlayerStatePayload(volume=50))
+def test_player_role_accepts_read_only_volume() -> None:
+    """A volume reported without the volume command is applied and surfaced, not flagged."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    payload = ClientStatePayload(
+        available=True, player=PlayerStatePayload(volume=50, supported_commands=[])
     )
-    assert any("volume" in r for r in reasons)
+
+    assert role.client_state_deviations(payload) == []
+    role.on_client_state(payload)
+
+    assert role.volume == 50
+    client._signal_event.assert_called_once_with(VolumeChangedEvent(volume=50, muted=False))  # noqa: SLF001
+    role.set_volume(20)
+    client.send_message.assert_not_called()
 
 
-def test_player_role_flags_muted_without_declared_support() -> None:
-    """A muted field sent with no declared mute command is a deviation."""
-    role = PlayerV1Role(client=_make_client_stub())  # player_support is None
-    reasons = role.client_state_deviations(
-        ClientStatePayload(available=True, player=PlayerStatePayload(muted=True))
+def test_player_role_accepts_read_only_muted() -> None:
+    """A muted state reported without the mute command is applied and surfaced, not flagged."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    payload = ClientStatePayload(
+        available=True, player=PlayerStatePayload(muted=True, supported_commands=[])
     )
-    assert any("muted" in r for r in reasons)
+
+    assert role.client_state_deviations(payload) == []
+    role.on_client_state(payload)
+
+    assert role.muted is True
+    client._signal_event.assert_called_once_with(VolumeChangedEvent(volume=100, muted=True))  # noqa: SLF001
+    role.set_mute(False)
+    client.send_message.assert_not_called()
 
 
 def test_player_role_has_role_family() -> None:
@@ -811,7 +863,6 @@ def _make_player_support(*formats: SupportedAudioFormat) -> ClientHelloPlayerSup
     return ClientHelloPlayerSupport(
         supported_formats=list(formats),
         buffer_capacity=65536,
-        supported_commands=[PlayerCommand.VOLUME],
     )
 
 
@@ -1111,6 +1162,78 @@ def test_on_client_state_updates_supported_commands() -> None:
     )
     role.on_client_state(payload)
     assert PlayerCommand.SET_OUTPUT_DELAY in role.state_supported_commands
+
+
+def test_volume_and_mute_commands_follow_latest_state_list() -> None:
+    """A mid-session supported_commands change alters which commands are sent."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE])
+        )
+    )
+    role.set_volume(30)
+    role.set_mute(True)
+    assert [c.args[0].payload.player.command for c in client.send_message.call_args_list] == [
+        PlayerCommand.VOLUME,
+        PlayerCommand.MUTE,
+    ]
+
+    client.send_message.reset_mock()
+    role.on_client_state(
+        ClientStatePayload(player=PlayerStatePayload(supported_commands=[PlayerCommand.MUTE]))
+    )
+    role.set_volume(40)
+    role.set_mute(False)
+    assert [c.args[0].payload.player.command for c in client.send_message.call_args_list] == [
+        PlayerCommand.MUTE
+    ]
+
+    client.send_message.reset_mock()
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(volume=10)))
+    role.set_mute(True)
+    client.send_message.assert_called_once()
+
+
+def test_on_connect_resets_supported_commands() -> None:
+    """A reconnecting player starts with no commands until its client/state declares them."""
+    client = _make_client_stub()
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role = PlayerV1Role(client=client)
+    role.state_supported_commands = [PlayerCommand.VOLUME, PlayerCommand.SET_OUTPUT_DELAY]
+
+    role.on_connect()
+
+    assert role.state_supported_commands == []
+
+
+# DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+def test_legacy_hello_commands_seed_and_extend_state_list() -> None:
+    """A pre-#177 hello's commands apply on connect and are kept alongside the state list."""
+    client = _stub_with_player_support([PlayerCommand.VOLUME, PlayerCommand.MUTE])
+    role = PlayerV1Role(client=client)
+
+    role.on_connect()
+    assert role.state_supported_commands == [PlayerCommand.VOLUME, PlayerCommand.MUTE]
+    role.set_volume(30)
+    client.send_message.assert_called_once()
+
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(
+                supported_commands=[PlayerCommand.SET_STATIC_DELAY, PlayerCommand.VOLUME]
+            )
+        )
+    )
+    assert role.state_supported_commands == [
+        PlayerCommand.VOLUME,
+        PlayerCommand.MUTE,
+        PlayerCommand.SET_STATIC_DELAY,
+    ]
 
 
 def test_set_output_delay_sends_command() -> None:

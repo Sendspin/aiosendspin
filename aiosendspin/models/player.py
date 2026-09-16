@@ -63,8 +63,13 @@ class ClientHelloPlayerSupport(SendspinModel):
     """List of supported audio formats in priority order (first is preferred)."""
     buffer_capacity: int
     """Max size in bytes of compressed audio messages in the buffer that are yet to be played."""
-    supported_commands: list[PlayerCommand]
-    """Subset of: 'volume', 'mute'."""
+    # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
+    supported_commands: list[PlayerCommand] | None = None
+    """Pre-#177 hello-level commands, subset of: 'volume', 'mute'.
+
+    Not part of the current wire schema: players declare commands in the
+    client/state player object. Tolerated on input only; never sent.
+    """
 
     def __post_init__(self) -> None:
         """Validate field values."""
@@ -79,6 +84,11 @@ class ClientHelloPlayerSupport(SendspinModel):
             invalid = [c for c in self.supported_commands if c not in valid_hello_commands]
             if invalid:
                 raise ValueError(f"Invalid hello supported_commands: {invalid}")
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 # Client -> Server: client/state player object
@@ -119,7 +129,11 @@ class PlayerStatePayload(SendspinModel):
     decode/playback timing variance. Excludes output_delay_ms.
     """
     supported_commands: list[PlayerCommand] | None = None
-    """Subset of: 'set_output_delay'. Commands this player supports via client/state."""
+    """Commands the server may send, subset of: 'volume', 'mute', 'set_output_delay'.
+
+    Required on the initial state message and empty when the player accepts no
+    commands; omitted in incremental updates means unchanged.
+    """
     legacy_delay_key: str | None = None
     """Pre-rename delay key the parser rewrote, recorded for the role to flag.
     Not part of the wire schema (omitted when None)."""
@@ -144,14 +158,6 @@ class PlayerStatePayload(SendspinModel):
             )
         if self.min_buffer_ms is not None and not 0 <= self.min_buffer_ms <= 30000:
             raise ValueError(f"min_buffer_ms must be in range 0-30000, got {self.min_buffer_ms}")
-        VALID_STATE_COMMANDS = {  # noqa: N806
-            PlayerCommand.SET_OUTPUT_DELAY,
-            PlayerCommand.SET_STATIC_DELAY,
-        }
-        if self.supported_commands:
-            invalid = [c for c in self.supported_commands if c not in VALID_STATE_COMMANDS]
-            if invalid:
-                raise ValueError(f"Invalid state-level supported_commands: {invalid}")
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -166,8 +172,8 @@ class PlayerCommandPayload(SendspinModel):
 
     command: PlayerCommand
     """
-    Command - must be 'volume' or 'mute', and must be one of the values
-    listed in supported_commands from player_support in client/hello.
+    Command - must be one of the values listed in supported_commands from the
+    latest client/state player object.
     """
     volume: int | None = None
     """Volume range 0-100, only set if command is volume."""
