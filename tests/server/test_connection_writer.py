@@ -1194,3 +1194,54 @@ async def test_wait_role_drained_returns_once_the_role_queue_is_empty() -> None:
     assert sent == [b"\x08\x00part"]
 
     await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_paced_artwork_parts_interleave_with_queued_audio() -> None:
+    """Parts queued one at a time after the previous is sent alternate with ready audio."""
+    loop = asyncio.get_running_loop()
+    sent: list[bytes] = []
+
+    async def _slow_send(payload: bytes) -> None:
+        # A congested transport: every write yields to the event loop.
+        await asyncio.sleep(0)
+        sent.append(payload)
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock()
+    wsock.send_bytes = AsyncMock(side_effect=_slow_send)
+    conn = SendspinConnection(
+        _DummyServer(loop=loop, clock=ManualClock(now_us_value=1_000_000)), wsock_client=wsock
+    )
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+    for i in range(3):
+        _send_player_audio(conn, b"audio", 2_000_000 + i)
+    parts = pack_artwork_parts(0, bytes(3 * 65_517))
+
+    async def _transfer() -> None:
+        for part in parts:
+            await conn.wait_role_drained("artwork")
+            conn.send_binary(
+                part,
+                role="artwork",
+                timestamp_us=0,
+                message_type=BinaryMessageType.ARTWORK_CHANNEL_0.value,
+            )
+        await conn.wait_role_drained("artwork")
+
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+    await asyncio.wait_for(_transfer(), 1)
+    for _ in range(50):
+        if len(sent) >= 6:
+            break
+        await asyncio.sleep(0)
+
+    kinds = [
+        "part" if frame[0] == BinaryMessageType.ARTWORK_CHANNEL_0.value else "audio"
+        for frame in sent
+    ]
+    assert kinds == ["part", "audio", "part", "audio", "part", "audio"]
+
+    await conn.disconnect(retry_connection=False)

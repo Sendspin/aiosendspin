@@ -297,8 +297,10 @@ class SendspinConnection:
         self._max_pending_msg_by_role: defaultdict[str, int] = defaultdict(lambda: MAX_PENDING_MSG)
         # Last timestamp per role for JSON inheritance (JSON gets previous message's timestamp)
         self._last_enqueued_ts_by_role: dict[str, int] = {}
-        # Set when a role's queue empties, for wait_role_drained()
+        # Set once a role's last queued message has been sent, for wait_role_drained()
         self._role_drained: dict[str, asyncio.Event] = {}
+        # Role whose dequeued message the writer is sending
+        self._sending_role: str | None = None
         # Rate-limit state for already-late-at-enqueue and slow-send warnings
         self._late_at_enqueue_count: dict[str, int] = {}
         self._last_late_at_enqueue_log_s: dict[str, float] = {}
@@ -473,8 +475,8 @@ class SendspinConnection:
         self._wake_writer()
 
     async def wait_role_drained(self, role: str) -> None:
-        """Return once no message for `role` is queued."""
-        while self._role_queues.get(role):
+        """Return once every message queued for `role` has been sent or discarded."""
+        while self._role_queues.get(role) or self._sending_role == role:
             await self._role_drained.setdefault(role, asyncio.Event()).wait()
 
     def send_binary(
@@ -2574,8 +2576,6 @@ class SendspinConnection:
         self._queue_size = max(self._queue_size - 1, 0)
         if not role_queue:
             self._role_queues.pop(role, None)
-            if (drained := self._role_drained.pop(role, None)) is not None:
-                drained.set()
 
     def _peek_ready_entry(self) -> tuple[str, _RoleQueueEntry, int, int] | None:
         # TODO: any reason why a peek method does a full pop and push operation?
@@ -2846,6 +2846,22 @@ class SendspinConnection:
 
         return await self._process_binary_role_messages(wsock, role, entry, now_us)
 
+    async def _send_role_entry(
+        self,
+        wsock: Transport,
+        ready_entry: tuple[str, _RoleQueueEntry, int, int],
+        now_us: int,
+    ) -> tuple[bool, int]:
+        """Process one ready role entry, waking wait_role_drained() once the role is done."""
+        role = ready_entry[0]
+        self._sending_role = role
+        try:
+            return await self._process_role_messages(wsock, ready_entry, now_us)
+        finally:
+            self._sending_role = None
+            if role not in self._role_queues and (drained := self._role_drained.pop(role, None)):
+                drained.set()
+
     async def _wait_for_writer_work(self, now_us: int) -> None:
         """Sleep until new work arrives or next delayed role becomes ready."""
         self._writer_wakeup.clear()
@@ -2911,7 +2927,7 @@ class SendspinConnection:
                     continue
 
                 assert ready_entry is not None
-                sent, now_us = await self._process_role_messages(wsock, ready_entry, now_us)
+                sent, now_us = await self._send_role_entry(wsock, ready_entry, now_us)
                 if sent:
                     iterations_since_yield = 0
                     continue

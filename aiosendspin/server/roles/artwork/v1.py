@@ -70,7 +70,7 @@ class ArtworkV1Role(Role):
         # Images waiting for their transfer: channel -> (image, timestamp_us). The first
         # queued image already due to be announced is sent next.
         self._queued: dict[int, tuple[bytes, int]] = {}
-        # Channel of the transfer announced and not yet fully dequeued by the writer.
+        # Channel of the transfer announced and not yet fully sent.
         self._in_flight: int | None = None
         self._transfer_task: asyncio.Task[None] | None = None
         self._queue_changed = asyncio.Event()
@@ -354,7 +354,7 @@ class ArtworkV1Role(Role):
             self._in_flight = None
 
     async def _run_transfers(self) -> None:
-        """Transfer the queued images one at a time, each part once the previous left the queue."""
+        """Transfer the queued images one at a time, each part once the previous was sent."""
         clock = self._client._server.clock  # noqa: SLF001
         while self._queued:
             self._queue_changed.clear()
