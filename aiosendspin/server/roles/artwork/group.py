@@ -40,17 +40,12 @@ class ArtworkGroupRole(GroupRole):
 
     def on_member_join(self, role: Role) -> None:
         """Send current artwork to newly joined member."""
-        self._send_artwork_to_role(role)
+        if isinstance(role, ArtworkRoleProtocol):
+            self.send_current_artwork(role)
 
-    def _send_artwork_to_role(self, role: Role) -> None:
-        """Send current artwork for all channels to a role."""
-        if not isinstance(role, ArtworkRoleProtocol):
-            return
-        channel_configs = role.get_channel_configs()
-        if not channel_configs:
-            return
-
-        for channel_num, channel_config in channel_configs.items():
+    def send_current_artwork(self, role: ArtworkRoleProtocol) -> None:
+        """Schedule the current image for each channel the role streams."""
+        for channel_num, channel_config in role.get_channel_configs().items():
             if channel_config.source == ArtworkSource.NONE:
                 continue
             artwork = self._current_artwork.get(channel_config.source)
@@ -77,6 +72,10 @@ class ArtworkGroupRole(GroupRole):
     ) -> None:
         """Send artwork to a specific role channel."""
         try:
+            # ArtworkChannel requires these for every source but none, which is never sent.
+            assert channel_config.width is not None
+            assert channel_config.height is not None
+            assert channel_config.format is not None
             timestamp_us = self._group._server.clock.now_us()  # noqa: SLF001
             img_data = await asyncio.to_thread(
                 self._process_and_encode_image,
@@ -85,6 +84,10 @@ class ArtworkGroupRole(GroupRole):
                 channel_config.height,
                 channel_config.format,
             )
+            current = role.get_channel_configs().get(channel)
+            if current is None or _encoding(current) != _encoding(channel_config):
+                # Reconfigured while encoding; the new configuration triggers its own send.
+                return
             role.send_artwork(channel, img_data, timestamp_us)
         except Exception:
             logger.exception("Failed to send artwork update")
@@ -210,3 +213,8 @@ class ArtworkGroupRole(GroupRole):
         """Pack binary header for artwork message."""
         message_type = self.get_binary_message_type(channel)
         return pack_binary_header_raw(message_type, timestamp_us)
+
+
+def _encoding(channel: ArtworkChannel) -> tuple[object, ...]:
+    """Return the fields an encoded image depends on."""
+    return (channel.source, channel.format, channel.width, channel.height)

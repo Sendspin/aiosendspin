@@ -12,7 +12,7 @@ from aiohttp import ClientSession, web
 
 from aiosendspin.audio.codecs import opus_available
 from aiosendspin.clock import Clock, RawMonotonicClock
-from aiosendspin.models.artwork import ClientHelloArtworkSupport
+from aiosendspin.models.artwork import ArtworkChannel, ClientStateArtwork
 from aiosendspin.models.core import (
     DeviceInfo,
     GroupUpdateServerPayload,
@@ -136,8 +136,8 @@ class SendspinClient:
     """List of roles this client supports."""
     _player_support: ClientHelloPlayerSupport | None
     """Player capabilities (only set if PLAYER role is supported)."""
-    _artwork_support: ClientHelloArtworkSupport | None
-    """Artwork capabilities (only set if ARTWORK role is supported)."""
+    _artwork_state: ClientStateArtwork | None
+    """Artwork channels reported via client/state (only set if ARTWORK role is supported)."""
     _visualizer_support: ClientHelloVisualizerSupport | None
     """Visualizer capabilities (only set if VISUALIZER role is supported)."""
     _source_support: ClientHelloSourceSupport | None
@@ -223,7 +223,7 @@ class SendspinClient:
         pairing_store: ClientPairingStore,
         device_info: DeviceInfo | None = None,
         player_support: ClientHelloPlayerSupport | None = None,
-        artwork_support: ClientHelloArtworkSupport | None = None,
+        artwork_channels: Sequence[ArtworkChannel] | None = None,
         visualizer_support: ClientHelloVisualizerSupport | None = None,
         source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
@@ -257,13 +257,13 @@ class SendspinClient:
         else:
             self._player_support = None
 
-        # Validate and store artwork support
+        # Validate and store artwork channels
         if Roles.ARTWORK in self._roles:
-            if artwork_support is None:
-                raise ValueError("artwork_support is required when ARTWORK role is specified")
-            self._artwork_support = artwork_support
+            if artwork_channels is None:
+                raise ValueError("artwork_channels is required when ARTWORK role is specified")
+            self._artwork_state = ClientStateArtwork(channels=list(artwork_channels))
         else:
-            self._artwork_support = None
+            self._artwork_state = None
 
         # Validate and store visualizer support
         if Roles.VISUALIZER in self._roles:
@@ -347,9 +347,9 @@ class SendspinClient:
         return self._player_support
 
     @property
-    def artwork_support(self) -> ClientHelloArtworkSupport | None:
-        """Artwork capabilities (only set if ARTWORK role is supported)."""
-        return self._artwork_support
+    def artwork_state(self) -> ClientStateArtwork | None:
+        """Artwork channels reported via client/state (only set if ARTWORK role is supported)."""
+        return self._artwork_state
 
     @property
     def visualizer_support(self) -> ClientHelloVisualizerSupport | None:
@@ -625,6 +625,21 @@ class SendspinClient:
         connection = self._admitted_connection
         if connection is not None and connection.connected:
             await connection.send_full_player_state()
+
+    async def set_artwork_channels(self, channels: Sequence[ArtworkChannel]) -> None:
+        """Set the artwork channel configuration and report it to the server.
+
+        Array index is the channel number; a channel past the end is not streamed.
+
+        Raises ValueError when the ARTWORK role is not specified or `channels` does not
+        have 1-4 entries.
+        """
+        if Roles.ARTWORK not in self._roles:
+            raise ValueError("ARTWORK role is not specified")
+        self._artwork_state = ClientStateArtwork(channels=list(channels))
+        connection = self._admitted_connection
+        if connection is not None and connection.connected:
+            await connection.send_artwork_state()
 
     # --- Connection lifecycle ---
 

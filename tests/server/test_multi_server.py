@@ -464,6 +464,7 @@ class TestEncryptedActivities:
         assert await conn._exchange_hellos() is False  # noqa: SLF001
         assert "client-1" not in strict_server._clients  # noqa: SLF001
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     @staticmethod
     def _pre_rename_artwork_hello() -> str:
         return orjson.dumps(
@@ -500,6 +501,7 @@ class TestEncryptedActivities:
         )
         conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_pre_rename_artwork_hello_admitted_and_logged(
         self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
@@ -513,6 +515,7 @@ class TestEncryptedActivities:
         assert "pre-rename dimension keys" in caplog.text
         assert "'bmp' format" in caplog.text
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_strict_server_rejects_pre_rename_artwork_hello(self) -> None:
         """Strict mode rejects the pre-rename artwork wire instead of tolerating it."""
@@ -525,6 +528,118 @@ class TestEncryptedActivities:
 
         assert await conn._exchange_hellos() is False  # noqa: SLF001
         assert "client-1" not in strict_server._clients  # noqa: SLF001
+
+    @staticmethod
+    def _artwork_hello(*, support: bool, player: bool = False) -> str:
+        payload: dict[str, object] = {"name": "client-1", "supported_roles": ["artwork@v1"]}
+        if support:
+            payload["artwork@v1_support"] = {
+                "channels": [{"source": "album", "format": "jpeg", "width": 300, "height": 300}]
+            }
+        if player:
+            payload["supported_roles"] = ["player@v1", "artwork@v1"]
+            payload["player@v1_support"] = {
+                "supported_formats": [
+                    {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+                ],
+                "buffer_capacity": 100_000,
+            }
+        return orjson.dumps({"type": "client/hello", "payload": payload}).decode()
+
+    @pytest.mark.asyncio
+    async def test_strict_server_admits_artwork_hello_without_support(self) -> None:
+        """An artwork@v1 hello without a support object is admitted by a strict server."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._artwork_hello(support=False))
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "artwork@v1" in conn._negotiated_roles  # noqa: SLF001
+
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_artwork_support_hello_admitted_and_flagged(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A hello declaring artwork@v1_support is admitted, flagged, and keeps its channels."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._artwork_hello(support=True))
+
+        with caplog.at_level("WARNING"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "declared artwork@v1_support" in caplog.text
+        support = mock_server._clients["client-1"].info.artwork_support  # noqa: SLF001
+        assert support is not None
+        assert support.channels[0].width == 300
+
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_artwork_support_hello_keeps_player_audio_header(
+        self, mock_server: _MockServer
+    ) -> None:
+        """An artwork@v1_support hello does not switch the player to the pre-#177 header."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._artwork_hello(support=True, player=True))
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert conn.uses_pre_spec_177_wire is False
+
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_strict_server_rejects_artwork_support_hello(self) -> None:
+        """Strict mode rejects a hello declaring artwork@v1_support."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._artwork_hello(support=True))
+
+        assert await conn._exchange_hellos() is False  # noqa: SLF001
+        assert "client-1" not in strict_server._clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_oversized_artwork_state_ends_message_loop(
+        self, mock_server: _MockServer
+    ) -> None:
+        """A client/state artwork object with more than 4 channels closes the connection."""
+
+        class _AsyncIterTransport:
+            close_code = 1000
+
+            def __init__(self, msgs: list[WSMessage]) -> None:
+                self._msgs = msgs
+
+            def __aiter__(self) -> _AsyncIterTransport:
+                return self
+
+            async def __anext__(self) -> WSMessage:
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        state = orjson.dumps(
+            {
+                "type": "client/state",
+                "payload": {"available": True, "artwork": {"channels": [{"source": "none"}] * 5}},
+            }
+        ).decode()
+        time = orjson.dumps({"type": "client/time", "payload": {"client_transmitted": 1}}).decode()
+        conn._transport = _AsyncIterTransport(  # type: ignore[assignment]  # noqa: SLF001
+            [WSMessage(WSMsgType.TEXT, state, ""), WSMessage(WSMsgType.TEXT, time, "")]
+        )
+        conn._handle_message = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+        conn.disconnect = AsyncMock()  # type: ignore[method-assign]
+
+        await conn._run_message_loop()  # noqa: SLF001
+
+        conn._handle_message.assert_not_awaited()  # noqa: SLF001
+        await conn._cleanup_connection()  # noqa: SLF001
+        conn.disconnect.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_message_loop_hard_rejects_on_compliance_error(
@@ -1132,6 +1247,7 @@ class TestCustomRoleSupportParsing:
         with pytest.raises(ValueError, match=missing_support_key):
             SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def test_deserialize_artwork_hello_accepts_pre_rename_dimensions(self) -> None:
         """media_width/media_height are rewritten to width/height and recorded."""
         raw = orjson.dumps(

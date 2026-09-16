@@ -9,6 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aiosendspin.models.artwork import (
+    ArtworkChannel,
+    ClientStateArtwork,
+    StreamRequestFormatArtwork,
+)
 from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
@@ -19,7 +24,7 @@ from aiosendspin.models.core import (
 )
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
 from aiosendspin.models.player import PlayerStatePayload, StreamRequestFormatPlayer
-from aiosendspin.models.types import ManagementResult
+from aiosendspin.models.types import ArtworkSource, ManagementResult
 from aiosendspin.models.visualizer import StreamRequestFormatVisualizer
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
@@ -298,3 +303,57 @@ async def test_visualizer_request_format_is_not_flagged_as_player_request() -> N
     )
 
     client.flag_noncompliance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_client_state_artwork_object_for_inactive_role_is_flagged() -> None:
+    """An artwork state object with no active artwork role is flagged."""
+    conn, client = _conn_with_client()
+    client.active_roles = [_role("player")]
+    conn._initial_state_received = True  # noqa: SLF001
+    client.available = None
+    artwork = ClientStateArtwork(channels=[ArtworkChannel(source=ArtworkSource.NONE)])
+    await conn._handle_message(  # noqa: SLF001
+        ClientStateMessage(payload=ClientStatePayload(artwork=artwork)), timestamp_us=0
+    )
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert any("artwork" in r and "inactive role" in r for r in flagged)
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_artwork_request_format_is_flagged_and_still_routed() -> None:
+    """A pre-#195 artwork format request is flagged, then handed to the roles."""
+    conn, client = _conn_with_client()
+    role = _role("artwork")
+    client.active_roles = [role]
+    payload = StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=0))
+
+    await conn._handle_message(  # noqa: SLF001
+        StreamRequestFormatMessage(payload=payload), timestamp_us=0
+    )
+
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert flagged == [
+        "sent a stream/request-format artwork object, superseded by the client/state artwork object"
+    ]
+    role.on_stream_request_format.assert_called_once_with(payload)
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_strict_rejection_of_artwork_request_format_skips_roles() -> None:
+    """A strict server rejects an artwork format request before any role applies it."""
+    conn, client = _conn_with_client()
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    role = _role("artwork")
+    client.active_roles = [role]
+
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_message(  # noqa: SLF001
+            StreamRequestFormatMessage(
+                payload=StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=0))
+            ),
+            timestamp_us=0,
+        )
+    role.on_stream_request_format.assert_not_called()

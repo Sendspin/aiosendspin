@@ -1209,6 +1209,7 @@ class SendspinConnection:
         if current is not None:
             self._flag_noncompliance(f"client sent {message_type}, superseded by {current}")
 
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def _flag_legacy_artwork_wire(self, support: ClientHelloArtworkSupport) -> None:
         """Flag artwork channels declared on the wire the spec superseded."""
         legacy_keys = sorted(
@@ -1233,7 +1234,14 @@ class SendspinConnection:
                 "client/hello sent support objects for unlisted roles: "
                 + ", ".join(client_info.unlisted_support_roles)
             )
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        # The support object, not _legacy_hello, marks this client: it may already use
+        # the post-#177 player audio header.
         if client_info.artwork_support is not None:
+            self._flag_noncompliance(
+                "client/hello declared artwork@v1_support, "
+                "superseded by the client/state artwork object"
+            )
             self._flag_legacy_artwork_wire(client_info.artwork_support)
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         player_support = client_info.player_support
@@ -2029,6 +2037,12 @@ class SendspinConnection:
                     "sent a stream/request-format player object, "
                     "superseded by the client/state player format"
                 )
+            if fmt.artwork is not None:
+                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+                self._flag_noncompliance(
+                    "sent a stream/request-format artwork object, "
+                    "superseded by the client/state artwork object"
+                )
             self._flag_inactive_role_payloads(
                 "stream/request-format",
                 {"player": fmt.player, "artwork": fmt.artwork, "visualizer": fmt.visualizer},
@@ -2095,7 +2109,8 @@ class SendspinConnection:
         if payload.legacy_state_used:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
         self._flag_inactive_role_payloads(
-            "client/state", {"player": payload.player, "source": payload.source}
+            "client/state",
+            {"player": payload.player, "source": payload.source, "artwork": payload.artwork},
         )
         for role in self._client.active_roles:
             for reason in role.client_state_deviations(payload):

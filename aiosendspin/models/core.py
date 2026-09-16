@@ -15,6 +15,7 @@ from mashumaro.types import Alias
 
 from .artwork import (
     ClientHelloArtworkSupport,
+    ClientStateArtwork,
     StreamRequestFormatArtwork,
     StreamStartArtwork,
 )
@@ -281,8 +282,9 @@ class ClientHelloPayload(SendspinModel):
     """Core protocol version. Omitted under encryption (taken from client/init)."""
     player_support: Annotated[ClientHelloPlayerSupport | None, Alias("player@v1_support")] = None
     """Player support configuration - only if player role is in supported_roles."""
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     artwork_support: Annotated[ClientHelloArtworkSupport | None, Alias("artwork@v1_support")] = None
-    """Artwork support configuration - only if artwork role is in supported_roles."""
+    """Artwork channels declared by clients predating the client/state artwork object."""
     visualizer_support: Annotated[
         ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
     ] = None
@@ -360,14 +362,8 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append(Roles.PLAYER.value)
             self.player_support = None
 
-        # Validate artwork role and support configuration
-        artwork_role_supported = Roles.ARTWORK.value in self.supported_roles
-        if artwork_role_supported and self.artwork_support is None:
-            raise ValueError(
-                "artwork@v1_support (artwork_support alias) must be provided when "
-                "'artwork@v1' is in supported_roles"
-            )
-        if not artwork_role_supported:
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        if Roles.ARTWORK.value not in self.supported_roles:
             if self.artwork_support is not None:
                 unlisted.append(Roles.ARTWORK.value)
             self.artwork_support = None
@@ -461,6 +457,8 @@ class ClientStatePayload(SendspinModel):
     to flag. Not part of the wire schema (omitted when None)."""
     source: SourceStatePayload | None = None
     """Source state."""
+    artwork: ClientStateArtwork | None = None
+    """Artwork channel configuration - only if client has artwork role."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
