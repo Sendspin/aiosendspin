@@ -100,11 +100,14 @@ def _full_state() -> ClientStatePayload:
     )
 
 
-async def _connect(hello: ClientHelloPayload) -> tuple[SendspinConnection, _FakeTransport]:
-    """Connect a trusted unpaired client and deliver its initial client/state."""
+async def _connect(
+    hello: ClientHelloPayload, *, trusted: bool = True
+) -> tuple[SendspinConnection, _FakeTransport]:
+    """Connect an unpaired client; a trusted one also delivers its initial client/state."""
     loop = asyncio.get_running_loop()
     server = _MockServer(loop=loop, clock=LoopClock(loop))
-    await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+    if trusted:
+        await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
     conn = SendspinConnection(server, wsock_client=AsyncMock())
     psk = generate_psk()
     conn._client_id = CLIENT_ID  # noqa: SLF001
@@ -114,7 +117,8 @@ async def _connect(hello: ClientHelloPayload) -> tuple[SendspinConnection, _Fake
     fake = _FakeTransport([WSMessage(WSMsgType.TEXT, ClientHelloMessage(hello).to_json(), "")])
     conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
     assert await conn._exchange_hellos()  # noqa: SLF001
-    await conn._handle_client_state(_full_state())  # noqa: SLF001
+    if trusted:
+        await conn._handle_client_state(_full_state())  # noqa: SLF001
     fake.sent.clear()
     return conn, fake
 
@@ -343,3 +347,23 @@ async def test_reactivated_player_gets_no_command_before_its_state() -> None:
     await conn._handle_client_state(ClientStatePayload(player=_PLAYER_STATE))  # noqa: SLF001
     player.set_volume(20)
     assert len(queued_commands()) == 1
+
+
+@pytest.mark.asyncio
+async def test_role_added_after_a_stateless_connect_is_held_with_a_timeout() -> None:
+    """A connection that needed no initial state holds roles activated later like any other."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), trusted=False)
+    client = _client(conn)
+    assert client.active_roles == ()
+    assert client.is_connected
+
+    await _set_trusted(conn, trusted=True)
+    assert client.awaits_role_state("player")
+    assert conn._activation_state_timeout_handle is not None  # noqa: SLF001
+
+    with patch.object(conn._server, "on_client_first_connect") as first_connect:  # noqa: SLF001
+        await conn._handle_client_state(ClientStatePayload(player=_PLAYER_STATE))  # noqa: SLF001
+
+    first_connect.assert_not_called()
+    assert not client.awaits_role_state("player")
+    assert conn._activation_state_timeout_handle is None  # noqa: SLF001

@@ -1065,6 +1065,8 @@ class SendspinConnection:
             )
         else:
             assert self._client is not None
+            # Nothing to wait for: roles activated later are held until their own state.
+            self._initial_state_received = True
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
         return True
