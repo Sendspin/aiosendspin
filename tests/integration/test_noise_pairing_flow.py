@@ -2805,11 +2805,14 @@ async def test_live_pairing_quiesces_a_legacy_generation_client() -> None:
 
 
 async def test_pairing_on_a_long_term_session_quiesces_first() -> None:
-    """A long-term session re-keyed onto the pairing PSK leaves playback before pairing."""
+    """A long-term session re-keyed onto the pairing PSK leaves playback before pairing.
+
+    The client admits unpaired access, so only an explicit empty role set clears its roles.
+    """
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
+    client_store = await _unpaired_enabled_store()
     long_term = generate_psk()
     long_term_id = psk_id_for(long_term)
     await server_store.store_record(
@@ -2849,6 +2852,7 @@ async def test_pairing_on_a_long_term_session_quiesces_first() -> None:
             with patch.object(connection_module, "run_pairing_psk_server", observe_then_run):
                 during = await _pair_while_playing(server, client, attempt, code)
             assert during["activities"] == [Activity.PAIRING]
+            assert during["pairing_active_roles"] == [[]]
             assert during["client_roles"] == []
             assert during["server_roles"] == []
             assert during["stream"] is False

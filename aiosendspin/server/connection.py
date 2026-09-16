@@ -1585,18 +1585,20 @@ class SendspinConnection:
             return await rehandshake
 
     def _pairing_activation(self, pairing: ActivatePairing) -> ServerActivatePayload:
-        """Build the ``server/activate`` admitting an attempt, keeping the active roles.
+        """Build the ``server/activate`` admitting an attempt.
 
-        The first activation of a connection carries the empty role set it starts with.
+        A connection that can carry playback alongside pairing keeps its active roles; any
+        other connection, including on its first activation, declares none.
         """
+        alongside_playback = self._playback_capable and not self._is_long_term_paired
         # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
         # Legacy-generation clients expect pairing to replace playback and roles.
-        if self._declared_activities is None or self._legacy_hello:
+        if self._declared_activities is None or self._legacy_hello or not alongside_playback:
             return ServerActivatePayload(
                 activities=[Activity.PAIRING], active_roles=[], pairing=pairing
             )
         activities = [Activity.PAIRING]
-        if not self._is_long_term_paired and Activity.PLAYBACK in self._desired_activities:
+        if Activity.PLAYBACK in self._desired_activities:
             activities.insert(0, Activity.PLAYBACK)
         return ServerActivatePayload(activities=activities, pairing=pairing)
 
