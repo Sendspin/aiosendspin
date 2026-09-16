@@ -44,8 +44,13 @@ if TYPE_CHECKING:
 
 
 def _resolver(known: dict[str, ResolvedPsk]) -> PskResolver:
-    async def resolve(psk_id: str) -> ResolvedPsk | None:
-        return known.get(psk_id)
+    """Build a store that answers only within the category message 1 declared."""
+
+    async def resolve(psk_id: str, category: PskCategory) -> ResolvedPsk | None:
+        found = known.get(psk_id)
+        if found is None or found.category is not category:
+            return None
+        return found
 
     return resolve
 
@@ -735,3 +740,131 @@ async def test_server_rejects_msg2_with_malformed_payload() -> None:
             timeout_s=1.0,
         )
     await client_task
+
+
+async def test_psk_held_under_another_category_is_a_lookup_miss() -> None:
+    """The declared category binds: the same psk_id under another category does not match."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+    psk = generate_psk()
+    # The server references the PSK as long-term; the client holds it as a pairing PSK.
+    server_resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.LONG_TERM)
+    client_resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.PAIRING)
+
+    server_ws, client_ws = make_ws_pair()
+    server_task = asyncio.create_task(
+        run_handshake_server(
+            server_ws,
+            local_identity=server_id,
+            psk_provider=_provider(server_resolved),
+            timeout_s=1.0,
+        )
+    )
+    with pytest.raises(HandshakeAbortedError, match="no PSK matches psk_id"):
+        await run_handshake_client(
+            client_ws,
+            local_identity=client_id,
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=_resolver({client_resolved.psk_id: client_resolved}),
+        )
+    await asyncio.gather(server_task, return_exceptions=True)
+
+
+async def test_message_1_without_a_category_is_rejected() -> None:
+    """The category is required: a server that omits it does not get a handshake."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+    psk = generate_psk()
+    resolved = ResolvedPsk(
+        psk_id=psk_id_for(psk),
+        psk=psk,
+        category=PskCategory.LONG_TERM,
+        counterparty_id=server_id.peer_id,
+    )
+    server_ws, client_ws = make_ws_pair()
+
+    async def server_without_a_category() -> None:
+        """Drive the server side, writing a message 1 payload that names no category."""
+        client_init = (await server_ws.receive()).data
+        server_init = ServerInitMessage(
+            payload=ServerInitPayload(server_id=server_id.peer_id, version=PROTOCOL_VERSION),
+        ).to_json()
+        prologue = client_init.encode("utf-8") + server_init.encode("utf-8")
+        session = NoiseSession.as_initiator(
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            local_static_priv=server_id.private_bytes,
+            remote_static_pub=client_id.public_bytes,
+            prologue=prologue,
+            psk=psk,
+        )
+        await server_ws.send_str(server_init)
+        msg1 = session.write_message(f'{{"psk_id":"{resolved.psk_id}"}}'.encode())
+        await server_ws.send_str(
+            NoiseHandshakeMessage(payload=NoiseHandshakePayload(data=b64url_encode(msg1))).to_json()
+        )
+
+    server_task = asyncio.create_task(server_without_a_category())
+    with pytest.raises(HandshakeAbortedError, match="malformed Noise message 1 payload"):
+        await run_handshake_client(
+            client_ws,
+            local_identity=client_id,
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=_resolver({resolved.psk_id: resolved}),
+        )
+    await asyncio.gather(server_task, return_exceptions=True)
+
+
+async def test_rehandshake_category_mismatch_aborts() -> None:
+    """A category mismatch during a re-handshake is a miss, and a miss there aborts."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+
+    psk1 = generate_psk()
+    psk1_resolved = ResolvedPsk(psk_id=psk_id_for(psk1), psk=psk1, category=PskCategory.SENTINEL)
+
+    server_ws, client_ws = make_ws_pair()
+    server_init, client_init = await asyncio.gather(
+        run_handshake_server(
+            server_ws,
+            local_identity=server_id,
+            psk_provider=_provider(psk1_resolved),
+        ),
+        run_handshake_client(
+            client_ws,
+            local_identity=client_id,
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=_resolver({psk1_resolved.psk_id: psk1_resolved}),
+        ),
+    )
+
+    # The server re-handshakes referencing psk2 as long-term; the client holds it as pairing.
+    psk2 = generate_psk()
+    server_psk2 = ResolvedPsk(
+        psk_id=psk_id_for(psk2),
+        psk=psk2,
+        category=PskCategory.LONG_TERM,
+        counterparty_id=client_id.peer_id,
+    )
+    client_psk2 = ResolvedPsk(psk_id=psk_id_for(psk2), psk=psk2, category=PskCategory.PAIRING)
+
+    server_task = asyncio.create_task(
+        run_rehandshake_server(
+            server_init.encrypted_ws,
+            local_identity=server_id,
+            client_id=client_id.peer_id,
+            suite=server_init.suite,
+            prologue=server_init.handshake_hash,
+            psk=server_psk2,
+            timeout_s=1.0,
+        )
+    )
+    with pytest.raises(HandshakeAbortedError, match="no PSK matches psk_id"):
+        await run_rehandshake_client(
+            client_init.encrypted_ws,
+            local_identity=client_id,
+            server_id=server_id.peer_id,
+            suite=client_init.suite,
+            prologue=client_init.handshake_hash,
+            psk_resolver=_resolver({client_psk2.psk_id: client_psk2}),
+        )
+    await asyncio.gather(server_task, return_exceptions=True)

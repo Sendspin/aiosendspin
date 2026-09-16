@@ -29,8 +29,8 @@ from aiosendspin.server.roles.base import AudioChunk, AudioRequirements, StreamR
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 from aiosendspin.server.roles.player.events import (
     MinBufferChangedEvent,
+    OutputDelayChangedEvent,
     RequiredLeadTimeChangedEvent,
-    StaticDelayChangedEvent,
     VolumeChangedEvent,
 )
 
@@ -128,7 +128,7 @@ def test_player_role_initial_state_deviations_accepts_complete_timing() -> None:
     role = PlayerV1Role(client=_make_client_stub())
     payload = ClientStatePayload(
         available=True,
-        player=PlayerStatePayload(static_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200),
+        player=PlayerStatePayload(output_delay_ms=0, required_lead_time_ms=100, min_buffer_ms=200),
     )
     assert role.initial_state_deviations(payload) == []
 
@@ -146,7 +146,7 @@ def _stub_with_player_support(*commands: PlayerCommand) -> MagicMock:
 
 
 def _complete_timing_state(**overrides: object) -> ClientStatePayload:
-    fields = {"static_delay_ms": 0, "required_lead_time_ms": 100, "min_buffer_ms": 200}
+    fields = {"output_delay_ms": 0, "required_lead_time_ms": 100, "min_buffer_ms": 200}
     fields.update(overrides)
     return ClientStatePayload(available=True, player=PlayerStatePayload(**fields))  # type: ignore[arg-type]
 
@@ -560,15 +560,15 @@ def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
     assert call_kwargs["duration_us"] == 25000
 
 
-def test_player_role_on_audio_chunk_applies_static_delay_to_buffer_end() -> None:
-    """Buffer tracking end time should account for the player's static delay."""
+def test_player_role_on_audio_chunk_applies_output_delay_to_buffer_end() -> None:
+    """Buffer tracking end time should account for the player's output delay."""
     client = _make_client_stub()
     client.send_binary.return_value = True
 
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
     role._stream_started = True  # noqa: SLF001
-    role.static_delay_ms = 500
+    role.output_delay_ms = 500
 
     chunk = AudioChunk(
         data=b"audio",
@@ -980,23 +980,23 @@ def test_preferred_format_override_superseded_after_client_hello() -> None:
     assert role.preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
 
-# --- Static delay ---
+# --- Output delay ---
 
 
-def test_static_delay_default_zero() -> None:
-    """Static delay defaults to 0."""
+def test_output_delay_default_zero() -> None:
+    """Output delay defaults to 0."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
-    assert role.static_delay_ms == 0
+    assert role.output_delay_ms == 0
 
 
-def test_on_client_state_updates_static_delay() -> None:
-    """on_client_state() updates static_delay_ms and fires event."""
+def test_on_client_state_updates_output_delay() -> None:
+    """on_client_state() updates output_delay_ms and fires event."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
-    payload = ClientStatePayload(player=PlayerStatePayload(static_delay_ms=300))
+    payload = ClientStatePayload(player=PlayerStatePayload(output_delay_ms=300))
     role.on_client_state(payload)
-    assert role.static_delay_ms == 300
+    assert role.output_delay_ms == 300
     client._signal_event.assert_called_once()  # noqa: SLF001
 
 
@@ -1004,7 +1004,7 @@ def test_on_client_state_no_event_if_unchanged() -> None:
     """on_client_state() does not fire event when delay is unchanged."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
-    payload = ClientStatePayload(player=PlayerStatePayload(static_delay_ms=0))
+    payload = ClientStatePayload(player=PlayerStatePayload(output_delay_ms=0))
     role.on_client_state(payload)
     client._signal_event.assert_not_called()  # noqa: SLF001
 
@@ -1057,13 +1057,13 @@ def test_partial_client_state_does_not_reset_timing_fields() -> None:
         ClientStatePayload(
             player=PlayerStatePayload(
                 volume=80,
-                static_delay_ms=400,
+                output_delay_ms=400,
                 required_lead_time_ms=120,
                 min_buffer_ms=600,
             )
         )
     )
-    assert role.static_delay_ms == 400
+    assert role.output_delay_ms == 400
     assert role.required_lead_time_ms == 120
     assert role.min_buffer_ms == 600
 
@@ -1071,35 +1071,35 @@ def test_partial_client_state_does_not_reset_timing_fields() -> None:
 
     role.on_client_state(ClientStatePayload(player=PlayerStatePayload(volume=70)))
 
-    assert role.static_delay_ms == 400
+    assert role.output_delay_ms == 400
     assert role.required_lead_time_ms == 120
     assert role.min_buffer_ms == 600
     emitted_types = [
         type(call.args[0])
         for call in client._signal_event.call_args_list  # noqa: SLF001
     ]
-    assert StaticDelayChangedEvent not in emitted_types
+    assert OutputDelayChangedEvent not in emitted_types
     assert RequiredLeadTimeChangedEvent not in emitted_types
     assert MinBufferChangedEvent not in emitted_types
     assert VolumeChangedEvent in emitted_types
 
 
-def test_explicit_zero_static_delay_in_delta_updates_field() -> None:
-    """A delta of static_delay_ms=0 sets the field to 0 and fires its event."""
+def test_explicit_zero_output_delay_in_delta_updates_field() -> None:
+    """A delta of output_delay_ms=0 sets the field to 0 and fires its event."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
 
-    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(static_delay_ms=400)))
-    assert role.static_delay_ms == 400
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(output_delay_ms=400)))
+    assert role.output_delay_ms == 400
 
     client._signal_event.reset_mock()  # noqa: SLF001
 
-    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(static_delay_ms=0)))
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(output_delay_ms=0)))
 
-    assert role.static_delay_ms == 0
+    assert role.output_delay_ms == 0
     event = client._signal_event.call_args[0][0]  # noqa: SLF001
-    assert isinstance(event, StaticDelayChangedEvent)
-    assert event.static_delay_ms == 0
+    assert isinstance(event, OutputDelayChangedEvent)
+    assert event.output_delay_ms == 0
 
 
 def test_on_client_state_updates_supported_commands() -> None:
@@ -1107,24 +1107,73 @@ def test_on_client_state_updates_supported_commands() -> None:
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
     payload = ClientStatePayload(
-        player=PlayerStatePayload(supported_commands=[PlayerCommand.SET_STATIC_DELAY])
+        player=PlayerStatePayload(supported_commands=[PlayerCommand.SET_OUTPUT_DELAY])
     )
     role.on_client_state(payload)
-    assert PlayerCommand.SET_STATIC_DELAY in role.state_supported_commands
+    assert PlayerCommand.SET_OUTPUT_DELAY in role.state_supported_commands
 
 
-def test_set_static_delay_sends_command() -> None:
-    """set_static_delay() sends command when client supports it."""
+def test_set_output_delay_sends_command() -> None:
+    """set_output_delay() sends command when client supports it."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
-    role.state_supported_commands = [PlayerCommand.SET_STATIC_DELAY]
-    role.set_static_delay(500)
+    role.state_supported_commands = [PlayerCommand.SET_OUTPUT_DELAY]
+    role.set_output_delay(500)
     client.send_message.assert_called_once()
 
 
-def test_set_static_delay_noop_without_support() -> None:
-    """set_static_delay() is a no-op when client doesn't support it."""
+def test_set_output_delay_noop_without_support() -> None:
+    """set_output_delay() is a no-op when client doesn't support it."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
-    role.set_static_delay(500)
+    role.set_output_delay(500)
     client.send_message.assert_not_called()
+
+
+def test_set_output_delay_addresses_client_using_pre_rename_command() -> None:
+    """A client that only declared set_static_delay still gets a delay command it understands."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    role.state_supported_commands = [PlayerCommand.SET_STATIC_DELAY]
+
+    role.set_output_delay(500)
+
+    client.send_message.assert_called_once()
+    sent = client.send_message.call_args.args[0]
+    assert sent.payload.player.command == PlayerCommand.SET_STATIC_DELAY
+    assert sent.payload.player.output_delay_ms == 500
+    assert sent.payload.player.to_dict() == {"command": "set_static_delay", "static_delay_ms": 500}
+
+
+def test_set_output_delay_prefers_current_command_when_both_declared() -> None:
+    """A client declaring both spellings is addressed with the current one."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    role.state_supported_commands = [PlayerCommand.SET_STATIC_DELAY, PlayerCommand.SET_OUTPUT_DELAY]
+
+    role.set_output_delay(500)
+
+    sent = client.send_message.call_args.args[0]
+    assert sent.payload.player.command == PlayerCommand.SET_OUTPUT_DELAY
+
+
+def test_player_client_state_deviations_flags_pre_rename_delay_key() -> None:
+    """A client/state using static_delay_ms is a deviation."""
+    role = PlayerV1Role(client=_make_client_stub())
+    payload = ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload.from_dict({"static_delay_ms": 250}),
+    )
+    reasons = role.client_state_deviations(payload)
+    assert any("static_delay_ms" in r for r in reasons)
+
+
+def test_player_client_state_deviations_flags_pre_rename_command_name() -> None:
+    """Declaring set_static_delay in supported_commands is a deviation."""
+    role = PlayerV1Role(client=_make_client_stub())
+    payload = ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload(supported_commands=[PlayerCommand.SET_STATIC_DELAY]),
+    )
+    reasons = role.client_state_deviations(payload)
+    assert any("set_static_delay" in r for r in reasons)

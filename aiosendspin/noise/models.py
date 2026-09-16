@@ -71,6 +71,8 @@ class NoiseMsg1Payload(SendspinModel):
 
     psk_id: str
     """43-char base64url SHA-256 of the PSK (see ``psk_id_for``)."""
+    psk_category: str
+    """Category the server is using the referenced PSK as, as a ``PskCategory`` code."""
 
 
 @dataclass

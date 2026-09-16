@@ -53,7 +53,7 @@ def undefined_field() -> UndefinedField:
 
 
 class TrustLevel(Enum):
-    """Trust a client extends to a server, governing allowed management operations."""
+    """Trust a connection carries, derived from the PSK category that admitted it."""
 
     NONE = "none"
     USER = "user"
@@ -161,6 +161,8 @@ class PlayerCommand(Enum):
 
     VOLUME = "volume"
     MUTE = "mute"
+    SET_OUTPUT_DELAY = "set_output_delay"
+    # Removed from the spec, still served to clients that declare it.
     SET_STATIC_DELAY = "set_static_delay"
 
 
