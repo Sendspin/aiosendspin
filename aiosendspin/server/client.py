@@ -777,6 +777,7 @@ class SendspinClient:
             for role in reversed(self._roles.values()):
                 role.on_disconnect()
         self._roles.clear()
+        self._roles_awaiting_state.clear()
         self._active_roles = None
         self._binary_handling_cache.clear()
         self._roles_cold_preinitialized = False

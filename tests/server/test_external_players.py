@@ -13,6 +13,7 @@ from aiosendspin.models.types import (
     AudioCodec,
     BinaryMessageType,
     ConnectionReason,
+    GoodbyeReason,
     PlayerCommand,
     Roles,
 )
@@ -22,6 +23,7 @@ from aiosendspin.server import ClientAddedEvent, ExternalStreamStartRequest, Sen
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.roles.base import AudioChunk, AudioRequirements, Role
 from aiosendspin.server.roles.player.v1 import PlayerPersistentState
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
@@ -873,3 +875,61 @@ async def test_register_external_player_cancels_pending_cleanup() -> None:
 
     assert client._cleanup_handle is None  # noqa: SLF001
     assert server.get_client("late-register") is client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("goodbye", [GoodbyeReason.SHUTDOWN, GoodbyeReason.RESTART])
+async def test_preinitialized_role_is_not_held_by_a_previous_connection(
+    monkeypatch: pytest.MonkeyPatch, goodbye: GoodbyeReason
+) -> None:
+    """A hold left by a connection that dropped does not block preconnect audio afterwards."""
+
+    class _HeldPreconnectRole(Role):
+        def __init__(self, client: SendspinClient) -> None:
+            self._client = client
+
+        @property
+        def role_id(self) -> str:
+            return "heldpreconnect@v1"
+
+        @property
+        def role_family(self) -> str:
+            return "heldpreconnect"
+
+        def get_audio_requirements(self) -> AudioRequirements | None:
+            return AudioRequirements(sample_rate=48000, bit_depth=16, channels=2)
+
+        def supports_preconnect_audio(self) -> bool:
+            return True
+
+        def requires_activation_state(self) -> bool:
+            return True
+
+        def on_connect(self) -> None:
+            return
+
+        def on_disconnect(self) -> None:
+            return
+
+    monkeypatch.setitem(ROLE_FACTORIES, "heldpreconnect@v1", _HeldPreconnectRole)
+    server = _make_server()
+    hello = _custom_role_hello("held-preconnect", "heldpreconnect@v1")
+    client = SendspinClient(server, client_id="held-preconnect")
+    SendspinGroup(server, client)
+    client.attach_connection(
+        _DummyConnection(),
+        client_info=hello,
+        negotiated_roles=["heldpreconnect@v1"],
+        active_roles=[],
+    )
+    client.set_active_roles(["heldpreconnect@v1"])
+    assert client.awaits_role_state("heldpreconnect")
+    client.detach_connection(goodbye)
+
+    client.preinitialize_client_from_hello(hello)
+    client.attach_preinitialized_roles()
+
+    role = client.role("heldpreconnect@v1")
+    assert role is not None
+    assert not client.awaits_role_state("heldpreconnect")
+    assert PushStream._role_in_audio_pipeline(client, role)  # noqa: SLF001
