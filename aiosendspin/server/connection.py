@@ -305,6 +305,7 @@ class SendspinConnection:
         self._writer_idle = asyncio.Event()
         self._writer_task: asyncio.Task[None] | None = None
         self._writer_paused = False
+        self._writer_stopping = False
         self._message_loop_task: asyncio.Task[None] | None = None
 
         self._noise_psk: ResolvedPsk | None = None
@@ -1937,17 +1938,14 @@ class SendspinConnection:
         """
         if self._writer_task is None or self._writer_task.done():
             return
-        transport = self._transport
-        assert isinstance(transport, EncryptedWebSocket)
-        # Holding the send lock stops the writer between messages, never between the
-        # fragments of one.
-        async with transport.send_lock:
-            self._writer_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._writer_task
-        self._writer_task = None
+        assert self._transport is not None
+        # The writer stops at its next iteration, once any message it has taken is sent.
         self._writer_paused = True
-        while await self._process_priority_messages(transport):
+        self._writer_stopping = True
+        self._writer_wakeup.set()
+        await asyncio.wait((self._writer_task,))
+        self._writer_task = None
+        while await self._process_priority_messages(self._transport):
             pass
 
     def _resume_writer(self) -> None:
@@ -1955,6 +1953,7 @@ class SendspinConnection:
         if not self._writer_paused or self._disconnecting or self._closing:
             return
         self._writer_paused = False
+        self._writer_stopping = False
         if self._writer_task is None or self._writer_task.done():
             self._writer_task = create_task(self._writer())
 
@@ -2701,7 +2700,7 @@ class SendspinConnection:
         now_us = clock_now_us()
 
         try:
-            while not wsock.closed and not self._closing:
+            while not wsock.closed and not self._closing and not self._writer_stopping:
                 # Periodic yield to prevent event loop starvation
                 if iterations_since_yield >= 50:
                     await asyncio.sleep(0)

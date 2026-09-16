@@ -42,7 +42,6 @@ from aiosendspin.models.types import (
     TrustLevel,
 )
 from aiosendspin.noise import pairing as pairing_module
-from aiosendspin.noise import pairing_code as pairing_code_mod
 from aiosendspin.noise.driver import InitRejectedError
 from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
@@ -53,8 +52,6 @@ from aiosendspin.noise.models import (
     ClientPairRetryMessage,
     ServerErrorMessage,
     ServerErrorPayload,
-    ServerPairAuthMessage,
-    ServerPairInitMessage,
 )
 from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
@@ -1239,27 +1236,6 @@ async def test_live_pairing_round_limit_holds_back_until_pairing_window() -> Non
             await client.disconnect()
 
 
-async def _abandoning_dynamic_client(
-    ws: EncryptedWebSocket, *, pairing_index: int, **_kwargs: object
-) -> str | None:
-    """Dynamic client that abandons the attempt on a cancelling server/activate, as spec'd.
-
-    The SDK client does not yet treat a mid-attempt server/activate as a cancellation.
-    """
-    commit_b = pairing_code_mod.commit(pairing_code_mod.generate_nonce())
-    await ws.send_str(
-        ClientPairInitMessage(
-            payload=ClientPairInitPayload(
-                pairing_index=pairing_index, commit_B=b64url_encode(commit_b)
-            )
-        ).to_json()
-    )
-    await pairing_module._receive_pairing(ws, ServerPairInitMessage)  # noqa: SLF001
-    leave = await pairing_module._receive_pairing_frame(ws, ServerPairAuthMessage)  # noqa: SLF001
-    assert isinstance(leave, str)
-    return leave
-
-
 async def test_live_pairing_invalid_operator_input_leaves_pairing() -> None:
     """Malformed operator input ends the attempt and leaves pairing, keeping the connection."""
     server_store = InMemoryServerPairingStore()
@@ -1285,14 +1261,7 @@ async def test_live_pairing_invalid_operator_input_leaves_pairing() -> None:
             await client.connect(url)
             await _find_connection_by_client_id(server, client_identity.peer_id)
 
-            with (
-                patch.object(
-                    client_connection_module,
-                    "run_dynamic_pairing_code_client",
-                    _abandoning_dynamic_client,
-                ),
-                pytest.raises(InvalidPairingCodeError),
-            ):
+            with pytest.raises(InvalidPairingCodeError):
                 await server.initiate_pairing(
                     client_identity.peer_id,
                     PairingAttempt(

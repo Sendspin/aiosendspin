@@ -1085,11 +1085,10 @@ async def test_pause_writer_stops_between_messages_not_fragments() -> None:
     raw = _SlowWebSocket()
     conn = SendspinConnection(server, wsock_client=MagicMock())
     conn._transport = EncryptedWebSocket(raw, server_session)  # noqa: SLF001
-    conn.send_message(
-        GroupUpdateServerMessage(
-            payload=GroupUpdateServerPayload(group_name="x" * (2 * MAX_TRANSPORT_PLAINTEXT))
+    for name in ("x" * (2 * MAX_TRANSPORT_PLAINTEXT), "next"):
+        conn.send_message(
+            GroupUpdateServerMessage(payload=GroupUpdateServerPayload(group_name=name))
         )
-    )
     conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
     async with asyncio.timeout(1):
         while not raw.sent:  # noqa: ASYNC110
@@ -1102,3 +1101,11 @@ async def test_pause_writer_stops_between_messages_not_fragments() -> None:
     assert len(frames) > 1
     assert frames[-1][1] & FRAGMENT_FLAG_LAST
     assert conn._writer_task is None  # noqa: SLF001
+
+    # The message queued behind it is kept for the resumed writer.
+    conn._resume_writer()  # noqa: SLF001
+    async with asyncio.timeout(1):
+        while len(raw.sent) == len(frames):  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    assert b'"group_name":"next"' in client_session.decrypt(raw.sent[-1])  # type: ignore[arg-type]
+    await conn.disconnect(retry_connection=False)
