@@ -392,3 +392,24 @@ def test_unsupported_format_request_is_ignored(mock_server: MagicMock) -> None:
 
     assert player_role.preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     assert conn.dropped_pending_binary == []
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_undeclared_client_state_format_ends_legacy_retention(mock_server: MagicMock) -> None:
+    """An undeclared format is ignored, but still marks the client as sending format."""
+    client, _conn = _make_player_client(mock_server, "p1")
+    player_role = client.role("player@v1")
+    assert isinstance(player_role, PlayerV1Role)
+    player_role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(codec=AudioCodec.FLAC))
+    )
+    undeclared = SupportedAudioFormat(
+        codec=AudioCodec.PCM, sample_rate=96000, bit_depth=16, channels=2
+    )
+
+    player_role.on_client_state(ClientStatePayload(player=PlayerStatePayload(format=undeclared)))
+    assert player_role.preferred_codec == AudioCodec.FLAC
+
+    player_role.on_client_state(ClientStatePayload(player=PlayerStatePayload(volume=20)))
+    assert player_role.preferred_codec == AudioCodec.PCM
+    assert player_role.preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)

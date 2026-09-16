@@ -872,10 +872,12 @@ class PlayerV1Role(Role):
             # A pre-#195 client never sends `format`; keep what it requested instead.
             if not self._client_format_legacy:
                 self._set_client_format(None)
-        elif self._is_declared_format(state.format):
+        else:
+            # Sending `format` at all marks a current client, even when the value is invalid.
             self._client_format_legacy = False
-            self._set_client_format(state.format)
-        # An undeclared format was flagged by client_state_deviations and keeps the slot.
+            # An undeclared format was flagged by client_state_deviations and keeps the slot.
+            if self._is_declared_format(state.format):
+                self._set_client_format(state.format)
 
     def _set_client_format(self, audio_format: SupportedAudioFormat | None) -> None:
         """Store the client's format preference and apply it when it changed."""
