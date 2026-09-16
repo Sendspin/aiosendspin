@@ -123,6 +123,7 @@ class _DummyConnection:
         buffer_end_time_us: int | None = None,  # noqa: ARG002
         buffer_byte_count: int | None = None,  # noqa: ARG002
         duration_us: int | None = None,  # noqa: ARG002
+        player_audio_header: bool = False,  # noqa: ARG002
     ) -> bool:
         return True
 
@@ -349,6 +350,21 @@ class TestEncryptedActivities:
         support = client.info.player_support
         assert support is not None
         assert support.supported_commands == [PlayerCommand.VOLUME]
+
+    # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("support_extra", "expected"),
+        [({"supported_commands": ["volume"]}, True), ({}, False)],
+    )
+    async def test_hello_player_commands_mark_pre_spec_177_wire(
+        self, mock_server: _MockServer, support_extra: dict[str, object], *, expected: bool
+    ) -> None:
+        """Only a hello declaring player supported_commands marks the connection pre-#177."""
+        conn = self._long_term_connection(mock_server, self._player_hello(**support_extra))
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert conn.uses_pre_spec_177_wire is expected
 
     # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
     @pytest.mark.asyncio

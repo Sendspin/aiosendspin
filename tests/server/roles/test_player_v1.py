@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from aiosendspin.models import AudioCodec, unpack_binary_header
+from aiosendspin.models import AudioCodec
 from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
@@ -569,13 +569,13 @@ def test_player_role_on_audio_chunk_sends_on_success() -> None:
     client.send_binary.assert_called_once()
 
 
-def test_player_role_on_audio_chunk_packs_binary_header() -> None:
-    """on_audio_chunk() packs binary header with timestamp."""
-    sent_data: list[bytes] = []
+def test_player_role_on_audio_chunk_leaves_header_to_connection() -> None:
+    """on_audio_chunk() sends the raw payload and asks the connection for the header."""
+    sent_data: list[tuple[bytes, dict[str, object]]] = []
     client = MagicMock()
 
-    def capture_send(data: bytes, **kwargs: object) -> bool:  # noqa: ARG001
-        sent_data.append(data)
+    def capture_send(data: bytes, **kwargs: object) -> bool:
+        sent_data.append((data, kwargs))
         return True
 
     client.send_binary.side_effect = capture_send
@@ -588,10 +588,11 @@ def test_player_role_on_audio_chunk_packs_binary_header() -> None:
     role.on_audio_chunk(chunk)
 
     assert len(sent_data) == 1
-    header = unpack_binary_header(sent_data[0])
-    assert header.message_type == BinaryMessageType.AUDIO_CHUNK.value
-    assert header.timestamp_us == 123_456
-    assert sent_data[0][9:] == b"\x01\x02\x03"
+    data, kwargs = sent_data[0]
+    assert data == b"\x01\x02\x03"
+    assert kwargs["message_type"] == BinaryMessageType.AUDIO_CHUNK.value
+    assert kwargs["timestamp_us"] == 123_456
+    assert kwargs["player_audio_header"] is True
 
 
 def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:

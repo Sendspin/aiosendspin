@@ -78,6 +78,7 @@ class _DummyConnection:
         buffer_end_time_us: int | None = None,  # noqa: ARG002
         buffer_byte_count: int | None = None,  # noqa: ARG002
         duration_us: int | None = None,  # noqa: ARG002
+        player_audio_header: bool = False,  # noqa: ARG002
     ) -> bool:
         self.sent_binary.append(data)
         return True
@@ -343,7 +344,7 @@ async def test_reconnect_with_new_format_drops_stale_cached_audio() -> None:
     assert stream_starts[0].payload.player is not None
     assert stream_starts[0].payload.player.bit_depth == 24
     assert reconnect_conn.sent_binary
-    assert all(len(chunk) == 7_209 for chunk in reconnect_conn.sent_binary)
+    assert all(len(chunk) == 7_200 for chunk in reconnect_conn.sent_binary)
 
 
 @pytest.mark.asyncio

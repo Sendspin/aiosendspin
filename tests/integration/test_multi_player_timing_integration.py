@@ -14,9 +14,14 @@ from typing import Any, Literal
 
 import pytest
 
-from aiosendspin.models import unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
-from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
+from aiosendspin.models.player import (
+    PLAYER_AUDIO_HEADER_SIZE,
+    ClientHelloPlayerSupport,
+    SupportedAudioFormat,
+    pack_player_audio_header,
+    unpack_player_audio_header,
+)
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
@@ -72,12 +77,15 @@ class _CaptureConnection:
         data: bytes,
         *,
         role: str,  # noqa: ARG002
-        timestamp_us: int,  # noqa: ARG002
+        timestamp_us: int,
         message_type: int,  # noqa: ARG002
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        player_audio_header: bool = False,
     ) -> bool:
+        if player_audio_header:
+            data = pack_player_audio_header(timestamp_us, 0) + data
         self.events.append(_Event(kind="bin", payload=data))
         if (
             self.buffer_tracker is not None
@@ -266,12 +274,12 @@ def _encoded_segments_from_events(events: list[_Event]) -> list[_EncodedSegment]
 
         data = ev.payload
         assert isinstance(data, (bytes, bytearray))
-        header = unpack_binary_header(bytes(data))
+        header = unpack_player_audio_header(bytes(data))
         if current_start_msg is None:
             continue
         if current_start_timestamp_us is None:
             current_start_timestamp_us = header.timestamp_us
-        current_packets.append(bytes(data)[9:])
+        current_packets.append(bytes(data)[PLAYER_AUDIO_HEADER_SIZE:])
 
     _flush()
     return segments
@@ -378,7 +386,7 @@ def _first_audio_timestamp_after(
     for ev in events[start_index:]:
         if ev.kind != "bin":
             continue
-        header = unpack_binary_header(ev.payload)  # type: ignore[arg-type]
+        header = unpack_player_audio_header(ev.payload)  # type: ignore[arg-type]
         return header.timestamp_us
     return None
 
@@ -547,8 +555,8 @@ def _assert_pcm_chunks_continuous(events: list[_Event], *, max_gap_us: int) -> N
 
         data = ev.payload
         assert isinstance(data, (bytes, bytearray))
-        header = unpack_binary_header(bytes(data))
-        payload = bytes(data)[9:]
+        header = unpack_player_audio_header(bytes(data))
+        payload = bytes(data)[PLAYER_AUDIO_HEADER_SIZE:]
         frame_count = len(payload) // (fmt.channels * 2)
         dur_us = int(frame_count * 1_000_000 / fmt.sample_rate)
         if last_end_us is not None:
@@ -771,7 +779,7 @@ async def test_production_gap_rebases_timeline() -> None:
     for ev in conn_a.events[events_before_gap:]:
         if ev.kind != "bin":
             continue
-        header = unpack_binary_header(ev.payload)  # type: ignore[arg-type]
+        header = unpack_player_audio_header(ev.payload)  # type: ignore[arg-type]
         first_after_gap_ts = header.timestamp_us
         break
 

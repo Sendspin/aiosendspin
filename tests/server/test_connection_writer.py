@@ -20,8 +20,15 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
-from aiosendspin.models.player import StreamStartPlayer
+from aiosendspin.models.player import (
+    PLAYER_AUDIO_HEADER_SIZE,
+    SEND_AHEAD_MAX,
+    StreamStartPlayer,
+    pack_player_audio_frame,
+    unpack_player_audio_header,
+)
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
+from aiosendspin.server import connection as connection_module
 from aiosendspin.server.audio import BufferTracker
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.connection import (
@@ -30,7 +37,7 @@ from aiosendspin.server.connection import (
     _BinaryData,
     _RoleQueueEntry,
 )
-from aiosendspin.server.roles.base import BinaryHandling
+from aiosendspin.server.roles.base import AudioChunk, BinaryHandling
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
 
 
@@ -887,3 +894,168 @@ def test_late_binary_diagnostics_use_the_effective_play_time(
         assert "late_by_us=1000000" in caplog.text
     finally:
         loop.close()
+
+
+async def _start_recording_connection(
+    server: _DummyServer,
+) -> tuple[SendspinConnection, list[bytes]]:
+    sent: list[bytes] = []
+
+    async def _record_binary(payload: bytes) -> None:
+        sent.append(payload)
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock()
+    wsock.send_bytes = AsyncMock(side_effect=_record_binary)
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+    return conn, sent
+
+
+async def _drain_one(conn: SendspinConnection, sent: list[bytes]) -> None:
+    expected = len(sent) + 1
+    if conn._writer_task is None:  # noqa: SLF001
+        conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+    for _ in range(50):
+        if len(sent) >= expected:
+            return
+        await asyncio.sleep(0)
+
+
+def _send_player_audio(conn: SendspinConnection, payload: bytes, timestamp_us: int) -> None:
+    conn.send_binary(
+        payload,
+        role="player",
+        timestamp_us=timestamp_us,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+        player_audio_header=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("timestamp_us", "expected_send_ahead"),
+    [
+        (1_900_000, 150_000),
+        (1_750_000, 0),
+        (1_000_000, 0),
+        (1_750_000 + SEND_AHEAD_MAX + 1, SEND_AHEAD_MAX),
+    ],
+)
+@pytest.mark.asyncio
+async def test_writer_stamps_player_audio_send_ahead_at_send_time(
+    timestamp_us: int, expected_send_ahead: int
+) -> None:
+    """The 13-byte audio header carries send_ahead from the send-time clock, saturated."""
+    # No client is attached, so late-drop never discards the past-timestamp cases.
+    clock = ManualClock(now_us_value=1_000_000)
+    conn, sent = await _start_recording_connection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=clock)
+    )
+
+    _send_player_audio(conn, b"audio", timestamp_us)
+    # Simulate enqueue-to-send latency before the writer drains the queue.
+    clock.advance_us(750_000)
+    await _drain_one(conn, sent)
+
+    assert len(sent) == 1
+    # The Noise transport only encrypts bytes.
+    assert type(sent[0]) is bytes
+    assert len(sent[0]) == PLAYER_AUDIO_HEADER_SIZE + len(b"audio")
+    header = unpack_player_audio_header(sent[0])
+    assert header.message_type == BinaryMessageType.AUDIO_CHUNK.value
+    assert header.timestamp_us == timestamp_us
+    assert header.send_ahead == expected_send_ahead
+    assert sent[0][PLAYER_AUDIO_HEADER_SIZE:] == b"audio"
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_writer_reads_send_ahead_clock_after_building_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Time spent building the frame is excluded from send_ahead."""
+    clock = ManualClock(now_us_value=1_000_000)
+    conn, sent = await _start_recording_connection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=clock)
+    )
+
+    def _slow_pack(timestamp_us: int, payload: bytes) -> bytearray:
+        clock.advance_us(100_000)
+        return pack_player_audio_frame(timestamp_us, payload)
+
+    monkeypatch.setattr(connection_module, "pack_player_audio_frame", _slow_pack)
+    _send_player_audio(conn, b"audio", 1_500_000)
+    await _drain_one(conn, sent)
+
+    assert unpack_player_audio_header(sent[0]).send_ahead == 400_000
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_shared_audio_chunk_gets_a_header_per_connection() -> None:
+    """Connections sending one AudioChunk each stamp their own header on an untouched payload."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    conn_a, sent_a = await _start_recording_connection(_DummyServer(loop=loop, clock=clock))
+    conn_b, sent_b = await _start_recording_connection(_DummyServer(loop=loop, clock=clock))
+    chunk = AudioChunk(data=b"shared", timestamp_us=1_500_000, duration_us=25_000, byte_count=6)
+
+    _send_player_audio(conn_a, chunk.data, chunk.timestamp_us)
+    _send_player_audio(conn_b, chunk.data, chunk.timestamp_us)
+    await _drain_one(conn_a, sent_a)
+    clock.advance_us(200_000)
+    await _drain_one(conn_b, sent_b)
+
+    assert unpack_player_audio_header(sent_a[0]).send_ahead == 500_000
+    assert unpack_player_audio_header(sent_b[0]).send_ahead == 300_000
+    assert sent_a[0][PLAYER_AUDIO_HEADER_SIZE:] == b"shared"
+    assert sent_b[0][PLAYER_AUDIO_HEADER_SIZE:] == b"shared"
+
+    await conn_a.disconnect(retry_connection=False)
+    await conn_b.disconnect(retry_connection=False)
+
+
+# DEPRECATED(spec-pr-167): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_pre_spec_177_connection_gets_nine_byte_audio_header() -> None:
+    """A connection whose hello used the pre-#177 shape gets the header without send_ahead."""
+    clock = ManualClock(now_us_value=1_000_000)
+    conn, sent = await _start_recording_connection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=clock)
+    )
+    conn._legacy_hello = True  # noqa: SLF001
+
+    _send_player_audio(conn, b"audio", 1_500_000)
+    await _drain_one(conn, sent)
+
+    assert sent == [
+        pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 1_500_000) + b"audio"
+    ]
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.parametrize(
+    "message_type",
+    [BinaryMessageType.ARTWORK_CHANNEL_0.value, BinaryMessageType.VISUALIZATION_BEAT.value],
+)
+@pytest.mark.asyncio
+async def test_writer_sends_prepacked_binary_unchanged(message_type: int) -> None:
+    """Binary queued without player_audio_header goes out byte for byte."""
+    clock = ManualClock(now_us_value=1_000_000)
+    conn, sent = await _start_recording_connection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=clock)
+    )
+    frame = pack_binary_header_raw(message_type, 1_500_000) + b"frame"
+
+    conn.send_binary(frame, role="artwork", timestamp_us=1_500_000, message_type=message_type)
+    await _drain_one(conn, sent)
+
+    assert sent == [frame]
+
+    await conn.disconnect(retry_connection=False)

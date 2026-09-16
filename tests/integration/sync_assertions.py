@@ -10,8 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from aiosendspin.models import unpack_binary_header
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
+from aiosendspin.models.player import PLAYER_AUDIO_HEADER_SIZE, unpack_player_audio_header
 from aiosendspin.models.types import AudioCodec
 
 
@@ -196,13 +196,13 @@ def encoded_segments_from_events(events: Sequence[Any]) -> list[EncodedSegment]:
             continue
 
         assert isinstance(payload, (bytes, bytearray))
-        header = unpack_binary_header(bytes(payload))
+        header = unpack_player_audio_header(bytes(payload))
         if current_start_msg is None:
             continue
         current_packets.append(
             EncodedPacket(
                 timestamp_us=header.timestamp_us,
-                payload=bytes(payload)[9:],
+                payload=bytes(payload)[PLAYER_AUDIO_HEADER_SIZE:],
             )
         )
 
@@ -437,7 +437,7 @@ def first_audio_timestamp_after(events: Sequence[Any], *, start_index: int) -> i
             continue
         payload = ev.payload
         assert isinstance(payload, (bytes, bytearray))
-        header = unpack_binary_header(bytes(payload))
+        header = unpack_player_audio_header(bytes(payload))
         return header.timestamp_us
     return None
 
@@ -468,8 +468,8 @@ def assert_pcm_chunks_continuous(events: Sequence[Any], *, max_gap_us: int) -> N
             continue
 
         assert isinstance(payload, (bytes, bytearray))
-        header = unpack_binary_header(bytes(payload))
-        data = bytes(payload)[9:]
+        header = unpack_player_audio_header(bytes(payload))
+        data = bytes(payload)[PLAYER_AUDIO_HEADER_SIZE:]
         frame_count = len(data) // (fmt.channels * 2)
         dur_us = int(frame_count * 1_000_000 / fmt.sample_rate)
 

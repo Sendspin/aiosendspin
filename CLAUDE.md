@@ -72,7 +72,7 @@ User PCM → prepare_audio(pcm, format) → commit_audio()
 
 ### Models & Serialization
 
-Mashumaro `DataClassORJSONMixin` dataclasses with discriminator-based polymorphic dispatch on `"type"` field. Binary messages use a 9-byte header (1B message type + 8B timestamp_us). Key model files:
+Mashumaro `DataClassORJSONMixin` dataclasses with discriminator-based polymorphic dispatch on `"type"` field. Binary messages use a 9-byte header (1B message type + 8B timestamp_us); player audio chunks add a 4B `send_ahead` (13 bytes, `models/player.py`). Key model files:
 
 - `models/core.py`: Protocol messages (`ClientHelloPayload`, `StreamStartPayload`, `ServerTimePayload`, etc.)
 - `models/types.py`: Enums (`AudioCodec`, `BinaryMessageType`, `ClientStateType`, `PlaybackStateType`, etc.)

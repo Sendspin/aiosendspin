@@ -1709,7 +1709,6 @@ class PushStream:
             cache_results[tkey].extend(cached_for_key)
 
             # Deliver live chunks directly; connection layer enforces late-drop/backpressure.
-            # Share one AudioChunk across roles so its packed frame is built once.
             audio_chunks = [
                 AudioChunk(
                     data=cached_chunk.payload,

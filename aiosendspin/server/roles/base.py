@@ -12,11 +12,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
-
-from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -83,12 +80,6 @@ class AudioChunk:
 
     byte_count: int
     """Size of data (for buffer tracking)."""
-
-    @cached_property
-    def packed(self) -> bytes:
-        """Binary AUDIO_CHUNK frame, memoized so subscribers reuse one copy."""
-        header = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, self.timestamp_us)
-        return header + self.data
 
 
 class GroupRole(ABC):

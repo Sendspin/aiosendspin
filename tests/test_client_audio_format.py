@@ -63,8 +63,10 @@ async def test_stream_start_flac_decodes_codec_header_and_notifies_audio_callbac
     )
 
     header = b"flac-header"
-    captured: list[tuple[int, bytes, AudioFormat]] = []
-    client.add_audio_chunk_listener(lambda ts, payload, fmt: captured.append((ts, payload, fmt)))
+    captured: list[tuple[int, bytes, AudioFormat, int]] = []
+    client.add_audio_chunk_listener(
+        lambda ts, payload, fmt, send_ahead: captured.append((ts, payload, fmt, send_ahead))
+    )
 
     connection = SendspinConnection(client)
     await connection._handle_stream_start(  # noqa: SLF001
@@ -80,11 +82,12 @@ async def test_stream_start_flac_decodes_codec_header_and_notifies_audio_callbac
             )
         )
     )
-    connection._handle_audio_chunk(123_456, b"abc")  # noqa: SLF001
+    connection._handle_audio_chunk(123_456, b"abc", 40_000)  # noqa: SLF001
 
     assert len(captured) == 1
-    ts, payload, fmt = captured[0]
+    ts, payload, fmt, send_ahead = captured[0]
     assert ts == 123_456
+    assert send_ahead == 40_000
     assert payload == b"abc"
     assert fmt.codec == AudioCodec.FLAC
     assert fmt.pcm_format.sample_rate == 48_000
