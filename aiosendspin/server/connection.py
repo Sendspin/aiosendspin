@@ -2271,6 +2271,7 @@ class SendspinConnection:
             for reason in role.client_state_deviations(payload):
                 self._flag_noncompliance(f"client/state {reason}")
 
+        released: list[Role] = []
         if is_initial:
             self._initial_state_received = True
             self._client.release_all_role_holds()
@@ -2284,12 +2285,15 @@ class SendspinConnection:
             self._server.on_client_first_connect(self._client.client_id)
             self._flush_pending_binary()
         else:
-            self._release_held_roles(payload)
+            released = self._apply_activation_state(payload)
 
         if payload.available is not None and payload.available != self._client.available:
             await self._client.handle_availability_change(available=payload.available)
         for role in self._client.active_roles:
             role.on_client_state(payload)
+        if released:
+            # After the dispatch, so the join schedules with this state's timing.
+            self._release_roles(released)
 
     @staticmethod
     def _role_state_objects(payload: ClientStatePayload) -> dict[str, object]:
@@ -2301,29 +2305,26 @@ class SendspinConnection:
             "visualizer": payload.visualizer,
         }
 
-    def _release_held_roles(self, payload: ClientStatePayload) -> None:
-        """Start the held roles whose object this client/state carries."""
-        assert self._client is not None
+    def _apply_activation_state(self, payload: ClientStatePayload) -> list[Role]:
+        """Apply a client/state to the held roles whose object it carries, and return them."""
         objects = self._role_state_objects(payload)
         released = [
             role for role in self._held_roles() if objects.get(role.role_family) is not None
         ]
-        if not released:
-            return
         for role in released:
             for reason in role.initial_state_deviations(payload):
                 self._flag_noncompliance(f"client/state after server/activate {reason}")
             # Still held, so a join the role attempts here is a no-op; the release starts it.
             role.on_initial_client_state(payload)
-        self._release_roles(released)
-        if not self._held_roles():
-            self._cancel_activation_state_timeout()
+        return released
 
     def _release_roles(self, roles: list[Role]) -> None:
         """Stop holding ``roles``, send their held binary and join them to the running stream."""
         assert self._client is not None
         for role in roles:
             self._client.release_role_hold(role.role_family)
+        if not self._held_roles():
+            self._cancel_activation_state_timeout()
         self._flush_pending_binary()
         for role in roles:
             self._client.join_active_stream(role)

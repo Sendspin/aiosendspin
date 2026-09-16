@@ -423,3 +423,25 @@ async def test_initial_state_completes_after_its_roles_were_removed() -> None:
 
     assert client.is_connected
     assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_held_player_joins_with_the_timing_of_its_state() -> None:
+    """The release join sees the timing values the releasing client/state reports."""
+    conn, client = await _reactivated_player()
+    player = client.role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    state = dataclasses.replace(
+        _PLAYER_STATE, output_delay_ms=40, required_lead_time_ms=500, min_buffer_ms=2000
+    )
+    timing_at_join: list[tuple[int, int, int]] = []
+
+    def record_join(role: PlayerV1Role) -> None:
+        timing_at_join.append(
+            (role.output_delay_ms, role.required_lead_time_ms, role.min_buffer_ms)
+        )
+
+    with patch.object(client.group, "on_role_activated", side_effect=record_join):
+        await conn._handle_client_state(ClientStatePayload(player=state))  # noqa: SLF001
+
+    assert timing_at_join == [(40, 500, 2000)]
