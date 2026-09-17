@@ -8,7 +8,7 @@ import struct
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -28,6 +28,10 @@ from aiosendspin.models.core import (
     ServerCommandPayload,
     ServerHelloPayload,
     ServerTimePayload,
+    StreamClearMessage,
+    StreamClearPayload,
+    StreamEndMessage,
+    StreamEndPayload,
     StreamStartMessage,
     StreamStartPayload,
 )
@@ -1027,6 +1031,41 @@ async def test_player_reported_unavailable_stays_unavailable_after_sync() -> Non
         (False, True),
         (False, True),
     ]
+
+
+async def test_unavailable_player_discards_audio_and_keeps_stream_control() -> None:
+    """While unavailable, audio is discarded without closing; stream control still applies."""
+    connection, _ = await _state_connection([Roles.PLAYER.value])
+    connection.disconnect = AsyncMock()  # type: ignore[method-assign]
+    client = connection._client  # noqa: SLF001
+    chunks: list[int] = []
+    control: list[str] = []
+    client.add_audio_chunk_listener(lambda ts, _data, _fmt, _send_ahead: chunks.append(ts))
+    client.add_stream_start_listener(lambda _message: control.append("start"))
+    client.add_stream_clear_listener(lambda _roles: control.append("clear"))
+    client.add_stream_end_listener(lambda _roles: control.append("end"))
+    start = StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
+
+    await connection.send_player_state(available=False, volume=50, muted=False)
+    await connection._handle_stream_start(start)  # noqa: SLF001
+    connection._handle_binary_message(pack_player_audio_header(1, 0) + b"\x00")  # noqa: SLF001
+    connection._handle_stream_clear(  # noqa: SLF001
+        StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
+    )
+    connection._handle_stream_end(  # noqa: SLF001
+        StreamEndMessage(payload=StreamEndPayload(roles=["player"]))
+    )
+    await connection._handle_stream_start(start)  # noqa: SLF001
+    connection._handle_binary_message(pack_player_audio_header(2, 0) + b"\x00")  # noqa: SLF001
+    assert chunks == []
+    assert control == ["start", "clear", "end", "start"]
+
+    await connection.send_player_state(available=True, volume=50, muted=False)
+    connection._handle_binary_message(pack_player_audio_header(3, 0) + b"\x00")  # noqa: SLF001
+
+    assert chunks == [3]
+    await asyncio.sleep(0)
+    connection.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 async def _report_player_state(connection: SendspinConnection) -> None:

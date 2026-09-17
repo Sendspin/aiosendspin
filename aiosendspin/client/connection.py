@@ -1676,6 +1676,8 @@ class SendspinConnection:
         if self._current_audio_format is None:
             logger.debug("Dropping audio chunk without format")
             return
+        if not self._reported_available:
+            return
         # Pass server timestamp directly to callback - it handles time conversion
         # to allow for dynamic time base updates
         self._client.notify_audio_chunk(
