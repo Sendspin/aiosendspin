@@ -29,7 +29,8 @@ def _clean(part: str | None) -> str:
     if not part:
         return ""
     collapsed = " ".join(part.split())
-    return "".join(ch for ch in collapsed if ch.isprintable())[:_MAX_DESCRIPTION_PART]
+    printable = "".join(ch for ch in collapsed if ch.isprintable())
+    return " ".join(printable.split())[:_MAX_DESCRIPTION_PART]
 
 
 def describe_client(client_info: ClientHelloPayload | None, client_id: str | None) -> str:
