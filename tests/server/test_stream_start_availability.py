@@ -1,9 +1,11 @@
-"""No player stream/start goes out unless the latest client/state reported the client available."""
+"""Player stream/start follows the latest client/state: its availability and its timing."""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -12,6 +14,7 @@ from aiosendspin.models.types import Roles
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
 from tests.server.test_group_add_client import _DummyConnection, _DummyServer, _make_player
@@ -93,13 +96,10 @@ async def test_add_client_sends_no_stream_start_to_unavailable_player() -> None:
     stream.stop()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("available", [True, False])
-async def test_initial_state_availability_applies_before_the_stream_join(
-    available: bool,  # noqa: FBT001
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An initial client/state joins a playing group only when it reports available: true."""
+async def _joiner_in_playing_group(
+    monkeypatch: pytest.MonkeyPatch, audio_s: int
+) -> tuple[SendspinConnection, PushStream]:
+    """Return a connection awaiting its initial client/state, grouped with a playing owner."""
     conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
     server = conn._server  # noqa: SLF001
     monkeypatch.setattr(
@@ -118,15 +118,50 @@ async def test_initial_state_availability_applies_before_the_stream_join(
     await owner.group.add_client(joiner)
     stream = owner.group.start_stream()
     # The owner shares the joiner's format, so the join replays its cached chunks at once.
-    stream.prepare_audio(bytes(48000 * 2 * 4), _FORMAT)
+    stream.prepare_audio(bytes(48000 * audio_s * 4), _FORMAT)
     await stream.commit_audio()
+    return conn, stream
+
+
+def _queued_player_entries(conn: SendspinConnection) -> list[Any]:
+    return [entry for _, _, entry in conn._role_queues.get("player", [])]  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available", [True, False])
+async def test_initial_state_availability_applies_before_the_stream_join(
+    available: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An initial client/state joins a playing group only when it reports available: true."""
+    conn, stream = await _joiner_in_playing_group(monkeypatch, audio_s=2)
 
     await conn._handle_client_state(  # noqa: SLF001
         ClientStatePayload(available=available, player=_PLAYER_STATE)
     )
 
-    queued = [entry for _, _, entry in conn._role_queues.get("player", [])]  # noqa: SLF001
+    queued = _queued_player_entries(conn)
     starts = [entry for entry in queued if isinstance(entry.json_message, StreamStartMessage)]
     assert len(starts) == (1 if available else 0)
     assert any(entry.binary is not None for entry in queued) is available
+    stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_initial_state_timing_applies_before_the_stream_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The late-join replay starts at the lead the initial client/state reports."""
+    conn, stream = await _joiner_in_playing_group(monkeypatch, audio_s=4)
+    lead_ms = 1_500
+    state = dataclasses.replace(_PLAYER_STATE, required_lead_time_ms=lead_ms, min_buffer_ms=0)
+    now_us = conn._server.clock.now_us()  # noqa: SLF001
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=state)
+    )
+
+    binary = [entry for entry in _queued_player_entries(conn) if entry.binary is not None]
+    assert binary
+    assert min(entry.timestamp_us for entry in binary) >= now_us + lead_ms * 1_000
     stream.stop()

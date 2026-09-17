@@ -732,32 +732,13 @@ class PlayerV1Role(Role):
         if changed or group_values != (self.get_player_volume(), self.get_player_muted()):
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
 
-        if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
-            self.output_delay_ms = state.output_delay_ms
-            if self._buffer_tracker is not None:
-                self._buffer_tracker.output_delay_us = self.get_output_delay_us()
-            self.emit_client_event(OutputDelayChangedEvent(output_delay_ms=state.output_delay_ms))
-
-        if (
-            state.required_lead_time_ms is not None
-            and self.required_lead_time_ms != state.required_lead_time_ms
-        ):
-            self.required_lead_time_ms = state.required_lead_time_ms
-            self._log_if_clamped("required_lead_time_ms", state.required_lead_time_ms)
-            self.emit_client_event(
-                RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
-            )
-
-        if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
-            self.min_buffer_ms = state.min_buffer_ms
-            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms)
-            self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
-
+        self._apply_state_timing(state)
         self._apply_state_format(state)
 
     def on_initial_client_state(self, payload: ClientStatePayload) -> None:
-        """Apply the preferred format so the stream join announces it from the start."""
+        """Apply the timing and preferred format the stream join schedules and announces with."""
         if payload.player is not None:
+            self._apply_state_timing(payload.player)
             self._apply_state_format(payload.player)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
@@ -867,6 +848,29 @@ class PlayerV1Role(Role):
         return support is not None and any(
             audio_format.matches(fmt) for fmt in support.supported_formats
         )
+
+    def _apply_state_timing(self, state: PlayerStatePayload) -> None:
+        """Store the timing fields of a client/state player object, emitting their changes."""
+        if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
+            self.output_delay_ms = state.output_delay_ms
+            if self._buffer_tracker is not None:
+                self._buffer_tracker.output_delay_us = self.get_output_delay_us()
+            self.emit_client_event(OutputDelayChangedEvent(output_delay_ms=state.output_delay_ms))
+
+        if (
+            state.required_lead_time_ms is not None
+            and self.required_lead_time_ms != state.required_lead_time_ms
+        ):
+            self.required_lead_time_ms = state.required_lead_time_ms
+            self._log_if_clamped("required_lead_time_ms", state.required_lead_time_ms)
+            self.emit_client_event(
+                RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
+            )
+
+        if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
+            self.min_buffer_ms = state.min_buffer_ms
+            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms)
+            self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
     def _apply_state_format(self, state: PlayerStatePayload) -> None:
         """Store the `format` of a client/state player object as the client's preference."""
