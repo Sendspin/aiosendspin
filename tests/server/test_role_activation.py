@@ -126,10 +126,12 @@ async def _connect(
     trusted: bool = True,
     send_state: bool = True,
     category: PskCategory = PskCategory.SENTINEL,
+    server: _MockServer | None = None,
 ) -> tuple[SendspinConnection, _FakeTransport]:
     """Connect an unpaired client; a trusted one also delivers its initial client/state."""
     loop = asyncio.get_running_loop()
-    server = _MockServer(loop=loop, clock=LoopClock(loop))
+    if server is None:
+        server = _MockServer(loop=loop, clock=LoopClock(loop))
     if trusted:
         await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
     conn = SendspinConnection(server, wsock_client=AsyncMock())
