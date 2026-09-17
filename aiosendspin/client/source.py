@@ -144,8 +144,8 @@ class SourceCapture:
         """
         Flush the encoder and end the input stream.
 
-        The stream persists across a re-handshake, so a refused end leaves the capture
-        started and retriable rather than dropping the encoder state on the floor.
+        The stream persists across a re-handshake, so an end the connection refuses leaves
+        the capture started, with its buffered tail unflushed, and retriable.
 
         Raises:
             RuntimeError: The connection could not end the stream, as during a
@@ -153,6 +153,9 @@ class SourceCapture:
         """
         if not self._started:
             return
+        if self._connection.is_in_rehandshake_quiet_period():
+            # Flushing here would encode the tail into chunks the connection then drops.
+            raise RuntimeError("Connection is busy with an in-band exchange")
         if self._connection.is_source_stream_active():
             await self._send_frames(
                 self._encoder.flush(), self._client.now_us() - MAX_CAPTURE_BACKLOG_US

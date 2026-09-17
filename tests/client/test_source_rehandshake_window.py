@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import orjson
 import pytest
 
 from aiosendspin.client.connection import SendspinConnection
@@ -12,7 +13,13 @@ from aiosendspin.client.source import SourceCapture
 from aiosendspin.models.core import ServerActivatePayload
 from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.models.source import ClientHelloSourceFeatures, ClientHelloSourceSupport
-from aiosendspin.models.types import Activity, AudioCodec, Roles, SignalState
+from aiosendspin.models.types import (
+    Activity,
+    AudioCodec,
+    GoodbyeReason,
+    Roles,
+    SignalState,
+)
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from tests.conftest import make_sdk_client, sine_pcm_16bit
 
@@ -160,19 +167,59 @@ async def test_source_resumes_once_the_activation_re_admits_the_role(
     assert ws.sent_bytes != []
 
 
+async def test_a_refused_activation_keeps_source_off_the_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal never lifts the quiet period, so only the forced goodbye is sent."""
+    ws = _Ws()
+    conn = _streaming_source_connection(ws)
+    # Unpaired access is off, so the downgraded session may not carry roles.
+    _downgrade(
+        conn,
+        monkeypatch,
+        category=PskCategory.SENTINEL,
+        active_roles=[Roles.SOURCE.value],
+        unpaired_access=False,
+    )
+    original = conn.goodbye_and_disconnect
+
+    async def _probe(reason: GoodbyeReason) -> None:
+        # The refused activation left the superseded role set in place.
+        assert conn._active_roles == [Roles.SOURCE.value]  # noqa: SLF001
+        await conn.send_source_chunk(b"audio", timestamp_us=1)
+        await original(reason)
+
+    conn.goodbye_and_disconnect = _probe  # type: ignore[method-assign]
+
+    await conn._handle_handshake("hs1")  # noqa: SLF001
+
+    assert ws.sent_bytes == []
+    assert [orjson.loads(m)["type"] for m in ws.sent] == ["client/goodbye"]
+    assert orjson.loads(ws.sent[0])["payload"]["reason"] == GoodbyeReason.PAIRING_REQUIRED.value
+
+
 async def test_capture_refused_in_the_quiet_period_still_ends_its_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stop() the quiet period refuses leaves the stream endable once source is retained."""
+    """A stop() the quiet period refuses keeps its tail and still ends the retained stream."""
     ws = _Ws()
     conn = _streaming_source_connection(ws)
     _downgrade(conn, monkeypatch, category=PskCategory.SENTINEL, active_roles=[Roles.SOURCE.value])
     capture = _source_capture(conn)
+    flushed: list[bytes] = []
+
+    def _flush() -> list[tuple[bytes, int]]:
+        flushed.append(b"tail")
+        return [(b"tail", 20_000)]
+
+    capture._encoder.flush = _flush  # type: ignore[method-assign]  # noqa: SLF001
 
     async def _probe() -> None:
         await capture.feed(sine_pcm_16bit(480))
         with pytest.raises(RuntimeError, match="in-band exchange"):
             await capture.stop()
+        # The tail stays in the encoder rather than being spent on dropped chunks.
+        assert flushed == []
         assert ws.sent == []
         assert ws.sent_bytes == []
 
@@ -183,5 +230,7 @@ async def test_capture_refused_in_the_quiet_period_still_ends_its_stream(
     # The stream persists across the re-handshake, so the capture can still close it.
     assert conn.is_source_stream_active()
     await capture.stop()
+    assert flushed == [b"tail"]
+    assert b"tail" in b"".join(ws.sent_bytes)
     assert any("client-stream/end" in m for m in ws.sent)
     assert not conn.is_source_stream_active()

@@ -637,9 +637,6 @@ class SendspinConnection:
         else:
             effective_roles = []
         has_roles = bool(effective_roles)
-        # The quiet period ends where this activation applies, and nothing below yields
-        # before the role set is settled, so no send escapes under the superseded one.
-        self._end_rehandshake_quiet_period()
         if not _admissible(
             category, activities, has_roles=has_roles, unpaired_access=unpaired_access
         ):
@@ -659,6 +656,9 @@ class SendspinConnection:
         self._discard_removed_role_state(effective_roles)
         self._end_removed_role_streams(effective_roles)
         self._active_roles = effective_roles
+        # The new role set is installed, so the sends below — and any the caller makes
+        # next — are the first that may go out under the new session.
+        self._end_rehandshake_quiet_period()
         if source_dropped:
             self._source_start_authorized = False
             if self._source_stream_active and self.connected:
@@ -1441,6 +1441,16 @@ class SendspinConnection:
         """Return whether a server source ``start`` is pending for ``SourceCapture.start()``."""
         return self._source_start_authorized
 
+    def is_in_rehandshake_quiet_period(self) -> bool:
+        """
+        Return whether a re-handshake currently bars new application messages.
+
+        Between Noise message 1 and the new ``server/activate`` the connection refuses or
+        drops what it is asked to send, so a caller holding encoder or buffer state should
+        keep it and retry rather than spend it on a send that cannot reach the wire.
+        """
+        return self._exchange_in_progress
+
     @asynccontextmanager
     async def _exchange(self) -> AsyncIterator[None]:
         """Reserve the wire for an in-band exchange: suppress other sends, then drain in-flight."""
@@ -1458,8 +1468,9 @@ class SendspinConnection:
 
         Neither peer may start a new application message between Noise message 1 and the
         new ``server/activate``, so for a re-handshake the suppression outlives the
-        exchange carrying the handshake: it lifts only where that activation applies,
-        which is also where the goodbye refusing it becomes sendable.
+        exchange carrying the handshake: it lifts only once that activation has installed
+        its role set. A refused activation never reaches here and stays suppressed until
+        the connection closes, which the ``client/goodbye`` is forced past.
         """
         self._exchange_in_progress = False
 
