@@ -959,6 +959,17 @@ class SendspinClient:
         """Return current timestamp from the client's clock in microseconds."""
         return self._clock.now_us()
 
+    def current_track_position(self) -> int | None:
+        """Return the playback position in milliseconds as of now, or None when unknown.
+
+        The position is extrapolated from the progress in the latest metadata received,
+        including metadata whose timestamp is still in the future. Returns None while not
+        connected, without progress, or before time synchronization has converged.
+        """
+        if self._admitted_connection is None:
+            return None
+        return self._admitted_connection.current_track_position()
+
     # --- Listener registration ---
 
     def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:

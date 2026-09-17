@@ -1863,6 +1863,29 @@ class SendspinConnection:
         adjusted_client_time = client_timestamp_us + self._output_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
 
+    def current_track_position(self) -> int | None:
+        """Return the playback position in milliseconds as of now, or None when unknown.
+
+        The position is extrapolated from the progress in the latest metadata received,
+        including metadata whose timestamp is still in the future. Returns None without
+        progress or before time synchronization has converged.
+        """
+        metadata = None if self._server_state is None else self._server_state.metadata
+        if (
+            metadata is None
+            or isinstance(metadata, UndefinedField)
+            or metadata.progress is None
+            or not self._time_filter.is_synchronized
+        ):
+            return None
+        progress = metadata.progress
+        server_now_us = self._time_filter.compute_server_time(self.now_us())
+        elapsed_us = server_now_us - metadata.timestamp
+        position = progress.track_progress + elapsed_us * progress.playback_speed // 1_000_000
+        if progress.track_duration != 0:
+            return max(min(position, progress.track_duration), 0)
+        return max(position, 0)
+
     def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
         """Convert a capture timestamp to server time without playback delay."""
         return self._time_filter.compute_server_time(capture_timestamp_us)
