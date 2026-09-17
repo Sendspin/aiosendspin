@@ -807,26 +807,32 @@ class PushStream:
             return False
         return role.supports_preconnect_audio()
 
-    def _get_audio_roles(self) -> list[tuple[SendspinClient, Role]]:
-        """Get all roles that need audio from connected/warm/cold-opted-in clients."""
-        result: list[tuple[SendspinClient, Role]] = []
+    def _get_audio_roles(self) -> list[tuple[SendspinClient, Role, AudioRequirements]]:
+        """Get all roles that need audio from connected/warm/cold-opted-in clients.
+
+        The result is only valid until the next await: joins, leaves and
+        disconnects can land whenever the loop runs.
+        """
+        result: list[tuple[SendspinClient, Role, AudioRequirements]] = []
         for client in self._group.clients:
             for role in client.active_roles:
-                if role.get_audio_requirements() is None:
+                req = role.get_audio_requirements()
+                if req is None:
                     continue
                 if role in self._pending_join_roles:
                     continue
                 if not self._role_in_audio_pipeline(client, role):
                     continue
-                result.append((client, role))
+                result.append((client, role, req))
         return result
 
-    def _max_active_output_delay_us(self) -> int:
+    def _max_active_output_delay_us(
+        self, roles: list[tuple[SendspinClient, Role, AudioRequirements]]
+    ) -> int:
         """Return the largest output delay among active audio roles."""
-        roles = self._get_audio_roles()
         if not roles:
             return 0
-        return max(role.get_output_delay_us() for _, role in roles)
+        return max(role.get_output_delay_us() for _, role, _ in roles)
 
     def _role_send_ahead_us(self, role: Role) -> int:
         """Per-role send-ahead floor.
@@ -842,12 +848,15 @@ class PushStream:
             return min_buffer_us + output_delay_us
         return max(min_buffer_us, role.get_required_lead_time_us()) + output_delay_us
 
-    def _min_send_ahead_us(self) -> int:
+    def _min_send_ahead_us(
+        self, roles: list[tuple[SendspinClient, Role, AudioRequirements]] | None = None
+    ) -> int:
         """Return the common send-ahead floor across active audio roles."""
-        roles = self._get_audio_roles()
+        if roles is None:
+            roles = self._get_audio_roles()
         if not roles:
             return DEFAULT_INITIAL_DELAY_US
-        return max(self._role_send_ahead_us(role) for _, role in roles)
+        return max(self._role_send_ahead_us(role) for _, role, _ in roles)
 
     @property
     def is_live(self) -> bool:
@@ -912,7 +921,8 @@ class PushStream:
         """
         if not self._channel_timing:
             return
-        active_channels = self._get_active_audio_channels()
+        roles = self._get_audio_roles()
+        active_channels = self._get_active_audio_channels(roles)
         active_timings = [t for ch, t in self._channel_timing.items() if ch in active_channels]
         if not active_timings:
             # Fall back to all channel timings when no audio roles are active yet
@@ -925,7 +935,7 @@ class PushStream:
         max_timing_us = max(active_timings)
         now_us = self._clock.now_us()
         ahead_us = max_timing_us - now_us
-        effective_limit_us = max_buffer_us + self._max_active_output_delay_us()
+        effective_limit_us = max_buffer_us + self._max_active_output_delay_us(roles)
         if ahead_us > effective_limit_us:
             await asyncio.sleep(min((ahead_us - effective_limit_us) / 1_000_000, 1.0))
 
@@ -1094,9 +1104,12 @@ class PushStream:
             durations_us = self._calculate_channel_durations(prepared)
             self._warn_duration_misalignment(durations_us)
 
-            # Capture play_start_us for each channel
+            # Capture play_start_us for each channel. `roles` is not reused past the
+            # awaits below: delivery must see roles that joined or left meanwhile.
+            roles = self._get_audio_roles()
             channel_play_start = self._resolve_channel_play_start(
                 prepared,
+                roles,
                 play_start_us=play_start_us,
             )
 
@@ -1119,7 +1132,7 @@ class PushStream:
             reference_duration_us = max(durations_us.values(), default=0)
             if reference_duration_us > 0:
                 base_start_us = min(channel_play_start.values())
-                for channel_id in self._get_active_audio_channels():
+                for channel_id in self._get_active_audio_channels(roles):
                     if channel_id in prepared:
                         continue
                     if channel_id not in self._channel_timing:
@@ -1181,6 +1194,7 @@ class PushStream:
     def _resolve_channel_play_start(
         self,
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        roles: list[tuple[SendspinClient, Role, AudioRequirements]],
         *,
         play_start_us: int | None,
     ) -> dict[UUID, int]:
@@ -1198,11 +1212,11 @@ class PushStream:
 
         # Auto-calculate mode (existing behavior).
         now_us = self._clock.now_us()
-        target_min_us = now_us + self._min_send_ahead_us()
+        target_min_us = now_us + self._min_send_ahead_us(roles)
         # Limit timeline sharing/rebase inputs to channels participating in this commit
         # (active subscribers + prepared payloads). This excludes stale timing entries
         # from inactive channels.
-        active_or_prepared_channels = self._get_active_audio_channels() | set(prepared)
+        active_or_prepared_channels = self._get_active_audio_channels(roles) | set(prepared)
         for channel_id in prepared:
             if channel_id not in self._channel_timing:
                 shared_candidates = [
@@ -1418,11 +1432,7 @@ class PushStream:
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
         ] = defaultdict(list)
 
-        for client, role in self._get_audio_roles():
-            req = role.get_audio_requirements()
-            if req is None:
-                continue
-
+        for client, role, req in self._get_audio_roles():
             channel_id = req.channel_id or MAIN_CHANNEL
             if channel_id not in prepared:
                 continue
@@ -1432,15 +1442,13 @@ class PushStream:
 
         return roles_by_pcm
 
-    def _get_active_audio_channels(self) -> set[UUID]:
+    def _get_active_audio_channels(
+        self, roles: list[tuple[SendspinClient, Role, AudioRequirements]] | None = None
+    ) -> set[UUID]:
         """Return channels currently used by connected audio roles."""
-        channels: set[UUID] = set()
-        for _client, role in self._get_audio_roles():
-            req = role.get_audio_requirements()
-            if req is None:
-                continue
-            channels.add(req.channel_id or MAIN_CHANNEL)
-        return channels
+        if roles is None:
+            roles = self._get_audio_roles()
+        return {req.channel_id or MAIN_CHANNEL for _client, _role, req in roles}
 
     async def _resample_for_roles(
         self,
@@ -1693,7 +1701,7 @@ class PushStream:
                         return {}
 
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
-        active_roles = {role for _client, role in self._get_audio_roles()}
+        active_roles = {role for _client, role, _req in self._get_audio_roles()}
 
         for tkey, frame_list in transformed.items():
             roles = roles_by_transform.get(tkey, [])
@@ -2579,9 +2587,8 @@ class PushStream:
 
         # Reset transformers so any internal encoder state is discarded.
         transformers_by_key: dict[TransformKey, AudioTransformer] = {}
-        for _client, role in self._get_audio_roles():
-            req = role.get_audio_requirements()
-            if req and req.transformer:
+        for _client, role, req in self._get_audio_roles():
+            if req.transformer:
                 channel_id = req.channel_id or MAIN_CHANNEL
                 tkey = self._build_transform_key(req, channel_id, role)
                 transformers_by_key.setdefault(tkey, req.transformer)
@@ -2590,7 +2597,7 @@ class PushStream:
 
         if not keep_stream:
             # Send stream/end to all roles with audio requirements via hooks
-            for _client, role in self._get_audio_roles():
+            for _client, role, _req in self._get_audio_roles():
                 role.on_stream_end()
 
         # Clear role tracking state
@@ -2638,9 +2645,8 @@ class PushStream:
 
         # Reset transformers so they don't carry stale timestamp state
         reset_transformers: dict[TransformKey, AudioTransformer] = {}
-        for _client, role in self._get_audio_roles():
-            req = role.get_audio_requirements()
-            if req and req.transformer:
+        for _client, role, req in self._get_audio_roles():
+            if req.transformer:
                 channel_id = req.channel_id or MAIN_CHANNEL
                 tkey = self._build_transform_key(req, channel_id, role)
                 reset_transformers.setdefault(tkey, req.transformer)
@@ -2652,7 +2658,7 @@ class PushStream:
         self._started_roles.clear()
 
         # Send stream/clear to all roles with audio requirements via hooks
-        for _client, role in self._get_audio_roles():
+        for _client, role, _req in self._get_audio_roles():
             if role in end_roles:
                 role.on_stream_end()
             else:
