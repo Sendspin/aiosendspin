@@ -103,3 +103,49 @@ async def test_reserved_binary_id_is_ignored(type_byte: int) -> None:
 
     conn.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
     assert conn._protocol_error_task is None  # noqa: SLF001
+
+
+class _RehandshakeWs:
+    """Yields one Noise handshake message, then answers ``receive`` with ``reply``."""
+
+    closed = False
+
+    def __init__(self, reply: WSMessage) -> None:
+        self._pending = [
+            WSMessage(WSMsgType.TEXT, '{"type":"noise/handshake","payload":{"data":"AA"}}', "")
+        ]
+        self._reply = reply
+
+    def __aiter__(self) -> _RehandshakeWs:
+        return self
+
+    async def __anext__(self) -> WSMessage:
+        if not self._pending:
+            raise StopAsyncIteration
+        return self._pending.pop()
+
+    async def receive(self) -> WSMessage:
+        return self._reply
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        WSMessage(WSMsgType.TEXT, '{"type":"server/from-the-future","payload":{}}', ""),
+        WSMessage(WSMsgType.TEXT, '{"type":"server/time","payload":{}}', ""),
+        WSMessage(WSMsgType.BINARY, b"\x04audio", ""),
+    ],
+    ids=["unknown-type", "other-known-type", "binary"],
+)
+async def test_rehandshake_closes_on_anything_but_server_activate(reply: WSMessage) -> None:
+    """After a re-handshake, a message other than server/activate closes the connection."""
+    conn, _ = await _activated_connection()
+    conn._ws = _RehandshakeWs(reply)  # type: ignore[assignment]  # noqa: SLF001
+    conn._rehandshake = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+    conn._handle_server_activate = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+    await conn._reader_loop()  # noqa: SLF001
+
+    conn._rehandshake.assert_awaited_once()  # noqa: SLF001
+    conn._handle_server_activate.assert_not_awaited()  # noqa: SLF001
+    conn.disconnect.assert_awaited()  # type: ignore[attr-defined]
