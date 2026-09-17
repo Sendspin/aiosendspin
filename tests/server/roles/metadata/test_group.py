@@ -347,6 +347,118 @@ def _sent_metadata(member: MagicMock) -> dict[str, object]:
     return metadata
 
 
+def test_metadata_group_role_reset_progress_zeroes_position_and_speed() -> None:
+    """reset_progress() should report position 0 as of now and leave other fields intact."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    group.has_active_stream = True
+
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(
+        Metadata(
+            title="Test",
+            artist="Artist",
+            album_artist="Album Artist",
+            album="Album",
+            artwork_url="http://example.com/art.png",
+            year=2024,
+            track=3,
+            track_progress=30_000,
+            track_duration=180_000,
+            playback_speed=1000,
+        )
+    )
+
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+    mgr.reset_progress()
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 0
+    assert mgr.metadata.playback_speed == 0
+    assert mgr.metadata.timestamp_us == 11_000_000
+    assert _sent_metadata(member) == {
+        "timestamp": 11_000_000,
+        "title": "Test",
+        "artist": "Artist",
+        "album_artist": "Album Artist",
+        "album": "Album",
+        "artwork_url": "http://example.com/art.png",
+        "year": 2024,
+        "track": 3,
+        "progress": {"track_progress": 0, "track_duration": 180_000, "playback_speed": 0},
+    }
+
+
+def test_metadata_group_role_reset_progress_sends_within_equality_tolerance() -> None:
+    """A paused position close enough to 0 to compare equal is still reset and sent."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    group.has_active_stream = True
+
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(
+        Metadata(title="Test", track_progress=300, track_duration=180_000, playback_speed=0)
+    )
+    member.reset_mock()
+
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+    mgr.reset_progress()
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 0
+    assert _sent_metadata(member) == {
+        "timestamp": 11_000_000,
+        "title": "Test",
+        "progress": {"track_progress": 0, "track_duration": 180_000, "playback_speed": 0},
+    }
+
+
+def test_metadata_group_role_reset_progress_when_already_reset_sends_nothing() -> None:
+    """reset_progress() should send nothing when the position is already 0 at speed 0."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    group.has_active_stream = True
+
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(
+        Metadata(title="Test", track_progress=0, track_duration=180_000, playback_speed=0)
+    )
+    member.reset_mock()
+    group._signal_event.reset_mock()  # noqa: SLF001
+
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+    mgr.reset_progress()
+
+    member.send_message.assert_not_called()
+    group._signal_event.assert_not_called()  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [None, Metadata(title="Test")],
+    ids=["no-metadata", "no-progress"],
+)
+def test_metadata_group_role_reset_progress_without_progress_sends_nothing(
+    metadata: Metadata | None,
+) -> None:
+    """reset_progress() should send nothing without metadata carrying a position."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    if metadata is not None:
+        mgr.set_metadata(metadata)
+    member.reset_mock()
+
+    mgr.reset_progress()
+
+    member.send_message.assert_not_called()
+
+
 def test_update_sends_full_state_with_progress_after_title_change() -> None:
     """A title-only change still sends every set field, including progress, with no nulls."""
     group = _make_group_stub()
@@ -692,6 +804,46 @@ def test_cancel_scheduled_metadata_resends_current_now() -> None:
     assert mgr.metadata is not None
     assert mgr.metadata.title == "Now"
     assert mgr.track_progress == 30_700
+
+
+def test_reset_progress_without_progress_cancels_scheduled_metadata() -> None:
+    """reset_progress() with no position cancels the scheduled metadata, keeping the current one."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(Metadata(title="Now"))
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+
+    mgr.reset_progress()
+
+    assert _all_sent_metadata(member)[-1] == {"timestamp": 1_000_000, "title": "Now"}
+    clock.advance_us(600_000)
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Now"
+
+
+def test_reset_progress_discards_scheduled_metadata() -> None:
+    """The reset state itself discards scheduled metadata, which never takes effect."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Now", 30_000))
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+    clock.advance_us(100_000)
+
+    mgr.reset_progress()
+
+    assert _all_sent_metadata(member)[-1] == {
+        "timestamp": 1_100_000,
+        "title": "Now",
+        "progress": {"track_progress": 0, "track_duration": 180_000, "playback_speed": 0},
+    }
+    clock.advance_us(600_000)
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Now"
+    assert mgr.track_progress == 0
 
 
 def test_clear_discards_scheduled_metadata() -> None:
