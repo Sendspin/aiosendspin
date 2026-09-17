@@ -114,6 +114,16 @@ def test_unhandled_binary_warns(caplog: Any) -> None:
     assert any("unhandled binary" in r.message.lower() for r in caplog.records)
 
 
+@pytest.mark.parametrize("message_type", [24, 100, 191, 200])
+def test_unimplemented_binary_type_is_ignored(message_type: int) -> None:
+    """A binary type the server does not implement is ignored, even for a strict server."""
+    role = _RecordingRole()
+    conn = _bare_connection([role], strict=True, input_open=True)
+    conn._route_inbound_binary(pack_binary_header_raw(message_type, 1) + b"x")  # noqa: SLF001
+    assert role.binary == []
+    assert conn._client.noncompliance == []  # type: ignore[union-attr]  # noqa: SLF001
+
+
 def test_short_binary_payload_is_dropped_safely(caplog: Any) -> None:
     """A payload shorter than the 9-byte header is dropped with a warning, no exception."""
     conn = _bare_connection([_RecordingRole()])

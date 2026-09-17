@@ -30,6 +30,7 @@ from aiosendspin.models.artwork import (
 )
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
+    STREAM_END_ROLE_FAMILIES,
     ActivatePairing,
     ClientCommandMessage,
     ClientCommandPayload,
@@ -611,6 +612,7 @@ class SendspinConnection:
             Roles.SOURCE.value in self._active_roles and Roles.SOURCE.value not in effective_roles
         )
         self._discard_removed_role_state(effective_roles)
+        self._end_removed_role_streams(effective_roles)
         self._active_roles = effective_roles
         if source_dropped:
             self._source_start_authorized = False
@@ -1677,6 +1679,11 @@ class SendspinConnection:
         roles = message.payload.roles
         logger.debug("Stream ended for roles: %s", roles or "all")
 
+        self._end_streams(roles)
+        self._client.notify_stream_end(roles)
+
+    def _end_streams(self, roles: list[str] | None) -> None:
+        """Mark the streams of `roles` (all when `None`) inactive and drop their state."""
         if roles is None or "player" in roles:
             self._stream_active = False
             self._current_player = None
@@ -1693,7 +1700,23 @@ class SendspinConnection:
                 self._client.notify_artwork(channel, b"")
             self._artwork_shown.clear()
 
-        self._client.notify_stream_end(roles)
+    def _end_removed_role_streams(self, active_roles: list[str]) -> None:
+        """End the server-to-client streams of every active role missing from `active_roles`."""
+        # Dispatched even when the stream already ended: the embedder may still be draining
+        # output or holding an effect such as ducking. Whether an application-specific role
+        # carries a stream is unknown here, so those are always included.
+        ended = sorted(
+            {
+                family
+                for role_id in set(self._active_roles) - set(active_roles)
+                if (family := role_family(role_id)) in STREAM_END_ROLE_FAMILIES
+                or family.startswith("_")
+            }
+        )
+        if not ended:
+            return
+        self._end_streams(ended)
+        self._client.notify_stream_end(ended)
 
     def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload

@@ -364,12 +364,30 @@ async def test_receive_rejects_first_fragment_missing_orig_type() -> None:
 
 
 @pytest.mark.parametrize("type_byte", [2, 3])
-async def test_receive_rejects_legacy_fragment_ids_without_opt_in(type_byte: int) -> None:
-    """Without the legacy opt-in (the client SDK default), IDs 2 and 3 are a protocol error."""
-    seen, _ = await _receive_frames([bytes([type_byte, 0x04]) + b"data"])
+async def test_receive_delivers_reserved_ids_without_legacy_opt_in(type_byte: int) -> None:
+    """Without the legacy opt-in (the client SDK default), IDs 2 and 3 are ordinary binary."""
+    frame = bytes([type_byte, 0x04]) + b"data"
+    seen, _ = await _receive_frames([frame, b"\x00" + b'{"type":"x"}'])
+    assert [(m.type, m.data) for m in seen] == [
+        (WSMsgType.BINARY, frame),
+        (WSMsgType.TEXT, '{"type":"x"}'),
+    ]
+
+
+@pytest.mark.parametrize("type_byte", [2, 3])
+async def test_receive_rejects_reserved_ids_mid_reassembly_without_legacy_opt_in(
+    type_byte: int,
+) -> None:
+    """Without the legacy opt-in, ID 2 or 3 inside a type 1 fragmented message is an error."""
+    seen, _ = await _receive_frames(
+        [
+            bytes([MSG_TYPE_FRAGMENT, FIRST, 0x04]) + b"start",
+            bytes([type_byte, 0x04]) + b"data",
+        ]
+    )
     assert len(seen) == 1
     assert seen[0].type is WSMsgType.ERROR
-    assert "reserved binary message type" in str(seen[0].data)
+    assert "in flight" in str(seen[0].data)
 
 
 async def test_receive_rejects_non_fragment_frame_mid_reassembly() -> None:
