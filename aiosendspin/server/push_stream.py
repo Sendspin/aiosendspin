@@ -1815,10 +1815,10 @@ class PushStream:
         cached_chunks: list[CachedChunk],
         now_us: int,
     ) -> None:
-        """Send cached chunks to a role, skipping chunks that are already late."""
+        """Send cached chunks to a role, skipping chunks whose start is not in the future."""
         skipped_late = 0
         for cached_chunk in cached_chunks:
-            if cached_chunk.timestamp_us + cached_chunk.duration_us <= now_us:
+            if cached_chunk.timestamp_us <= now_us:
                 skipped_late += 1
                 continue
 
@@ -2026,9 +2026,11 @@ class PushStream:
             align_to_channel_tail=False,
         )
 
+        # Late joiners get chunks that start at or after the target only; a chunk
+        # straddling it is skipped rather than sent partly in the past.
         start_index = 0
         for chunk in cached:
-            if chunk.timestamp_us + chunk.duration_us > min_timestamp_us:
+            if chunk.timestamp_us >= min_timestamp_us:
                 break
             start_index += 1
 
