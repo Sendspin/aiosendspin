@@ -13,7 +13,7 @@ import struct
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from .base import SendspinConfig, SendspinModel
+from .base import SendspinConfig, SendspinModel, split_enum_values
 from .types import AudioCodec, BinaryMessageType, PlayerCommand
 
 # Pre-rename delay key, superseded by `output_delay_ms`.
@@ -210,13 +210,23 @@ class PlayerStatePayload(SendspinModel):
 
     Absent means no preference: the server selects by `supported_formats` priority.
     """
+    ignored_commands: list[str] | None = None
+    """Supported commands this implementation does not recognize, dropped during parse
+    and recorded for the role to flag. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Accept the pre-rename `static_delay_ms` spelling, recording that it was used."""
+        """Accept the pre-rename `static_delay_ms` spelling, recording that it was used.
+
+        Supported commands this implementation does not recognize are dropped and recorded.
+        """
         normalized = _rewrite_legacy_delay_key(d)
-        # Always overwrite so a client cannot spoof the record via the wire.
+        # Always overwrite so a client cannot spoof the records via the wire.
         normalized["legacy_delay_key"] = _LEGACY_DELAY_KEY if _LEGACY_DELAY_KEY in d else None
+        commands, ignored = split_enum_values(d.get("supported_commands"), PlayerCommand)
+        if "supported_commands" in d:
+            normalized["supported_commands"] = commands
+        normalized["ignored_commands"] = ignored or None
         return normalized
 
     def __post_init__(self) -> None:

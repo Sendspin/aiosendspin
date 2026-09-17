@@ -210,6 +210,9 @@ _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
     }
 )
 
+# Binary message IDs the spec leaves to application-specific roles.
+_APPLICATION_BINARY_TYPES = range(192, 256)
+
 
 @dataclass(slots=True)
 class _PendingArtwork:
@@ -564,6 +567,12 @@ class SendspinConnection:
     async def _apply_activation(self, payload: ServerActivatePayload) -> GoodbyeReason | None:
         """Apply a ``server/activate``'s state, or return the goodbye reason that rejects it."""
         assert self._noise_psk is not None
+        if payload.ignored_activities:
+            # The server speaks a newer spec revision; the known activities still apply.
+            logger.info(
+                "Ignoring unrecognized server/activate activities: %s",
+                ", ".join(payload.ignored_activities),
+            )
         category = self._noise_psk.category
         activities = set(payload.activities)
         unpaired_access = await self._unpaired_access_enabled()
@@ -1452,6 +1461,9 @@ class SendspinConnection:
             return
 
         raw_type = payload[0]
+        if raw_type in _APPLICATION_BINARY_TYPES:
+            self._client.notify_application_binary(raw_type, payload[1:])
+            return
         try:
             message_type = BinaryMessageType(raw_type)
         except ValueError:
@@ -1574,8 +1586,12 @@ class SendspinConnection:
 
         player = message.payload.player
         if player is None:
-            # stream/start without player payload - may be for artwork/visualizer only
-            if message.payload.visualizer is not None or message.payload.artwork is not None:
+            # stream/start without player payload - may be for other roles only
+            if (
+                message.payload.visualizer is not None
+                or message.payload.artwork is not None
+                or message.payload.application_objects
+            ):
                 self._client.notify_stream_start(message)
             else:
                 logger.debug("Stream start message without player payload")

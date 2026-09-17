@@ -486,6 +486,37 @@ async def test_activation_admissibility(
     assert reason is expected
 
 
+@pytest.mark.asyncio
+async def test_unrecognized_activity_is_ignored_and_activation_applies() -> None:
+    """A server/activate naming an unknown activity still applies its known fields."""
+    connection = await _connection(PskCategory.LONG_TERM)
+    handled: list[ServerActivatePayload] = []
+
+    async def _record(payload: ServerActivatePayload) -> None:
+        handled.append(payload)
+        assert await connection._apply_activation(payload) is None  # noqa: SLF001
+
+    connection._handle_server_activate = _record  # type: ignore[method-assign]  # noqa: SLF001
+
+    await connection._handle_json_message(  # noqa: SLF001
+        json.dumps(
+            {
+                "type": "server/activate",
+                "payload": {
+                    "activities": ["playback", "teleport"],
+                    "active_roles": [Roles.PLAYER.value],
+                },
+            }
+        )
+    )
+
+    (payload,) = handled
+    assert payload.activities == [Activity.PLAYBACK]
+    assert payload.ignored_activities == ["teleport"]
+    assert connection._activities == [Activity.PLAYBACK]  # noqa: SLF001
+    assert connection._active_roles == [Roles.PLAYER.value]  # noqa: SLF001
+
+
 @pytest.mark.parametrize(
     ("category", "unpaired", "activities"),
     [
@@ -639,6 +670,50 @@ def _artwork_stream_start() -> StreamStartMessage:
             )
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_start_with_only_application_objects_reaches_listener() -> None:
+    """A stream/start for application-specific roles alone is delivered to the embedder."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+    captured: list[StreamStartMessage] = []
+    client.add_stream_start_listener(captured.append)
+    connection = SendspinConnection(client)
+    message = StreamStartMessage(
+        payload=StreamStartPayload(application_objects={"_acme": {"session": 1}})
+    )
+
+    await connection._handle_stream_start(message)  # noqa: SLF001
+
+    assert captured == [message]
+
+
+@pytest.mark.asyncio
+async def test_application_binary_ids_reach_application_listener() -> None:
+    """IDs 192-255 go to the application binary listener; other unknown IDs are dropped."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+    captured: list[tuple[int, bytes]] = []
+    remove = client.add_application_binary_listener(
+        lambda message_id, data: captured.append((message_id, data))
+    )
+    connection = SendspinConnection(client)
+
+    connection._handle_binary_message(bytes([192]) + b"first")  # noqa: SLF001
+    connection._handle_binary_message(bytes([255]))  # noqa: SLF001
+    connection._handle_binary_message(bytes([191]) + b"reserved")  # noqa: SLF001
+    connection._handle_binary_message(bytes([2]) + b"reserved")  # noqa: SLF001
+    remove()
+    connection._handle_binary_message(bytes([200]) + b"after-remove")  # noqa: SLF001
+
+    assert captured == [(192, b"first"), (255, b"")]
 
 
 @pytest.mark.asyncio

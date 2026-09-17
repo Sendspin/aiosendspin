@@ -800,7 +800,7 @@ class SendspinClient:
             group._publish_if_name_changed(previous_group_name)  # noqa: SLF001
         if negotiated_roles is None:
             self._negotiated_role_ids = negotiate_roles(
-                client_info.supported_roles, strict=not self._server.allow_noncompliant_clients
+                client_info.activatable_roles, strict=not self._server.allow_noncompliant_clients
             )
         else:
             self._negotiated_role_ids = negotiated_roles

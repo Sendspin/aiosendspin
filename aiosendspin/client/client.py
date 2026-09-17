@@ -123,6 +123,10 @@ VisualizerCallback = Callable[[list[VisualizerFrame]], None]
 # Callback invoked when artwork binary frames are received.
 ArtworkCallback = Callable[[int, bytes], None]
 
+# Callback invoked with (message_id, data) for binary messages with IDs 192-255, which
+# belong to application-specific roles. data excludes the message ID byte.
+ApplicationBinaryCallback = Callable[[int, bytes], None]
+
 
 class SendspinClient:
     """
@@ -226,6 +230,8 @@ class SendspinClient:
     """Callbacks invoked when visualizer frames are received (beats included)."""
     _artwork_callbacks: list[ArtworkCallback]
     """Callbacks invoked when artwork frames are received."""
+    _application_binary_callbacks: list[ApplicationBinaryCallback]
+    """Callbacks invoked when application-specific binary messages are received."""
 
     _initial_volume: int
     """Initial volume level for player role (0-100)."""
@@ -345,6 +351,7 @@ class SendspinClient:
         self._server_command_callbacks = []
         self._visualizer_callbacks = []
         self._artwork_callbacks = []
+        self._application_binary_callbacks = []
 
     # --- Configuration ---
 
@@ -1308,6 +1315,24 @@ class SendspinClient:
             else None
         )
 
+    def add_application_binary_listener(
+        self, callback: ApplicationBinaryCallback
+    ) -> Callable[[], None]:
+        """Add a listener for binary messages of application-specific roles.
+
+        The callback receives the message ID (192-255) and the message bytes after it,
+        regardless of which roles are active.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._application_binary_callbacks.append(callback)
+        return lambda: (
+            self._application_binary_callbacks.remove(callback)
+            if callback in self._application_binary_callbacks
+            else None
+        )
+
     # --- Listener dispatch ---
 
     def notify_metadata_callback(self, payload: ServerStatePayload) -> None:
@@ -1423,3 +1448,11 @@ class SendspinClient:
                 callback(channel, payload)
             except Exception:
                 logger.exception("Error in artwork callback %s", callback)
+
+    def notify_application_binary(self, message_id: int, payload: bytes) -> None:
+        """Dispatch an application-specific binary message to the registered listeners."""
+        for callback in list(self._application_binary_callbacks):
+            try:
+                callback(message_id, payload)
+            except Exception:
+                logger.exception("Error in application binary callback %s", callback)

@@ -35,7 +35,7 @@ import heapq
 import logging
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
@@ -384,10 +384,10 @@ class SendspinConnection:
     def should_retry_server_initiated_connection(self) -> bool:
         """Whether the server should reconnect this URL after disconnect.
 
-        Per client/goodbye reason: only ``restart`` (will reconnect) and
-        ``concurrent_attempt`` (may retry later) warrant it. With no goodbye, assume a
-        ``restart`` when the connection was idle or carried playback, else treat the drop
-        as a session end.
+        Per client/goodbye reason: only ``restart`` warrants it; every other reason,
+        including ``concurrent_attempt``, leaves reconnecting to discovery or the caller.
+        With no goodbye, assume a ``restart`` when the connection was idle or carried
+        playback, else treat the drop as a session end.
         """
         if self._closing:
             return False
@@ -395,7 +395,7 @@ class SendspinConnection:
         if reason is None:
             activities = self._declared_activities or []
             return not activities or Activity.PLAYBACK in activities
-        return reason in (GoodbyeReason.RESTART, GoodbyeReason.CONCURRENT_ATTEMPT)
+        return reason is GoodbyeReason.RESTART
 
     @property
     def goodbye_reason(self) -> GoodbyeReason | None:
@@ -795,11 +795,11 @@ class SendspinConnection:
 
     @staticmethod
     def _first_registered_role_id_in_family(
-        supported_roles: list[str], *, family: str
+        supported_roles: list[str], *, family: str, skip: Collection[str] = ()
     ) -> str | None:
         """Return first client-preferred, server-registered role id in a role family."""
         for role_id in supported_roles:
-            if role_family(role_id) == family and role_id in ROLE_FACTORIES:
+            if role_family(role_id) == family and role_id in ROLE_FACTORIES and role_id not in skip:
                 return role_id
         return None
 
@@ -827,8 +827,14 @@ class SendspinConnection:
         return None
 
     @classmethod
-    def _extract_custom_role_supports(cls, message: dict[str, Any]) -> dict[str, tuple[str, Any]]:
-        """Extract custom support objects from raw client/hello JSON without mutating payload."""
+    def _extract_custom_role_supports(
+        cls, message: dict[str, Any], missing_support_roles: Collection[str] = ()
+    ) -> dict[str, tuple[str, Any]]:
+        """Extract custom support objects from raw client/hello JSON without mutating payload.
+
+        Roles in ``missing_support_roles`` are passed over, so a family's next listed
+        version is the one whose support object is parsed.
+        """
         payload = message.get("payload")
         if not isinstance(payload, dict):
             return {}
@@ -840,7 +846,9 @@ class SendspinConnection:
 
         custom_supports: dict[str, tuple[str, Any]] = {}
         for family in ROLE_SUPPORT_SPECS:
-            selected_role = cls._first_registered_role_id_in_family(supported_roles, family=family)
+            selected_role = cls._first_registered_role_id_in_family(
+                supported_roles, family=family, skip=missing_support_roles
+            )
             if selected_role is None:
                 # Restrict the fallback to spec-custom versions (those starting
                 # with `_`). Unknown spec-versioned IDs like `v2` may carry a
@@ -850,7 +858,9 @@ class SendspinConnection:
                     (
                         r
                         for r in supported_roles
-                        if role_family(r) == family and r.partition("@")[2].startswith("_")
+                        if role_family(r) == family
+                        and r.partition("@")[2].startswith("_")
+                        and r not in missing_support_roles
                     ),
                     None,
                 )
@@ -903,10 +913,8 @@ class SendspinConnection:
                 continue
             custom_role, raw_support = custom
             if raw_support is None:
-                raise ValueError(
-                    f"{custom_role}_support must be provided when "
-                    f"'{custom_role}' is in supported_roles"
-                )
+                hello.missing_support_roles = [*(hello.missing_support_roles or ()), custom_role]
+                continue
             if not isinstance(raw_support, dict):
                 raise TypeError(
                     f"{custom_role}_support must be an object for role family '{family}'"
@@ -921,10 +929,15 @@ class SendspinConnection:
             decoded = orjson.loads(raw_message)
             if not isinstance(decoded, dict):
                 return parsed
-            custom_supports = cls._extract_custom_role_supports(decoded)
-            if isinstance(parsed, ClientHelloMessage):
+            # Each pass records the selected versions that lack support; select again
+            # until every family lands on a version that has one, or runs out.
+            missing = parsed.payload.missing_support_roles
+            while True:
+                custom_supports = cls._extract_custom_role_supports(decoded, missing or ())
                 cls._apply_custom_role_support(parsed.payload, custom_supports)
-            return parsed
+                if parsed.payload.missing_support_roles == missing:
+                    return parsed
+                missing = parsed.payload.missing_support_roles
         return parsed
 
     async def _setup_connection(self) -> None:
@@ -1202,7 +1215,7 @@ class SendspinConnection:
         self._client_info = client_info
         self._client_id = client_id
         self._negotiated_roles = negotiate_roles(
-            client_info.supported_roles, strict=not self._server.allow_noncompliant_clients
+            client_info.activatable_roles, strict=not self._server.allow_noncompliant_clients
         )
         self._logger = logger.getChild(client_id)
         self._logger.debug("Received client/hello: %s", client_info)
@@ -1280,6 +1293,11 @@ class SendspinConnection:
             self._flag_noncompliance(
                 "client/hello sent support objects for unlisted roles: "
                 + ", ".join(client_info.unlisted_support_roles)
+            )
+        if client_info.missing_support_roles:
+            self._flag_noncompliance(
+                "client/hello listed roles without their required support object, "
+                "not activating: " + ", ".join(client_info.missing_support_roles)
             )
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
         # The support object, not _legacy_hello, marks this client: it may already use
@@ -2280,10 +2298,16 @@ class SendspinConnection:
             return
 
         if isinstance(message, ClientGoodbyeMessage):
-            self._logger.debug(
-                "Received client/goodbye with reason: %s",
-                message.payload.reason,
-            )
+            if message.payload.unrecognized_reason is not None:
+                self._logger.info(
+                    "Received client/goodbye with unrecognized reason %r; not reconnecting",
+                    message.payload.unrecognized_reason,
+                )
+            else:
+                self._logger.debug(
+                    "Received client/goodbye with reason: %s",
+                    message.payload.reason,
+                )
             self._last_goodbye_reason = message.payload.reason
             retry = message.payload.reason == GoodbyeReason.RESTART
             await self.disconnect(retry_connection=retry)

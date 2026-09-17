@@ -33,7 +33,7 @@ def _conn() -> SendspinConnection:
     ("reason", "expected"),
     [
         (GoodbyeReason.RESTART, True),
-        (GoodbyeReason.CONCURRENT_ATTEMPT, True),
+        (GoodbyeReason.CONCURRENT_ATTEMPT, False),
         (GoodbyeReason.ANOTHER_SERVER, False),
         (GoodbyeReason.SHUTDOWN, False),
         (GoodbyeReason.USER_REQUEST, False),
@@ -47,7 +47,7 @@ async def test_retry_decision_per_goodbye_reason(
     reason: GoodbyeReason,
     expected: bool,  # noqa: FBT001
 ) -> None:
-    """Only restart and concurrent_attempt warrant an auto-reconnect."""
+    """Only restart warrants an auto-reconnect."""
     conn = _conn()
     conn._last_goodbye_reason = reason  # noqa: SLF001
     assert conn.should_retry_server_initiated_connection is expected

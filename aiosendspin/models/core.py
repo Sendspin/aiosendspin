@@ -19,7 +19,14 @@ from .artwork import (
     StreamRequestFormatArtwork,
     StreamStartArtwork,
 )
-from .base import SendspinConfig, SendspinModel
+from .base import (
+    SendspinConfig,
+    SendspinModel,
+    collect_application_objects,
+    expand_application_objects,
+    is_unknown_enum_value,
+    split_enum_values,
+)
 from .color import SessionUpdateColor
 from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
@@ -307,6 +314,9 @@ class ClientHelloPayload(SendspinModel):
     Not part of the wire schema (omitted when None)."""
     source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
     """Source support configuration."""
+    missing_support_roles: list[str] | None = None
+    """Listed role versions whose required support object is missing, recorded for the
+    server to flag and never activate. Not part of the wire schema (omitted when None)."""
     # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
     legacy_pair_methods_list_used: bool | None = None
     """Whether supported_pair_methods arrived as the superseded list, recorded for the
@@ -346,18 +356,15 @@ class ClientHelloPayload(SendspinModel):
         return normalized
 
     def __post_init__(self) -> None:
-        """Enforce that support configs match supported roles."""
-        # Validate player role and support configuration
+        """Match support configs to supported roles, recording each mismatch."""
         # Require support objects only for the exact role version we parse (e.g. "player@v1").
         # Clients may advertise newer versions (e.g. "player@v2") which this server may not
         # implement. Those must not trigger v1 support requirements.
         unlisted: list[str] = []
+        missing: list[str] = []
         player_role_supported = Roles.PLAYER.value in self.supported_roles
         if player_role_supported and self.player_support is None:
-            raise ValueError(
-                "player@v1_support (player_support alias) must be provided when "
-                "'player@v1' is in supported_roles"
-            )
+            missing.append(Roles.PLAYER.value)
         if not player_role_supported:
             if self.player_support is not None:
                 unlisted.append(Roles.PLAYER.value)
@@ -369,25 +376,17 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append(Roles.ARTWORK.value)
             self.artwork_support = None
 
-        # Validate visualizer role and support configuration.
         visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
-            raise ValueError(
-                "visualizer@v1_support (visualizer_support alias) must be "
-                "provided when 'visualizer@v1' is in supported_roles"
-            )
+            missing.append(Roles.VISUALIZER.value)
         if not visualizer_role_supported:
             if self.visualizer_support is not None:
                 unlisted.append(Roles.VISUALIZER.value)
             self.visualizer_support = None
 
-        # Validate legacy `visualizer@_draft_r1` support configuration.
         visualizer_draft_supported = "visualizer@_draft_r1" in self.supported_roles
         if visualizer_draft_supported and self.visualizer_draft_r1_support is None:
-            raise ValueError(
-                "visualizer@_draft_r1_support must be provided when "
-                "'visualizer@_draft_r1' is in supported_roles"
-            )
+            missing.append("visualizer@_draft_r1")
         if not visualizer_draft_supported:
             if self.visualizer_draft_r1_support is not None:
                 unlisted.append("visualizer@_draft_r1")
@@ -395,17 +394,21 @@ class ClientHelloPayload(SendspinModel):
 
         source_role_supported = Roles.SOURCE.value in self.supported_roles
         if source_role_supported and self.source_support is None:
-            raise ValueError(
-                "source@v1_support (source_support alias) must be provided when "
-                "'source@v1' is in supported_roles"
-            )
+            missing.append(Roles.SOURCE.value)
         if not source_role_supported:
             if self.source_support is not None:
                 unlisted.append(Roles.SOURCE.value)
             self.source_support = None
 
-        # Overwrite so a client cannot spoof the record via the wire.
+        # Overwrite so a client cannot spoof the records via the wire.
         self.unlisted_support_roles = unlisted or None
+        self.missing_support_roles = missing or None
+
+    @property
+    def activatable_roles(self) -> list[str]:
+        """Listed role versions, in client order, less those missing their support object."""
+        missing = self.missing_support_roles or ()
+        return [role for role in self.supported_roles if role not in missing]
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -462,17 +465,26 @@ class ClientStatePayload(SendspinModel):
     """Artwork channel configuration - only if client has artwork role."""
     visualizer: VisualizerStatePayload | None = None
     """Visualizer stream configuration - only if client has visualizer role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Normalize a legacy `state` enum to `available`, recording that it was used."""
-        d = dict(d)
+        """Normalize a legacy `state` enum to `available`, recording that it was used.
+
+        Application-specific role objects are nested under `application_objects`.
+        """
+        d = collect_application_objects(d)
         legacy_state = "state" in d
         if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"
         # Always overwrite so a client cannot spoof the record via the wire.
         d["legacy_state_used"] = legacy_state or None
         return d
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -495,6 +507,17 @@ class ClientCommandPayload(SendspinModel):
 
     controller: ControllerCommandPayload | None = None
     """Controller commands - only if client has controller role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -515,8 +538,28 @@ class ClientCommandMessage(ClientMessage):
 class ClientGoodbyePayload(SendspinModel):
     """Payload for client goodbye message."""
 
-    reason: GoodbyeReason
-    """Reason for disconnecting."""
+    reason: GoodbyeReason | None
+    """Reason for disconnecting, or None when the client sent one this implementation
+    does not recognize."""
+    unrecognized_reason: str | None = None
+    """The reason as sent when it was not recognized, recorded for the server to log.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Set aside a reason this implementation does not recognize."""
+        reason = d.get("reason")
+        unrecognized = is_unknown_enum_value(reason, GoodbyeReason)
+        # Always overwrite so a client cannot spoof the record via the wire.
+        normalized = d | {"unrecognized_reason": reason if unrecognized else None}
+        if unrecognized:
+            normalized["reason"] = None
+        return normalized
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 @dataclass
@@ -630,6 +673,20 @@ class ServerActivatePayload(SendspinModel):
     server/activate messages that omit it."""
     pairing: ActivatePairing | None = None
     """Parameters of the admitted pairing attempt. Required when 'pairing' is in activities."""
+    ignored_activities: list[str] | None = None
+    """Activities this implementation does not recognize, dropped during parse and
+    recorded for the client to log. Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop activities this implementation does not recognize, recording them."""
+        activities, ignored = split_enum_values(d.get("activities"), Activity)
+        normalized = dict(d)
+        if "activities" in d:
+            normalized["activities"] = activities
+        # Always overwrite so a server cannot spoof the record via the wire.
+        normalized["ignored_activities"] = ignored or None
+        return normalized
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -679,21 +736,35 @@ class ServerStatePayload(SendspinModel):
     """Controller state - only sent to clients with controller role."""
     color: SessionUpdateColor | None | UndefinedField = field(default_factory=undefined_field)
     """Color state - only sent to clients with color role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
 
     def merge(self, other: ServerStatePayload) -> ServerStatePayload:
         """Return this state updated with the role objects present in `other`.
 
         Each present role object, including `None`, replaces the existing one wholesale.
-        Role objects omitted from `other` are kept.
+        Role objects omitted from `other` are kept. Application-specific role objects
+        follow the same rule per key.
         """
         return replace(
             self,
             **{
                 role.name: getattr(other, role.name)
                 for role in fields(other)
-                if not isinstance(getattr(other, role.name), UndefinedField)
+                if role.name != "application_objects"
+                and not isinstance(getattr(other, role.name), UndefinedField)
             },
+            application_objects=self.application_objects | other.application_objects,
         )
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -728,6 +799,13 @@ class GroupUpdateServerPayload(SendspinModel):
     group_name: str | None = None
     """Friendly name of the group."""
 
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a playback state this implementation does not recognize."""
+        if is_unknown_enum_value(d.get("playback_state"), PlaybackStateType):
+            return {k: v for k, v in d.items() if k != "playback_state"}
+        return d
+
     class Config(SendspinConfig):
         """Config for parsing json messages."""
 
@@ -759,6 +837,17 @@ class ServerCommandPayload(SendspinModel):
     """Player commands - only sent to clients with player role."""
     source: SourceCommandServerPayload | None = None
     """Source command - only sent to clients with source role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -837,6 +926,17 @@ class StreamStartPayload(SendspinModel):
     Carries the v1 schema by default; legacy clients on `visualizer@_draft_r1`
     get the draft schema. Roles emit whichever matches their negotiated wire.
     """
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
