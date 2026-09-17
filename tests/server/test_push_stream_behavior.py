@@ -414,14 +414,14 @@ async def test_commit_audio_float_input_quantizes_at_output_edge(
     _client, conn = _make_connected_player(mock_loop, group, "p1")
 
     quantize_calls = 0
-    original_quantizer = push_stream_module._quantize_float_pcm  # noqa: SLF001
+    original_quantizer = push_stream_module._quantizer_state  # noqa: SLF001
 
     def _counted_quantizer(**kwargs: Any) -> object:
         nonlocal quantize_calls
         quantize_calls += 1
         return original_quantizer(**kwargs)
 
-    monkeypatch.setattr(push_stream_module, "_quantize_float_pcm", _counted_quantizer)
+    monkeypatch.setattr(push_stream_module, "_quantizer_state", _counted_quantizer)
 
     stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
@@ -3146,14 +3146,14 @@ async def test_multi_role_fanout_quantizes_once_per_pcm_key(
     group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
 
     quantize_calls = 0
-    original_quantizer = push_stream_module._quantize_float_pcm  # noqa: SLF001
+    original_quantizer = push_stream_module._quantizer_state  # noqa: SLF001
 
     def _counted_quantizer(**kwargs: Any) -> object:
         nonlocal quantize_calls
         quantize_calls += 1
         return original_quantizer(**kwargs)
 
-    monkeypatch.setattr(push_stream_module, "_quantize_float_pcm", _counted_quantizer)
+    monkeypatch.setattr(push_stream_module, "_quantizer_state", _counted_quantizer)
 
     stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
