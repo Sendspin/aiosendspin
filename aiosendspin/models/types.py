@@ -107,7 +107,7 @@ class Roles(Enum):
     VISUALIZER = "visualizer@v1"
     """
     Visualizes music. Has preferred format for audio features (FFT spectrum,
-    loudness, beats, peaks, pitch).
+    loudness, beats, peaks).
     """
     COLOR = "color@v1"
     """Receives colors derived from the current audio."""
@@ -137,6 +137,7 @@ class BinaryMessageType(Enum):
     """Loudness frame (Visualizer role, slot 0). Also reused for the legacy
     `visualizer@_draft_r1` `VISUALIZATION_DATA` blob — same wire byte, the
     negotiated role's `get_binary_handling` selects the framing."""
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     VISUALIZATION_DATA = 16  # noqa: PIE796
     """Alias of `VISUALIZATION_LOUDNESS` for the legacy draft_r1 wire."""
     VISUALIZATION_BEAT = 17
@@ -147,8 +148,13 @@ class BinaryMessageType(Enum):
     """Display-binned spectrum (Visualizer role, slot 3)."""
     VISUALIZATION_PEAK = 20
     """Energy onset event with strength (Visualizer role, slot 4)."""
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     VISUALIZATION_PITCH = 21
-    """Perceived pitch (MIDI 8.8 + confidence) (Visualizer role, slot 5)."""
+    """Deprecated perceived pitch (MIDI 8.8 + confidence) (Visualizer role, slot 5).
+
+    The spec reserves type 21. The server only sends it to legacy `visualizer@v1`
+    connections, and the client SDK ignores it.
+    """
 
     # Source role (bits 000011xx, IDs 12-15):
     SOURCE_AUDIO_CHUNK = 12

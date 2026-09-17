@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import struct
 from unittest.mock import MagicMock
 
@@ -22,10 +23,12 @@ from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSpectrum,
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
+    SupportedVisualizerType,
     VisualizerStatePayload,
 )
 from aiosendspin.noise.keys import Identity
 from aiosendspin.server.roles.base import AudioChunk
+from aiosendspin.server.roles.visualizer import v1 as visualizer_v1
 from aiosendspin.server.roles.visualizer.group import VisualizerGroupRole
 from aiosendspin.server.roles.visualizer.packing import FLAG_DOWNBEAT
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
@@ -60,14 +63,29 @@ def _make_client_stub() -> MagicMock:
     return client
 
 
-def _make_pitch_client_stub() -> MagicMock:
-    """Client stub negotiating loudness + pitch."""
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+def _make_legacy_client_stub(types: list[str]) -> MagicMock:
+    """Client stub whose hello carried the pre-#195 visualizer stream configuration."""
     client = _make_client_stub()
-    client.visualizer_state = {
-        "types": ["loudness", "pitch"],
-        "rate_max": 60,
-    }
+    client.info.visualizer_support = ClientHelloVisualizerSupport(
+        buffer_capacity=65536, types=types, rate_max=60
+    )
+    client.visualizer_state = {"types": types, "rate_max": 60}
+    client._server.allow_noncompliant_clients = True  # noqa: SLF001
     return client
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+def _make_pitch_client_stub() -> MagicMock:
+    """Legacy client stub negotiating loudness + pitch."""
+    return _make_legacy_client_stub(["loudness", "pitch"])
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+@pytest.fixture
+def reset_pitch_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-arm the once-per-process pitch deprecation warning."""
+    monkeypatch.setattr(visualizer_v1, "_pitch_deprecation_logged", False)
 
 
 def _make_beat_client_stub() -> MagicMock:
@@ -1030,6 +1048,7 @@ def test_binary_handling_for_all_visualizer_types() -> None:
         BinaryMessageType.VISUALIZATION_F_PEAK,
         BinaryMessageType.VISUALIZATION_SPECTRUM,
         BinaryMessageType.VISUALIZATION_PEAK,
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         BinaryMessageType.VISUALIZATION_PITCH,
     ):
         handling = role.get_binary_handling(member.value)
@@ -1352,13 +1371,10 @@ def test_unknown_requested_types_are_omitted() -> None:
     assert list(message.payload.visualizer.types) == ["loudness"]
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_pitch_emits_msg_21_with_midi_and_confidence() -> None:
     """Pure-tone audio yields a confident pitch frame in MIDI 8.8 fixed-point."""
-    client = _make_client_stub()
-    client.visualizer_state = {
-        "types": ["pitch"],
-        "rate_max": 30,
-    }
+    client = _make_legacy_client_stub(["pitch"])
     role = VisualizerV1Role(client=client)
     _connect(role)
     role.on_stream_start()
@@ -1482,8 +1498,99 @@ async def test_release_scheduler_sends_frames_as_playhead_advances() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _pitch_tone_chunk(timestamp_us: int = 1_000_000) -> AudioChunk:
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=440.0, duration_s=0.05)
+    return AudioChunk(data=pcm, timestamp_us=timestamp_us, duration_us=50_000, byte_count=len(pcm))
+
+
+def _pitch_binary_count(client: MagicMock) -> int:
+    return sum(
+        1
+        for call in client.send_binary.call_args_list
+        if call.kwargs["message_type"] == BinaryMessageType.VISUALIZATION_PITCH.value
+    )
+
+
+@pytest.mark.usefixtures("reset_pitch_warning")
+@pytest.mark.parametrize(
+    "types", [["loudness", "pitch"], ["pitch"], ["loudness", "pitch", "pitch"]]
+)
+def test_client_state_client_never_gets_pitch(
+    types: list[SupportedVisualizerType], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A client/state client never gets `pitch`, even on a lenient server with pitch on."""
+    client = _make_client_stub()
+    client._server.visualizer_pitch_enabled = True  # noqa: SLF001
+    client._server.allow_noncompliant_clients = True  # noqa: SLF001
+    role = VisualizerV1Role(client)
+    # Built directly rather than parsed, so a duplicated type reaches the role.
+    payload = ClientStatePayload(visualizer=VisualizerStatePayload(types=types, rate_max=60))
+    with caplog.at_level(logging.WARNING, logger=visualizer_v1.__name__):
+        role.on_connect()
+        role.on_initial_client_state(payload)
+        role.on_stream_start()
+        role.on_audio_chunk(_pitch_tone_chunk())
+
+    assert "pitch" not in _last_stream_start(client).payload.visualizer.types
+    assert _pitch_binary_count(client) == 0
+    assert not caplog.records
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+def test_legacy_client_gets_pitch() -> None:
+    """A legacy-hello client on a lenient server with pitch on still gets `pitch`."""
+    client = _make_pitch_client_stub()
+    client._server.visualizer_pitch_enabled = True  # noqa: SLF001
+    client._server.allow_noncompliant_clients = True  # noqa: SLF001
+    role = VisualizerV1Role(client)
+    role.on_connect()
+    role.on_stream_start()
+    role.on_audio_chunk(_pitch_tone_chunk())
+
+    assert "pitch" in _last_stream_start(client).payload.visualizer.types
+    assert _pitch_binary_count(client) > 0
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+async def test_pitch_deprecation_warning_logged_once(
+    reset_pitch_warning: None,  # noqa: ARG001
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Enabling pitch and legacy pitch requests log the deprecation warning once in total."""
+    server = SendspinServer(
+        asyncio.get_running_loop(),
+        Identity.generate(),
+        "Srv",
+        MagicMock(),
+        pairing_store=MagicMock(),
+    )
+    with caplog.at_level(logging.WARNING, logger=visualizer_v1.__name__):
+        server.set_visualizer_pitch_enabled(enabled=True)
+        server.set_visualizer_pitch_enabled(enabled=False)
+        server.set_visualizer_pitch_enabled(enabled=True)
+        for _ in range(2):
+            VisualizerV1Role(_make_pitch_client_stub()).on_connect()
+
+    warnings = [r for r in caplog.records if r.name == visualizer_v1.__name__]
+    assert len(warnings) == 1
+    assert "deprecated" in warnings[0].getMessage()
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+def test_legacy_pitch_request_logs_deprecation_warning(
+    reset_pitch_warning: None,  # noqa: ARG001
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A legacy pitch request logs the warning when nothing else has yet."""
+    with caplog.at_level(logging.WARNING, logger=visualizer_v1.__name__):
+        VisualizerV1Role(_make_pitch_client_stub()).on_connect()
+        VisualizerV1Role(_make_pitch_client_stub()).on_connect()
+    assert len(caplog.records) == 1
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_pitch_in_types_when_server_enabled() -> None:
-    """Pitch stays in the negotiated types while the server flag is on (default)."""
+    """Pitch stays in the negotiated types while the server flag is on."""
     client = _make_pitch_client_stub()
     role = VisualizerV1Role(client)
     _connect(role)
@@ -1491,6 +1598,7 @@ def test_pitch_in_types_when_server_enabled() -> None:
     assert "pitch" in _last_stream_start(client).payload.visualizer.types
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_pitch_dropped_when_server_disabled() -> None:
     """Pitch is excluded from negotiated types when the server flag is off."""
     client = _make_pitch_client_stub()
@@ -1503,6 +1611,7 @@ def test_pitch_dropped_when_server_disabled() -> None:
     assert "loudness" in types
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_pitch_dropped_when_clients_must_be_compliant() -> None:
     """The pitch toggle is ignored (pitch shed) when non-compliant clients are disallowed."""
     client = _make_pitch_client_stub()
@@ -1516,6 +1625,7 @@ def test_pitch_dropped_when_clients_must_be_compliant() -> None:
     assert "loudness" in types
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_disabled_pitch_emits_no_pitch_binary() -> None:
     """With pitch disabled, no PITCH binary is produced from an audio chunk."""
     client = _make_pitch_client_stub()
@@ -1529,13 +1639,10 @@ def test_disabled_pitch_emits_no_pitch_binary() -> None:
     assert BinaryMessageType.VISUALIZATION_PITCH.value not in msg_types
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_pitch_kept_when_sole_type_even_if_disabled() -> None:
     """A pitch-only client keeps pitch — types must not be emptied."""
-    client = _make_client_stub()
-    client.visualizer_state = {
-        "types": ["pitch"],
-        "rate_max": 60,
-    }
+    client = _make_legacy_client_stub(["pitch"])
     client._server.visualizer_pitch_enabled = False  # noqa: SLF001
     role = VisualizerV1Role(client)
     _connect(role)
@@ -1543,13 +1650,10 @@ def test_pitch_kept_when_sole_type_even_if_disabled() -> None:
     assert _last_stream_start(client).payload.visualizer.types == ("pitch",)
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_pitch_only_client_is_inert_when_clients_must_be_compliant() -> None:
     """A pitch-only client gets an empty stream in strict mode, which omits `pitch`."""
-    client = _make_client_stub()
-    client.visualizer_state = {
-        "types": ["pitch"],
-        "rate_max": 60,
-    }
+    client = _make_legacy_client_stub(["pitch"])
     client._server.allow_noncompliant_clients = False  # noqa: SLF001
     role = VisualizerV1Role(client)
     _connect(role)
@@ -1560,6 +1664,7 @@ def test_pitch_only_client_is_inert_when_clients_must_be_compliant() -> None:
     client.send_binary.assert_not_called()
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_refresh_pitch_setting_reissues_stream_start_on_change() -> None:
     """Flipping the server flag live re-emits stream/start without pitch."""
     client = _make_pitch_client_stub()
@@ -1573,6 +1678,7 @@ def test_refresh_pitch_setting_reissues_stream_start_on_change() -> None:
     assert "pitch" not in _last_stream_start(client).payload.visualizer.types
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_refresh_pitch_setting_noop_when_unchanged() -> None:
     """refresh_pitch_setting does not re-emit when the resolved types are unchanged."""
     client = _make_pitch_client_stub()  # flag stays enabled
@@ -1584,6 +1690,7 @@ def test_refresh_pitch_setting_noop_when_unchanged() -> None:
     assert _stream_start_count(client) == before
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 async def test_visualizer_pitch_disabled_by_default() -> None:
     """Pitch is off by default; emitting reserved type 21 is opt-in and non-spec."""
     server = SendspinServer(
@@ -1596,6 +1703,7 @@ async def test_visualizer_pitch_disabled_by_default() -> None:
     assert server.visualizer_pitch_enabled is False
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 async def test_server_set_pitch_enabled_fans_out_to_roles() -> None:
     """SendspinServer.set_visualizer_pitch_enabled refreshes every active role once."""
     server = SendspinServer(
@@ -1756,10 +1864,10 @@ async def test_state_change_mid_stream_keeps_wire_cursor() -> None:
     role._cancel_release_timer()  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 async def test_pitch_toggle_mid_stream_keeps_wire_cursor() -> None:
     """A pitch toggle mid-stream never sends below the highest timestamp already sent."""
-    client = _make_client_stub()
-    client.visualizer_state = {"types": ["loudness", "pitch", "beat"], "rate_max": 60}
+    client = _make_legacy_client_stub(["loudness", "pitch", "beat"])
     role = VisualizerV1Role(client=client)
     _connect(role)
     role.on_stream_start()

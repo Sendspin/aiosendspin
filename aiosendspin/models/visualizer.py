@@ -8,7 +8,10 @@ from typing import Any, Literal
 
 from .base import SendspinConfig, SendspinModel
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+# `pitch` is kept so the server can still parse it from legacy clients.
 VisualizerType = Literal["loudness", "f_peak", "spectrum", "beat", "peak", "pitch"]
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 SupportedVisualizerType = Literal["loudness", "f_peak", "spectrum", "beat", "peak", "pitch"]
 SpectrumScale = Literal["lin", "log", "mel"]
 
@@ -18,6 +21,7 @@ _SUPPORTED_TYPES: tuple[SupportedVisualizerType, ...] = (
     "spectrum",
     "beat",
     "peak",
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     "pitch",
 )
 
@@ -230,6 +234,8 @@ class VisualizerFrame:
     f_peak_amp: int | None = None
     spectrum: list[int] | None = None
     peak_strength: int | None = None
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+    # The client SDK no longer populates the pitch fields.
     pitch_midi_q88: int | None = None
     pitch_confidence: int | None = None
     # Set for beat frames (msg 17). True at bar boundaries on the v1 wire.

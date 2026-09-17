@@ -1846,6 +1846,7 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.artwork_support is None
 
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     def test_hello_with_draft_r1_only_parses_and_negotiates(self) -> None:
         """Legacy `visualizer@_draft_r1` clients are still fully supported.
 

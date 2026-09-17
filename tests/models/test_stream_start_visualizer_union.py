@@ -8,6 +8,8 @@ branch so the v1 client SDK's `isinstance` check does not silently treat a
 message as "no visualizer config".
 """
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+
 from __future__ import annotations
 
 from aiosendspin.models.core import StreamStartPayload

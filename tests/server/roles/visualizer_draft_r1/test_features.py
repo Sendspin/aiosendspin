@@ -1,5 +1,7 @@
 """Tests for visualizer feature extraction and packing."""
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+
 from __future__ import annotations
 
 import math

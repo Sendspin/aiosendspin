@@ -25,6 +25,7 @@ _LOUDNESS_EMA_ALPHA = 0.5
 # the held peak's magnitude by this ratio. Suppresses bin-hop jitter between
 # near-equal neighbours on steady tones.
 _F_PEAK_SWITCH_RATIO = 1.10
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 # Pitch (YINFFT) search bounds and gating. The floor is set to the melody
 # register (not the bass) so octave-down errors fall below it and are rejected.
 _PITCH_F_MIN = 130.0
@@ -62,6 +63,7 @@ class ExtractedFrame:
     spectrum: np.ndarray | None = None
     # Onset detector output; None when no transient fired this frame.
     peak: int | None = None
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     # Pitch fields are paired — both None when no confident pitch was detected.
     pitch_midi_q88: int | None = None
     pitch_confidence: int | None = None
@@ -132,6 +134,7 @@ class VisualizerFeatureExtractor:
         # `peak` when current energy exceeds the EMA by a threshold ratio.
         self._energy_ema: float | None = None
         self._last_peak_ts_us: int | None = None
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         # Pitch octave-stabilization state: EMA of recent raw MIDI and the ts of
         # the last voiced frame. Reset by any unvoiced frame.
         self._pitch_register: float | None = None
@@ -277,6 +280,7 @@ class VisualizerFeatureExtractor:
                 # independent of the periodic frame hop.
                 peak = self._detect_onset(compensated, emit_ts)
 
+            # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
             if "pitch" in self._config.types:
                 pitch_midi_q88, pitch_confidence = self._compute_pitch_yinfft(mono, magnitude)
                 if pitch_midi_q88 is None:
@@ -364,6 +368,7 @@ class VisualizerFeatureExtractor:
             amp = 0
         return peak_hz, amp
 
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     def _compute_pitch_yinfft(
         self, mono: np.ndarray, magnitude: np.ndarray
     ) -> tuple[int | None, int | None]:
@@ -460,6 +465,7 @@ class VisualizerFeatureExtractor:
         confidence_uint8 = int(np.clip(confidence_value * 255.0, 0, 255))
         return midi_q88, confidence_uint8
 
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     def _stabilize_pitch_octave(self, midi_q88: int, emit_ts: int) -> int:
         """Snap a raw pitch to the octave nearest the running register.
 

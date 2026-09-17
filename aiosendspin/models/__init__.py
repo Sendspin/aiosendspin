@@ -32,6 +32,7 @@ __all__ = [
     "undefined_field",
     "unpack_binary_header",
     "visualizer",
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     "visualizer_draft_r1",
 ]
 import struct
@@ -48,6 +49,7 @@ from . import (
     source,
     types,
     visualizer,
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     visualizer_draft_r1,
 )
 from .core import DeviceInfo

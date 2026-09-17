@@ -306,6 +306,9 @@ def test_loudness_ema_smooths_step_input() -> None:
 # Pitch detection
 # ---------------------------------------------------------------------------
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+# Every test in this section covers the deprecated `pitch` type.
+
 
 def _pitch_only_config(rate_max: int = 30) -> StreamStartVisualizer:
     return StreamStartVisualizer(

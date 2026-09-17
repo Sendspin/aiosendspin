@@ -1,4 +1,4 @@
-"""Visualizer role implementation for draft visualizer streaming."""
+"""Deprecated visualizer role implementation for the `visualizer@_draft_r1` wire."""
 
 from __future__ import annotations
 
@@ -35,7 +35,11 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+_deprecation_logged = False
 
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 class VisualizerDraftR1Role(Role):
     """Role implementation for draft visualizer streaming."""
 
@@ -107,6 +111,14 @@ class VisualizerDraftR1Role(Role):
 
     def on_connect(self) -> None:
         """Initialize stream config and subscribe to group role."""
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        global _deprecation_logged  # noqa: PLW0603
+        if not _deprecation_logged:
+            _deprecation_logged = True
+            _LOGGER.warning(
+                "The visualizer@_draft_r1 role is deprecated and will be removed in a "
+                "future release; clients should use visualizer@v1"
+            )
         self._init_stream_config()
         self._subscribe_to_group_role()
 

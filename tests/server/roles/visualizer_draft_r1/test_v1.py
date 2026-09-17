@@ -1,7 +1,10 @@
 """Tests for VisualizerDraftR1Role draft visualizer implementation."""
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+
 from __future__ import annotations
 
+import logging
 import struct
 from unittest.mock import MagicMock
 
@@ -14,6 +17,7 @@ from aiosendspin.models.visualizer_draft_r1 import (
     ClientHelloVisualizerSupport,
 )
 from aiosendspin.server.roles.base import AudioChunk
+from aiosendspin.server.roles.visualizer_draft_r1 import role as draft_r1_role
 from aiosendspin.server.roles.visualizer_draft_r1.role import VisualizerDraftR1Role
 from tests.server.roles.visualizer_draft_r1.conftest import sine_pcm_16bit
 
@@ -43,6 +47,21 @@ def _make_client_stub() -> MagicMock:
     client._server.clock.now_us.return_value = 0  # noqa: SLF001
     client.connection = MagicMock()
     return client
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+def test_activation_logs_deprecation_warning_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Connecting draft_r1 roles logs the deprecation warning once per process."""
+    monkeypatch.setattr(draft_r1_role, "_deprecation_logged", False)
+    with caplog.at_level(logging.WARNING, logger=draft_r1_role.__name__):
+        VisualizerDraftR1Role(client=_make_client_stub()).on_connect()
+        VisualizerDraftR1Role(client=_make_client_stub()).on_connect()
+
+    warnings = [r for r in caplog.records if r.name == draft_r1_role.__name__]
+    assert len(warnings) == 1
+    assert "deprecated" in warnings[0].getMessage()
 
 
 def test_visualizer_role_has_role_id() -> None:

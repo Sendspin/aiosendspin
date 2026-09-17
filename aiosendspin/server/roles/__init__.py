@@ -83,6 +83,8 @@ from aiosendspin.server.roles.visualizer import (
     VisualizerGroupRole,
     VisualizerV1Role,
 )
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 from aiosendspin.server.roles.visualizer_draft_r1 import VisualizerDraftR1Role
 
 __all__ = [
@@ -131,6 +133,7 @@ __all__ = [
     "SourceStreamStartedEvent",
     "SourceV1Role",
     "StreamRequirements",
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     "VisualizerDraftR1Role",
     "VisualizerGroupRole",
     "VisualizerV1Role",

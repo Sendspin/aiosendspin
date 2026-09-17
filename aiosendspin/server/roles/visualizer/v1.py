@@ -6,7 +6,9 @@ Each binary message carries exactly one frame of one type. The role emits:
 - `f_peak` (msg 18) — per audio chunk
 - `spectrum` (msg 19) — per audio chunk
 - `peak` (msg 20) — per audio chunk when the onset detector fires
-- `pitch` (msg 21) — per audio chunk when a confident pitch is detected
+- `pitch` (msg 21) — per audio chunk when a confident pitch is detected, only
+  on connections whose hello carried the pre-#195 stream configuration
+  (deprecated: the spec reserves type 21)
 
 `beat` is *deferred* from `stream/start.types` until the first non-empty
 schedule actually lands. While beats are still being computed upstream
@@ -72,15 +74,48 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+_pitch_deprecation_logged = False
+
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+def warn_pitch_deprecated() -> None:
+    """Log, once per process, that the visualizer `pitch` type is deprecated."""
+    global _pitch_deprecation_logged  # noqa: PLW0603
+    if _pitch_deprecation_logged:
+        return
+    _pitch_deprecation_logged = True
+    _LOGGER.warning(
+        "The visualizer 'pitch' type is deprecated: it uses binary type 21, which the "
+        "spec reserves. It is only sent to legacy visualizer@v1 clients on servers "
+        "that allow non-compliant clients, and will be removed in a future release"
+    )
+
+
 # Types the reference implementation knows how to compute. Unsupported
 # types requested by the client are silently omitted per spec.
 _IMPLEMENTED_TYPES: frozenset[SupportedVisualizerType] = frozenset(
-    {"loudness", "f_peak", "spectrum", "beat", "peak", "pitch"}
+    {
+        "loudness",
+        "f_peak",
+        "spectrum",
+        "beat",
+        "peak",
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        "pitch",
+    }
 )
 # Types whose computation requires the FFT extractor. `beat` is the only
 # supplied-externally type and does not require the extractor.
 _FFT_DRIVEN_TYPES: frozenset[SupportedVisualizerType] = frozenset(
-    {"loudness", "f_peak", "spectrum", "peak", "pitch"}
+    {
+        "loudness",
+        "f_peak",
+        "spectrum",
+        "peak",
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        "pitch",
+    }
 )
 # Periodic frames for a beat-wanting client are held to this lead ahead of the
 # playhead. Keeping the wire-ts cursor near the playhead means a beat schedule
@@ -182,6 +217,7 @@ class VisualizerV1Role(Role):
             BinaryMessageType.VISUALIZATION_F_PEAK,
             BinaryMessageType.VISUALIZATION_SPECTRUM,
             BinaryMessageType.VISUALIZATION_PEAK,
+            # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
             BinaryMessageType.VISUALIZATION_PITCH,
         ):
             if message_type == member.value:
@@ -409,6 +445,7 @@ class VisualizerV1Role(Role):
                 end_time_us=end_time_us,
                 duration_us=duration_us,
             )
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         if (
             "pitch" in types
             and frame.pitch_midi_q88 is not None
@@ -835,10 +872,18 @@ class VisualizerV1Role(Role):
         if "spectrum" in types and request.spectrum is None:
             # Flagged as a deviation; a lenient server streams the other types.
             types.remove("spectrum")
-        # `pitch` rides spec-reserved binary type 21, so a compliance-strict server
-        # never streams it.
-        if not self._client._server.allow_noncompliant_clients:  # noqa: SLF001
-            types = [t for t in types if t != "pitch"]
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        # `pitch` rides spec-reserved binary type 21. Only a lenient server streams
+        # it, and only to a connection whose hello carried the pre-#195 stream
+        # configuration: #195 postdates the reservation, so a client/state client
+        # is on a wire where 21 is reserved.
+        if "pitch" in types:
+            support = self._client.info.visualizer_support
+            legacy = support is not None and support.has_stream_config
+            if legacy and self._client._server.allow_noncompliant_clients:  # noqa: SLF001
+                warn_pitch_deprecated()
+            else:
+                types = [t for t in types if t != "pitch"]
         return replace(request, types=types)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
@@ -884,9 +929,11 @@ class VisualizerV1Role(Role):
             exposed_types = client_types
         else:
             exposed_types = [t for t in client_types if t != "beat"]
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         # Server-wide pitch shed: drop the (heavy) pitch feature unless it is
         # the only exposed type, so a pitch-only client still gets its data.
-        # A compliance-strict server never gets here with pitch (`_filter_request`).
+        # Only a legacy connection on a lenient server gets here with pitch
+        # (`_filter_request`).
         if not self._client._server.visualizer_pitch_enabled:  # noqa: SLF001
             without_pitch: list[SupportedVisualizerType] = [
                 t for t in exposed_types if t != "pitch"
@@ -897,6 +944,7 @@ class VisualizerV1Role(Role):
             replace(self._request, types=exposed_types), tracks_downbeats=self._tracks_downbeats
         )
 
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     def refresh_pitch_setting(self) -> None:
         """Re-apply the server-wide pitch toggle to the live stream config.
 
