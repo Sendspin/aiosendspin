@@ -636,10 +636,6 @@ class SendspinConnection:
             effective_roles = self._active_roles
         else:
             effective_roles = []
-        if category is not PskCategory.LONG_TERM and any(
-            role_family(role_id) == "source" for role_id in effective_roles
-        ):
-            return GoodbyeReason.UNAUTHORIZED
         has_roles = bool(effective_roles)
         if not _admissible(
             category, activities, has_roles=has_roles, unpaired_access=unpaired_access
@@ -1352,8 +1348,6 @@ class SendspinConnection:
     def _ensure_source_authorized(self, *, require_stream: bool = False) -> None:
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
-            raise RuntimeError("Source role requires a paired connection")
         if not self._is_role_active("source"):
             raise RuntimeError("Source role is not active")
         if require_stream and not self._source_stream_active:
