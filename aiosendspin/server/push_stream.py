@@ -30,6 +30,8 @@ from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
+    from collections.abc import Set as AbstractSet
+
     import av
 
     from aiosendspin.clock import Clock
@@ -2601,12 +2603,13 @@ class PushStream:
         self._transform_last_input_end_us.clear()
         self._channels_with_committed_audio.clear()
 
-    def clear(self) -> None:
+    def clear(self, *, end_roles: AbstractSet[Role] = frozenset()) -> None:
         """
         Clear all pending audio and reset timing.
 
         This is used for seek operations or track changes where buffered
-        audio is discarded. Sends stream/clear to all roles via hooks.
+        audio is discarded. Sends stream/clear to all roles via hooks, except
+        that roles in ``end_roles`` get stream/end instead.
         """
         # Bump the stream generation so any in-flight commit_audio()
         # coroutine bails out before delivering chunks under the new epoch.
@@ -2650,4 +2653,7 @@ class PushStream:
 
         # Send stream/clear to all roles with audio requirements via hooks
         for _client, role in self._get_audio_roles():
-            role.on_stream_clear()
+            if role in end_roles:
+                role.on_stream_end()
+            else:
+                role.on_stream_clear()

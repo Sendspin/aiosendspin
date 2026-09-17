@@ -130,13 +130,10 @@ class SendspinGroup:
         # Replace any existing active stream so stale handles cannot continue
         # committing audio after a new stream is started.
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            if self._server.allow_noncompliant_clients:
-                self._push_stream.stop()
-            else:
-                # Clear buffered audio while preserving the protocol stream across replacement.
-                # Gate the spec-compliant path while legacy clients still mishandle stream/clear.
-                self._push_stream.clear()
-                self._push_stream.stop(keep_stream=True)
+            # Clear buffered audio while preserving the protocol stream across replacement:
+            # a track change must not end the stream.
+            self._push_stream.clear(end_roles=self._legacy_replacement_roles())
+            self._push_stream.stop(keep_stream=True)
 
         self._push_stream = PushStream(
             loop=self._server.loop,
@@ -187,6 +184,22 @@ class SendspinGroup:
         """Drop a role deactivated mid-connection from the active stream, if any."""
         if self._push_stream is not None and not self._push_stream.is_stopped:
             self._push_stream.on_role_leave(role)
+
+    # DEPRECATED(spec-pr-218): remove in aiosendspin <version>
+    def _legacy_replacement_roles(self) -> set[Role]:
+        """Return the roles whose client gets stream/end, not stream/clear, on replacement.
+
+        Clients with a pre-#177 hello predate reliable stream/clear handling, so a
+        replaced stream still ends for them as it did before. The pre-#177 hello is
+        the only per-connection signal of such a client; this outlives that wire
+        tolerance only if another signal replaces it.
+        """
+        return {
+            role
+            for client in self._clients
+            if client.connection is not None and client.connection.uses_pre_spec_177_wire
+            for role in client.active_roles
+        }
 
     def _group_update_message(self) -> GroupUpdateServerMessage:
         """Build a group/update carrying this group's current state."""
