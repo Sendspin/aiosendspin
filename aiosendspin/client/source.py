@@ -77,7 +77,15 @@ class SourceCapture:
         return self._codec
 
     async def start(self) -> None:
-        """Send ``client-stream/start`` to begin the capture stream."""
+        """
+        Send ``client-stream/start`` to begin the capture stream.
+
+        Each server source ``start`` authorizes one opening. After the stream ends, whether by
+        ``stop()``, a server ``stop``, role removal or unavailability, a new ``start`` is needed.
+
+        Raises:
+            RuntimeError: No server ``start`` is pending, or the clock is not synchronized.
+        """
         if self._started:
             if self._connection.is_source_stream_active():
                 return
@@ -109,7 +117,7 @@ class SourceCapture:
                 from a stall look fresh; pass it when the capture clock is known.
 
         Raises:
-            RuntimeError: ``start()`` has not been called.
+            RuntimeError: ``start()`` has not been called, or the connection ended the stream.
             ValueError: ``pcm`` is not a whole number of frames.
         """
         if not self._started:

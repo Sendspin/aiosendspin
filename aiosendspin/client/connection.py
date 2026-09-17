@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, NoReturn, assert_never
+from typing import TYPE_CHECKING, Literal, NoReturn, assert_never
 
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -325,6 +325,8 @@ class SendspinConnection:
     """True if artwork stream is active."""
     _source_stream_active: bool = False
     """True between client-stream/start and client-stream/end for the source role."""
+    _source_start_authorized: bool = False
+    """True while a server source ``start`` awaits the client-stream/start it authorizes."""
     _current_visualizer_config: StreamStartVisualizer | None = None
     """Current visualizer config from stream/start."""
     _artwork_config: StreamStartArtwork | None = None
@@ -608,8 +610,10 @@ class SendspinConnection:
             Roles.SOURCE.value in self._active_roles and Roles.SOURCE.value not in effective_roles
         )
         self._active_roles = effective_roles
-        if source_dropped and self._source_stream_active and self.connected:
-            await self.send_client_stream_end()
+        if source_dropped:
+            self._source_start_authorized = False
+            if self._source_stream_active and self.connected:
+                await self.send_client_stream_end()
         self._selected_pairing = payload.pairing
         await self._client.note_playback_activity(self)
         return None
@@ -1047,6 +1051,7 @@ class SendspinConnection:
         self._artwork_shown.clear()
         self._visualizer_stream_active = False
         self._source_stream_active = False
+        self._source_start_authorized = False
         self._current_visualizer_config = None
         self._activities = []
         self._active_roles = []
@@ -1148,8 +1153,10 @@ class SendspinConnection:
         return self._client.artwork_state if self._is_role_active("artwork") else None
 
     async def _update_reported_available(self, *, available: bool) -> None:
-        if not available and self._source_stream_active:
-            await self.send_client_stream_end()
+        if not available:
+            self._source_start_authorized = False
+            if self._source_stream_active:
+                await self.send_client_stream_end()
         self._reported_available = available
 
     async def send_leave(self) -> None:
@@ -1215,7 +1222,12 @@ class SendspinConnection:
         bit_depth: int,
         codec_header: str | None,
     ) -> None:
-        """Start a source stream."""
+        """
+        Start a source stream, consuming the pending server source ``start``.
+
+        Raises RuntimeError unless a server ``start`` is pending (see
+        ``is_source_start_authorized()``).
+        """
         message = ClientStreamStartMessage(
             payload=ClientStreamStartPayload(
                 source=ClientStreamStartSource(
@@ -1229,16 +1241,20 @@ class SendspinConnection:
         )
         async with self._send_lock:
             self._ensure_source_authorized()
+            if not self._source_start_authorized:
+                raise RuntimeError("Source stream start requires a server start command")
             if not self.is_time_synchronized():
                 raise RuntimeError("Source capture requires a synchronized clock")
             if self._exchange_in_progress:
                 raise RuntimeError("Connection is busy with an in-band exchange")
             await self._send_message_locked(message.to_json())
+            self._source_start_authorized = False
             self._source_stream_active = True
 
     async def send_client_stream_end(self) -> None:
-        """End the source stream."""
+        """End the source stream; a new server ``start`` is required to open another."""
         async with self._send_lock:
+            self._source_start_authorized = False
             if not self.connected:
                 raise RuntimeError("Client is not connected")
             if not self._source_stream_active:
@@ -1365,6 +1381,10 @@ class SendspinConnection:
         """Return whether this connection has an open source stream."""
         return self._source_stream_active
 
+    def is_source_start_authorized(self) -> bool:
+        """Return whether a server source ``start`` is pending for ``SourceCapture.start()``."""
+        return self._source_start_authorized
+
     @asynccontextmanager
     async def _exchange(self) -> AsyncIterator[None]:
         """Reserve the wire for an in-band exchange: suppress other sends, then drain in-flight."""
@@ -1437,7 +1457,7 @@ class SendspinConnection:
             case ServerStateMessage(payload=payload):
                 self._handle_server_state(payload)
             case ServerCommandMessage(payload=payload):
-                self._handle_server_command(payload)
+                await self._handle_server_command(payload)
             case ServerUnpairMessage():
                 await self._handle_unpair()
             case (
@@ -1688,8 +1708,15 @@ class SendspinConnection:
         if not isinstance(payload.color, UndefinedField):
             self._client.notify_color_callback(payload)
 
-    def _handle_server_command(self, payload: ServerCommandPayload) -> None:
+    async def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
+        if payload.source is not None and not await self._apply_source_command(
+            payload.source.command
+        ):
+            logger.debug("Ignoring source command without effect: %s", payload.source.command)
+            if payload.player is None:
+                return
+            payload = replace(payload, source=None)
         if (
             payload.player is not None
             and payload.player.command not in self._reported_supported_commands
@@ -1707,6 +1734,26 @@ class SendspinConnection:
             ):
                 self._client.set_output_delay_ms(float(player_cmd.output_delay_ms))
         self._client.notify_server_command_callback(payload)
+
+    async def _apply_source_command(self, command: Literal["start", "stop"]) -> bool:
+        """Apply a server source command and return whether it had an effect."""
+        if command == "start":
+            if (
+                self._source_start_authorized
+                or self._source_stream_active
+                or not self._wire_available()
+                or not self._is_role_active("source")
+            ):
+                return False
+            self._source_start_authorized = True
+            return True
+        # A stop also ends a stream whose client-stream/start is still in flight.
+        if not self._source_start_authorized and not self._source_stream_active:
+            return False
+        self._source_start_authorized = False
+        if self.connected:
+            await self.send_client_stream_end()
+        return True
 
     async def _handle_unpair(self) -> None:
         """Handle server/unpair: drop the matched record (unless shared) and close."""
