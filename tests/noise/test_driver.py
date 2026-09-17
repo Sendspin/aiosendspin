@@ -1231,6 +1231,63 @@ async def test_message_1_without_a_category_is_rejected() -> None:
     await asyncio.gather(server_task, return_exceptions=True)
 
 
+@pytest.mark.parametrize(
+    "category",
+    ["zz", [], {}, 1, None],
+    ids=["unknown-code", "list", "object", "number", "null"],
+)
+async def test_message_1_with_an_unknown_category_is_rejected(category: object) -> None:
+    """An undefined category is malformed input, not a miss the Sentinel could answer."""
+    server_id = Identity.generate()
+    client_id = Identity.generate()
+    psk = generate_psk()
+    resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.LONG_TERM)
+    server_ws, client_ws = make_ws_pair()
+    lookups: list[tuple[str, PskCategory]] = []
+
+    async def recording_resolver(psk_id: str, category: PskCategory) -> ResolvedPsk | None:
+        lookups.append((psk_id, category))
+        return resolved
+
+    async def server_with_an_unknown_category() -> None:
+        """Drive the server side, naming a held psk_id under a category no revision defines."""
+        client_init = (await server_ws.receive()).data
+        server_init = ServerInitMessage(
+            payload=ServerInitPayload(server_id=server_id.peer_id, version=PROTOCOL_VERSION),
+        ).to_json()
+        prologue = client_init.encode("utf-8") + server_init.encode("utf-8")
+        session = NoiseSession.as_initiator(
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            local_static_priv=server_id.private_bytes,
+            remote_static_pub=client_id.public_bytes,
+            prologue=prologue,
+            psk=psk,
+        )
+        await server_ws.send_str(server_init)
+        payload = orjson.dumps({"psk_id": resolved.psk_id, "psk_category": category})
+        msg1 = session.write_message(payload)
+        await server_ws.send_str(
+            NoiseHandshakeMessage(payload=NoiseHandshakePayload(data=b64url_encode(msg1))).to_json()
+        )
+
+    server_task = asyncio.create_task(server_with_an_unknown_category())
+    with pytest.raises(
+        HandshakeAbortedError, match="malformed Noise message 1 payload: unknown psk_category"
+    ):
+        await run_handshake_client(
+            client_ws,
+            local_identity=client_id,
+            suite=NoiseCipherSuite.CHACHAPOLY,
+            psk_resolver=recording_resolver,
+        )
+    await server_task
+
+    assert lookups == []
+    # Only client/init went out: no message 2, under the Sentinel or otherwise.
+    assert len(client_ws.sent) == 1
+    assert server_ws.incoming.empty()
+
+
 async def test_rehandshake_category_mismatch_aborts() -> None:
     """A category mismatch during a re-handshake is a miss, and a miss there aborts."""
     server_id = Identity.generate()
@@ -1285,6 +1342,39 @@ async def test_rehandshake_category_mismatch_aborts() -> None:
             psk_resolver=_resolver({client_psk2.psk_id: client_psk2}),
         )
     await asyncio.gather(server_task, return_exceptions=True)
+
+
+async def test_rehandshake_with_an_unknown_category_is_rejected() -> None:
+    """An undefined category aborts a re-handshake as malformed, not as a miss."""
+    server_id, client_id, server_init, client_init, client_ws = await _established_sessions()
+    server_psk, client_resolver = _long_term_psks(server_id, client_id)
+    session = NoiseSession.as_initiator(
+        suite=server_init.suite,
+        local_static_priv=server_id.private_bytes,
+        remote_static_pub=client_id.public_bytes,
+        prologue=server_init.handshake_hash,
+        psk=server_psk.psk,
+    )
+    payload = orjson.dumps({"psk_id": server_psk.psk_id, "psk_category": "zz"})
+    msg1 = session.write_message(payload)
+    await server_init.encrypted_ws.send_str(
+        NoiseHandshakeMessage(payload=NoiseHandshakePayload(data=b64url_encode(msg1))).to_json()
+    )
+    sent_before = len(client_ws.sent)
+
+    with pytest.raises(
+        HandshakeAbortedError, match="malformed Noise message 1 payload: unknown psk_category"
+    ):
+        await run_rehandshake_client(
+            client_init.encrypted_ws,
+            local_identity=client_id,
+            server_id=server_id.peer_id,
+            suite=client_init.suite,
+            prologue=client_init.handshake_hash,
+            psk_resolver=client_resolver,
+            timeout_s=1.0,
+        )
+    assert len(client_ws.sent) == sent_before
 
 
 async def test_rehandshake_referencing_an_unusable_psk_aborts_the_server() -> None:
