@@ -1099,6 +1099,22 @@ def test_on_client_state_updates_min_buffer() -> None:
     assert event.min_buffer_ms == 1500
 
 
+def test_timing_fields_above_server_maximum_are_clamped() -> None:
+    """Timing values above 30 s are stored as reported but honoured at 30 s."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(required_lead_time_ms=45_000, min_buffer_ms=60_000)
+        )
+    )
+    assert role.required_lead_time_ms == 45_000
+    assert role.min_buffer_ms == 60_000
+    assert role.get_required_lead_time_us() == 30_000_000
+    assert role.get_min_buffer_us() == 30_000_000
+    client.flag_noncompliance.assert_not_called()
+
+
 def test_partial_client_state_does_not_reset_timing_fields() -> None:
     """A delta carrying only `volume` must leave timing fields and events untouched."""
     client = _make_client_stub()

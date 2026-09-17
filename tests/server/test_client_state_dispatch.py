@@ -251,6 +251,23 @@ async def test_client_state_player_object_for_active_role_is_not_flagged() -> No
 
 
 @pytest.mark.asyncio
+async def test_client_state_timing_fields_above_30s_are_accepted() -> None:
+    """Timing fields above 30 s parse from the wire and reach the role unflagged."""
+    conn, client = _conn_with_client()
+    player = _role("player")
+    client.active_roles = [player]
+    conn._initial_state_received = True  # noqa: SLF001
+    client.available = True
+    message = SendspinConnection._deserialize_client_message(  # noqa: SLF001
+        '{"type": "client/state", "payload": {"available": true, '
+        '"player": {"required_lead_time_ms": 45000, "min_buffer_ms": 60000}}}'
+    )
+    await conn._handle_message(message, timestamp_us=0)  # noqa: SLF001
+    client.flag_noncompliance.assert_not_called()
+    player.on_client_state.assert_called_once_with(message.payload)
+
+
+@pytest.mark.asyncio
 async def test_strict_rejection_applies_no_side_effects() -> None:
     """A rejected client/state does not change availability before the rejection."""
     conn, client = _conn_with_client()

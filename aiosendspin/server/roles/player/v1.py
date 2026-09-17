@@ -61,6 +61,8 @@ if TYPE_CHECKING:
 
 
 BUFFER_TRACKER_RESET_DELAY_S = 2.0
+# Largest required_lead_time_ms / min_buffer_ms the server honours; larger values are clamped.
+MAX_TIMING_PARAMETER_MS = 30_000
 
 
 @dataclass
@@ -494,12 +496,12 @@ class PlayerV1Role(Role):
         return max(self.output_delay_ms, 0) * 1_000
 
     def get_required_lead_time_us(self) -> int:
-        """Return reported startup lead time in microseconds."""
-        return max(self.required_lead_time_ms, 0) * 1_000
+        """Return reported startup lead time in microseconds, clamped to the server maximum."""
+        return min(max(self.required_lead_time_ms, 0), MAX_TIMING_PARAMETER_MS) * 1_000
 
     def get_min_buffer_us(self) -> int:
-        """Return reported minimum ongoing buffer duration in microseconds."""
-        return max(self.min_buffer_ms, 0) * 1_000
+        """Return reported minimum buffer in microseconds, clamped to the server maximum."""
+        return min(max(self.min_buffer_ms, 0), MAX_TIMING_PARAMETER_MS) * 1_000
 
     def get_output_delay_ms(self) -> int:
         """Return output delay for protocol API."""
@@ -739,12 +741,14 @@ class PlayerV1Role(Role):
             and self.required_lead_time_ms != state.required_lead_time_ms
         ):
             self.required_lead_time_ms = state.required_lead_time_ms
+            self._log_if_clamped("required_lead_time_ms", state.required_lead_time_ms)
             self.emit_client_event(
                 RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
             )
 
         if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
             self.min_buffer_ms = state.min_buffer_ms
+            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms)
             self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
         self._apply_state_format(state)
@@ -904,6 +908,12 @@ class PlayerV1Role(Role):
             and self._effective_format() != before
         ):
             self._begin_format_transition()
+
+    def _log_if_clamped(self, name: str, value: int) -> None:
+        if value > MAX_TIMING_PARAMETER_MS:
+            self._client._logger.debug(  # noqa: SLF001
+                "Clamping %s=%s to %s ms", name, value, MAX_TIMING_PARAMETER_MS
+            )
 
     def _legacy_hello_commands(self) -> list[PlayerCommand] | None:
         """Return the commands a pre-#177 hello declared, or None when it declared none."""
