@@ -11,10 +11,16 @@ from aiosendspin.audio.format import AudioFormat, _convert_s24_to_s32
 from aiosendspin.models.types import AudioCodec
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from aiosendspin.models.player import SupportedAudioFormat
 
     from .client import SendspinClient
     from .connection import SendspinConnection
+
+# Capture older than this is stall backlog and is dropped instead of sent. It must exceed
+# the 150 ms chunk limit plus encoder framing and the usual capture latency.
+MAX_CAPTURE_BACKLOG_US = 500_000
 
 
 class SourceCapture:
@@ -97,21 +103,21 @@ class SourceCapture:
             raise RuntimeError("SourceCapture.start() must be called before feed()")
         if not pcm:
             return
-        anchor = capture_timestamp_us if capture_timestamp_us is not None else self._client.now_us()
+        now_us = self._client.now_us()
+        anchor = capture_timestamp_us if capture_timestamp_us is not None else now_us
         if len(pcm) % self._frame_stride:
             raise ValueError("pcm length must be a whole number of frames")
-        self._capture_spans.append((len(pcm) // self._frame_stride, anchor))
+        samples = len(pcm) // self._frame_stride
+        stale_before_us = now_us - MAX_CAPTURE_BACKLOG_US
+        if anchor + samples * 1_000_000 // self._format.sample_rate < stale_before_us:
+            return
+        self._capture_spans.append((samples, anchor))
         encoder_pcm = (
             _convert_s24_to_s32(pcm)
             if self._codec is AudioCodec.FLAC and self._format.bit_depth == 24
             else pcm
         )
-        for frame, _frame_duration_us in self._encoder.process(encoder_pcm, anchor, 0):
-            timestamp_us = self._connection.compute_source_timestamp(
-                self._next_capture_timestamp() - self._encoder.lookahead_us
-            )
-            await self._connection.send_source_chunk(frame, timestamp_us=timestamp_us)
-            self._consume_capture_samples(self._encoder.frame_samples)
+        await self._send_frames(self._encoder.process(encoder_pcm, anchor, 0), stale_before_us)
 
     async def stop(self) -> None:
         """Flush the encoder and end the input stream."""
@@ -120,17 +126,25 @@ class SourceCapture:
         try:
             if not self._connection.is_source_stream_active():
                 return
-            for frame, _frame_duration_us in self._encoder.flush():
-                timestamp_us = self._connection.compute_source_timestamp(
-                    self._next_capture_timestamp() - self._encoder.lookahead_us
-                )
-                await self._connection.send_source_chunk(frame, timestamp_us=timestamp_us)
-                self._consume_capture_samples(self._encoder.frame_samples)
+            await self._send_frames(
+                self._encoder.flush(), self._client.now_us() - MAX_CAPTURE_BACKLOG_US
+            )
             await self._connection.send_client_stream_end()
         finally:
             self._encoder.reset()
             self._capture_spans.clear()
             self._started = False
+
+    async def _send_frames(self, frames: Iterable[tuple[bytes, int]], stale_before_us: int) -> None:
+        """Send encoded frames, skipping those captured before ``stale_before_us``."""
+        for frame, _frame_duration_us in frames:
+            captured_us = self._next_capture_timestamp()
+            if captured_us >= stale_before_us:
+                timestamp_us = self._connection.compute_source_timestamp(
+                    captured_us - self._encoder.lookahead_us
+                )
+                await self._connection.send_source_chunk(frame, timestamp_us=timestamp_us)
+            self._consume_capture_samples(self._encoder.frame_samples)
 
     def _next_capture_timestamp(self) -> int:
         if self._capture_spans:
