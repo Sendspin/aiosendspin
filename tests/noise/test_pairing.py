@@ -752,6 +752,31 @@ async def test_pairing_psk_server_always_discards_a_wrapped_finalize(
     assert server_record.psk == client_record.psk
 
 
+async def test_pairing_psk_finalize_with_both_psk_fields_is_protocol_error() -> None:
+    """A Pairing PSK finalize carrying ``wrapped_psk`` too persists nothing."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    await client_ews.send_str(
+        ClientPairFinalizeMessage(
+            payload=ClientPairFinalizePayload(
+                long_term_psk=b64url_encode(generate_psk()), wrapped_psk=b64url_encode(bytes(48))
+            )
+        ).to_json()
+    )
+    with pytest.raises(PairingError, match="both long_term_psk and wrapped_psk") as excinfo:
+        await run_pairing_psk_server(
+            server_ews, pairing_index=1, client_id="client-A", store=server_store
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
+    assert server_raw.sent == []
+
+
 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
 async def test_pairing_psk_server_accepts_a_legacy_finalize_first_attempt() -> None:
     """With ``on_legacy_finalize`` set, a finalize before any init is this attempt's."""
@@ -1703,6 +1728,40 @@ async def test_static_pairing_code_wraps_under_the_round_one_sid() -> None:
     )
     assert server_record is not None
     assert server_record.psk == psk
+
+
+async def test_pairing_code_finalize_with_both_psk_fields_is_protocol_error() -> None:
+    """A validly wrapped finalize that also carries ``long_term_psk`` persists nothing."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    sid = _pake_sid(_HANDSHAKE_HASH, 0, 1)
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    async def client() -> None:
+        cpace = await _honest_pake_to_finalize(client_ews, sid=sid)
+        finalize = ClientPairFinalizeMessage.from_json(
+            _psk_finalize_wrapped(sid, cpace, generate_psk())
+        )
+        finalize.payload.long_term_psk = b64url_encode(generate_psk())
+        await client_ews.send_str(finalize.to_json())
+
+    with pytest.raises(PairingError, match="both long_term_psk and wrapped_psk") as excinfo:
+        await asyncio.gather(
+            run_static_pairing_code_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_code_provider=provide,
+                client_id="client-A",
+                store=server_store,
+            ),
+            client(),
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
 
 
 # DEPRECATED(spec-pr-237): remove in aiosendspin <version>

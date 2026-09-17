@@ -649,6 +649,8 @@ def _unwrap_psk(
     suite: NoiseCipherSuite, payload: ClientPairFinalizePayload, wrap_key: bytes | None
 ) -> bytes:
     """Extract the PSK from ``client/pair-finalize``, unwrapping when ``wrap_key`` is set."""
+    if payload.long_term_psk is not None and payload.wrapped_psk is not None:
+        raise PairingError("client/pair-finalize carries both long_term_psk and wrapped_psk")
     if wrap_key is None:
         if payload.long_term_psk is None:
             raise PairingError("client/pair-finalize is missing long_term_psk")
