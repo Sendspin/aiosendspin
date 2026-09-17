@@ -186,15 +186,19 @@ async def run_pairing_psk_client(
     pairing_index: int,
     server_id: str,
     store: ClientPairingStore,
+    on_finalize: Callable[[], None] | None = None,
 ) -> None:
-    """Run the client side of the Pairing PSK flow through finalize."""
+    """Run the client side of the Pairing PSK flow through finalize.
+
+    ``on_finalize`` is called just before ``client/pair-finalize`` is sent.
+    """
     async with _client_timeout(ws):
         await ws.send_str(
             ClientPairInitMessage(
                 payload=ClientPairInitPayload(pairing_index=pairing_index),
             ).to_json(),
         )
-        await _finalize_client(ws, server_id=server_id, store=store)
+        await _finalize_client(ws, server_id=server_id, store=store, on_finalize=on_finalize)
 
 
 async def run_pairing_psk_server(
@@ -283,8 +287,12 @@ async def run_dynamic_pairing_code_client(
     pairing_code_emitter: PairingCodeEmitter,
     server_id: str,
     store: ClientPairingStore,
+    on_finalize: Callable[[], None] | None = None,
 ) -> None:
-    """Run the client side of the dynamic-pairing-code flow through finalize."""
+    """Run the client side of the dynamic-pairing-code flow through finalize.
+
+    ``on_finalize`` is called just before ``client/pair-finalize`` is sent.
+    """
     nonce_b = pairing_code_mod.generate_nonce()
     async with _client_timeout(ws):
         await ws.send_str(
@@ -342,6 +350,7 @@ async def run_dynamic_pairing_code_client(
             server_id=server_id,
             store=store,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
+            on_finalize=on_finalize,
         )
 
 
@@ -445,8 +454,11 @@ async def run_static_pairing_code_client(
     static_pairing_code: str,
     server_id: str,
     store: ClientPairingStore,
+    on_finalize: Callable[[], None] | None = None,
 ) -> None:
     """Run the client side of the static-pairing-code flow through finalize.
+
+    ``on_finalize`` is called just before ``client/pair-finalize`` is sent.
 
     The caller has opened the pairing window.
     """
@@ -471,6 +483,7 @@ async def run_static_pairing_code_client(
             server_id=server_id,
             store=store,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
+            on_finalize=on_finalize,
         )
 
 
@@ -602,10 +615,12 @@ async def _finalize_client(
     server_id: str,
     store: ClientPairingStore,
     wrap_key: bytes | None = None,
+    on_finalize: Callable[[], None] | None = None,
 ) -> None:
     """Send ``client/pair-finalize``, wrapping the PSK when ``wrap_key`` is set.
 
-    Pairing-code flows set ``wrap_key``. The record is persisted on the server's ack.
+    Pairing-code flows set ``wrap_key``. ``on_finalize`` is called just before the send, from
+    which point the server may store the record. The record is persisted on the server's ack.
     """
     psk, record = await store.resolve_pairing_outcome(server_id=server_id)
     if wrap_key is None:
@@ -613,6 +628,8 @@ async def _finalize_client(
     else:
         wrapped = _wrap_aead(ws.session.suite, wrap_key).encrypt(_WRAP_NONCE, psk, None)
         payload = ClientPairFinalizePayload(wrapped_psk=b64url_encode(wrapped))
+    if on_finalize is not None:
+        on_finalize()
     await ws.send_str(ClientPairFinalizeMessage(payload=payload).to_json())
     await _receive_pairing(ws, ServerPairFinalizeMessage)
     if record is not None:

@@ -354,6 +354,9 @@ class SendspinConnection:
         self._selected_pairing: ActivatePairing | None = None
         self._pairing_index = 0
         self._pairing_attempt_in_progress = False
+        # Whether cancel_pairing may still end the attempt; cleared once it is finalizing or
+        # releasing its out-channels.
+        self._pairing_cancellable = False
         self._out_channel_suspended = False
         self._logged_static_pairing_code_dropped = False
         self._exchange_in_progress = False
@@ -636,6 +639,7 @@ class SendspinConnection:
         """Start the attempt the current pairing activation admits, alongside other traffic."""
         assert self._ws is not None
         self._pairing_index += 1
+        self._pairing_cancellable = True
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_queue = queue
         self._pairing_task = self._client.loop.create_task(
@@ -684,7 +688,11 @@ class SendspinConnection:
         if method is PairMethod.PAIRING_PSK:
             with self._attempt_in_progress():
                 await run_pairing_psk_client(
-                    ws, pairing_index=pairing_index, server_id=self._server_id, store=store
+                    ws,
+                    pairing_index=pairing_index,
+                    server_id=self._server_id,
+                    store=store,
+                    on_finalize=self._end_cancellability,
                 )
             return
         assert self._handshake_hash is not None
@@ -702,6 +710,7 @@ class SendspinConnection:
                         static_pairing_code=static_pairing_code,
                         server_id=self._server_id,
                         store=store,
+                        on_finalize=self._end_cancellability,
                     )
             except LocalPairingAbortError as err:
                 # The client aborts with pairing_code_mismatch only when server_kc fails.
@@ -710,14 +719,14 @@ class SendspinConnection:
                 raise
             self._client.record_pairing_window_attempt(self, paired=True)
             return
-        # Dynamic pairing code is held back only at the round limit, until an operator action.
         pairing_format = await self._validate_pairing_format(pairing.format)
-        if await store.is_pairing_round_limit_reached():
-            await self._gate_on_pairing_window(ws, pairing_index)
-            await store.reset_pairing_rounds()
-            # The operator action is spent on lifting the hold-back.
-            self._client.close_pairing_window()
         try:
+            # Dynamic pairing code is held back only at the round limit, until an operator action.
+            if await store.is_pairing_round_limit_reached():
+                await self._gate_on_pairing_window(ws, pairing_index)
+                await store.reset_pairing_rounds()
+                # The operator action is spent on lifting the hold-back.
+                self._client.close_pairing_window()
             with self._attempt_in_progress():
                 await run_dynamic_pairing_code_client(
                     ws,
@@ -729,9 +738,15 @@ class SendspinConnection:
                     ),
                     server_id=self._server_id,
                     store=store,
+                    on_finalize=self._end_cancellability,
                 )
         finally:
+            self._end_cancellability()
             await self._emit_pairing_code(None, pairing_format=pairing_format)
+
+    def _end_cancellability(self) -> None:
+        """Let the attempt in progress run to its own end, past ``cancel_pairing``."""
+        self._pairing_cancellable = False
 
     @contextmanager
     def _attempt_in_progress(self) -> Iterator[None]:
@@ -930,8 +945,24 @@ class SendspinConnection:
         # A goodbye precedes disconnect, so it must reach the wire even mid-exchange.
         await self._send_message(message.to_json(), force=True)
 
+    async def cancel_pairing(self) -> None:
+        """Cancel the pairing attempt in progress, as on operator cancellation.
+
+        Ends the attempt, whether started or awaiting a pairing window, closes the pairing
+        window and sends ``pair/abort`` with reason ``user_cancelled``. The connection stays
+        open. A no-op when no attempt is in progress, or once it has sent
+        ``client/pair-finalize`` or is releasing its out-channels: it then runs to its own end.
+        Must not be called from a ``PairingSupport`` callback, which runs inside the attempt.
+        """
+        if self._pairing_task is None or not self._pairing_cancellable:
+            return
+        self._client.close_pairing_window()
+        # Ending the attempt clears its out-channels and stops its sends before the abort.
+        await self._cancel_pairing_attempt()
+        await self.send_pair_abort(PairAbortReason.USER_CANCELLED)
+
     async def send_pair_abort(self, reason: PairAbortReason) -> None:
-        """Send a pair/abort to the server (for a pairing connection lost to arbitration)."""
+        """Send a pair/abort to the server, even while an in-band exchange owns the wire."""
         if not self.connected:
             return
         message = PairAbortMessage(payload=PairAbortPayload(reason=reason))

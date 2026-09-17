@@ -2249,9 +2249,12 @@ async def _legacy_pairing_psk_client(
     pairing_index: int,  # noqa: ARG001
     server_id: str,
     store: ClientPairingStore,
+    on_finalize: Callable[[], None] | None = None,
 ) -> None:
     """Pairing PSK client that goes straight to client/pair-finalize."""
-    await pairing_module._finalize_client(ws, server_id=server_id, store=store)  # noqa: SLF001
+    await pairing_module._finalize_client(  # noqa: SLF001
+        ws, server_id=server_id, store=store, on_finalize=on_finalize
+    )
 
 
 async def _staged_pairing_psk_stores(
@@ -2477,6 +2480,7 @@ class _AbandonedPairingPskClient:
         pairing_index: int,
         server_id: str,  # noqa: ARG002
         store: ClientPairingStore,  # noqa: ARG002
+        on_finalize: Callable[[], None] | None = None,  # noqa: ARG002
     ) -> None:
         if self._stale is None:
             self._stale = asyncio.create_task(self._send_stale(ws, pairing_index))

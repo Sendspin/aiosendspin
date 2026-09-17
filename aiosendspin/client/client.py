@@ -556,6 +556,19 @@ class SendspinClient:
         self._pairing_window_deadline = self._loop.time() + _PAIRING_WINDOW_LIFETIME_S
         self._pairing_window_opened.set()
 
+    async def cancel_pairing(self) -> None:
+        """Cancel the pairing attempt on the admitted connection, as on operator cancellation.
+
+        Sends ``pair/abort`` with reason ``user_cancelled``, closes the pairing window and
+        clears the pairing-code out-channels; the connection stays open. Pairing-abort
+        listeners are not called, since the caller initiated the cancellation. A no-op when
+        no attempt is running or awaiting a pairing window, or once the attempt has sent
+        ``client/pair-finalize``: it then completes. Must not be called from a
+        ``PairingSupport`` callback, which runs inside the attempt.
+        """
+        if self._admitted_connection is not None:
+            await self._admitted_connection.cancel_pairing()
+
     async def set_unpaired_access(self, *, enabled: bool) -> None:
         """Persist whether this client admits unpaired access.
 
