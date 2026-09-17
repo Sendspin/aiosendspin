@@ -1157,6 +1157,31 @@ async def test_cancel_pairing_ends_an_attempt_awaiting_a_window(method: PairMeth
         await connection.disconnect()
 
 
+async def test_cancel_pairing_before_the_attempt_first_runs() -> None:
+    """An attempt cancelled before its first step leaves no stale task behind."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.DYNAMIC_PAIRING_CODE)
+        )
+        assert connection._pairing_task is not None  # noqa: SLF001
+
+        # No await precedes the cancellation, so the attempt has not been scheduled yet.
+        await connection._client.cancel_pairing()  # noqa: SLF001
+
+        assert connection._pairing_task is None  # noqa: SLF001
+        assert connection._pairing_queue is None  # noqa: SLF001
+        assert await _next_non_time_message(server_ews) == {
+            "type": "pair/abort",
+            "payload": {"reason": "user_cancelled"},
+        }
+        assert connection.connected
+        assert observer.aborts == []
+    finally:
+        await connection.disconnect()
+
+
 async def test_cancel_pairing_after_finalize_lets_the_attempt_complete() -> None:
     """Once client/pair-finalize is out the server may have stored the record, so it pairs."""
     observer = _CancelObserver()

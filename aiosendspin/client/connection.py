@@ -653,6 +653,10 @@ class SendspinConnection:
             return
         task.cancel()
         await asyncio.wait((task,))
+        # A task cancelled before its first step never ran the attempt's own cleanup.
+        if self._pairing_task is task:
+            self._pairing_task = None
+            self._pairing_queue = None
 
     async def _pair(self, ws: EncryptedWebSocket, pairing_index: int) -> None:
         """Run one pairing attempt; a non-closing abort leaves the connection in pairing.
