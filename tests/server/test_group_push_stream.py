@@ -145,12 +145,12 @@ class TestGroupStartStream:
         assert group.state == PlaybackStateType.STOPPED
 
     @pytest.mark.asyncio
-    async def test_group_stop_freezes_metadata_progress(
+    async def test_group_stop_resets_metadata_progress(
         self,
         mock_server: MagicMock,
         mock_client: MagicMock,
     ) -> None:
-        """stop() should snapshot current progress before the stream becomes inactive."""
+        """stop() should report position 0 at the stop, leaving other fields intact."""
         group = SendspinGroup(mock_server, mock_client)
         metadata_role = group.group_role("metadata")
         assert isinstance(metadata_role, MetadataGroupRole)
@@ -170,7 +170,95 @@ class TestGroupStartStream:
         await group.stop()
 
         assert metadata_role.metadata is not None
-        assert metadata_role.metadata.track_progress == 40_000
+        assert metadata_role.metadata.title == "Test"
+        assert metadata_role.metadata.track_duration == 180_000
+        assert metadata_role.metadata.track_progress == 0
+        assert metadata_role.metadata.playback_speed == 0
+        assert metadata_role.metadata.timestamp_us == 1_010_000_000
+
+    @pytest.mark.asyncio
+    async def test_group_stop_while_paused_resets_metadata_progress(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop() should reset a paused position, which does not advance on its own."""
+        group = SendspinGroup(mock_server, mock_client)
+        metadata_role = group.group_role("metadata")
+        assert isinstance(metadata_role, MetadataGroupRole)
+
+        group.start_stream()
+        metadata_role.set_metadata(
+            Metadata(
+                title="Test",
+                track_progress=30_000,
+                track_duration=180_000,
+                playback_speed=0,
+            )
+        )
+
+        mock_server.loop.time.return_value = 1010.0
+
+        await group.stop()
+
+        assert metadata_role.metadata is not None
+        assert metadata_role.metadata.track_progress == 0
+        assert metadata_role.metadata.playback_speed == 0
+
+    @pytest.mark.asyncio
+    async def test_group_stop_without_progress_leaves_metadata_untouched(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop() should publish no metadata state when there is no position to reset."""
+        group = SendspinGroup(mock_server, mock_client)
+        metadata_role = group.group_role("metadata")
+        assert isinstance(metadata_role, MetadataGroupRole)
+
+        group.start_stream()
+        metadata_role.set_metadata(Metadata(title="Test"))
+        member = MagicMock()
+        metadata_role._members = [member]  # noqa: SLF001
+
+        await group.stop()
+
+        member.send_message.assert_not_called()
+        assert metadata_role.metadata is not None
+        assert metadata_role.metadata.title == "Test"
+        assert metadata_role.metadata.track_progress is None
+
+    @pytest.mark.asyncio
+    async def test_second_group_stop_publishes_nothing(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """A second stop() is a no-op and publishes no further metadata state."""
+        group = SendspinGroup(mock_server, mock_client)
+        metadata_role = group.group_role("metadata")
+        assert isinstance(metadata_role, MetadataGroupRole)
+
+        group.start_stream()
+        metadata_role.set_metadata(
+            Metadata(
+                title="Test",
+                track_progress=30_000,
+                track_duration=180_000,
+                playback_speed=1000,
+            )
+        )
+        await group.stop()
+
+        member = MagicMock()
+        metadata_role._members = [member]  # noqa: SLF001
+        mock_server.loop.time.return_value = 1020.0
+
+        assert await group.stop() is False
+
+        member.send_message.assert_not_called()
+        assert metadata_role.metadata is not None
+        assert metadata_role.metadata.track_progress == 0
         assert metadata_role.metadata.playback_speed == 0
 
     def test_multiple_start_stream_returns_new_instances(

@@ -1078,6 +1078,20 @@ async def test_current_track_position_formula(
     assert connection.current_track_position() == expected
 
 
+async def test_current_track_position_after_stop_reset_is_zero() -> None:
+    """The state a stopped group sends reads as position 0, and does not count up."""
+    connection, clock = _position_connection(_progress_metadata(30_000))
+    assert connection.current_track_position() == 32_000
+
+    connection._handle_server_state(  # noqa: SLF001
+        ServerStatePayload(metadata=_progress_metadata(0, playback_speed=0, timestamp=6_000_000))
+    )
+
+    assert connection.current_track_position() == 0
+    clock.advance_us(5_000_000)
+    assert connection.current_track_position() == 0
+
+
 async def test_current_track_position_ignores_scheduled_metadata() -> None:
     """Scheduled metadata gives no position until it takes effect."""
     connection, clock = _position_connection(_progress_metadata(30_000))

@@ -70,6 +70,27 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
             )
         )
 
+    def reset_progress(self) -> None:
+        """Report the playback position as 0 from now and stop client-side extrapolation.
+
+        Unlike `update`, the reset is sent even when the position is already close to 0.
+        Nothing is sent when there is no position to report, or it already reads 0 while
+        stopped; a scheduled metadata update is cancelled in every case.
+        """
+        metadata = self.metadata
+        if metadata is None or metadata.track_progress is None:
+            self.cancel_scheduled()
+            return
+
+        if metadata.track_progress == 0 and metadata.playback_speed == 0:
+            # The position a client computes is already 0, so there is no change to convey.
+            self.cancel_scheduled()
+            return
+
+        self._apply_metadata(
+            replace(metadata, track_progress=0, playback_speed=0, timestamp_us=None), force=True
+        )
+
     def set_metadata(self, metadata: Metadata | None) -> None:
         """Set metadata and push the full metadata state to all subscribed roles.
 
@@ -79,9 +100,9 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         Metadata whose `timestamp_us` is in the future is scheduled to take effect then,
         replacing any metadata already scheduled. It is sent to clients at most 20
         seconds ahead, and `MetadataUpdatedEvent` fires now, carrying that timestamp.
-        Metadata taking effect now cancels scheduled metadata; so do `update()` and
-        `seek()`. To show two tracks in sequence, schedule the second only after the first
-        took effect.
+        Metadata taking effect now cancels scheduled metadata; so do `update()`, `seek()`
+        and `reset_progress()`. To show two tracks in sequence, schedule the second only after
+        the first took effect.
         """
         self._apply_metadata(metadata, force=False)
 
