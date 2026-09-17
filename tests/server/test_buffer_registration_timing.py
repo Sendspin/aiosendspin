@@ -101,6 +101,7 @@ async def test_buffer_tracker_counts_from_transmission_start() -> None:  # noqa:
     hello = type("Hello", (), {})()
     hello.client_id = "p1"
     hello.name = "p1"
+    hello.device_info = None
     hello.player_support = ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(

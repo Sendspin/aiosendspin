@@ -31,7 +31,7 @@ from aiosendspin.models.types import (
 from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.util import create_task
 
-from .compliance import ClientComplianceError
+from .compliance import ClientComplianceError, describe_client, noncompliance_subject
 from .events import ClientEvent, ClientGroupChangedEvent
 from .roles import Role
 from .roles.base import BinaryHandling
@@ -103,6 +103,8 @@ class SendspinClient:
         self._client_id = client_id
         self._name = client_id
         self._info: ClientHelloPayload | None = None
+        # Operator-facing identity for log lines, replaced from every hello.
+        self._description = describe_client(None, client_id)
         self._negotiated_role_ids: list[str] = []
         self._roles: dict[str, Role] = {}
         # Cached tuple of active roles, rebuilt when the role set changes.
@@ -151,15 +153,17 @@ class SendspinClient:
 
     def flag_noncompliance(self, reason: str) -> None:
         """Log a tolerated spec violation once, or reject it when the server is strict."""
+        subject = noncompliance_subject(self._description)
         if not self._server.allow_noncompliant_clients:
-            self._logger.error("rejecting non-compliant client: %s", reason)
+            self._logger.error("rejecting %s: %s", subject, reason)
             raise ClientComplianceError(reason)
         # Recurring deviations (e.g. per client/state) would otherwise log every
-        # message, so log each distinct reason only once.
+        # message, so log each distinct reason only once. The subject names the client,
+        # not the deviation, so it takes no part in the dedupe.
         if reason in self._noncompliance_logged:
             return
         self._noncompliance_logged.add(reason)
-        self._logger.warning("non-compliant client: %s", reason)
+        self._logger.warning("%s: %s", subject, reason)
 
     @property
     def client_id(self) -> str:
@@ -791,6 +795,7 @@ class SendspinClient:
     ) -> None:
         """Store hello identity/capabilities with optional explicit negotiated roles."""
         self._info = client_info
+        self._description = describe_client(client_info, self._client_id)
         # A group with no name of its own reports its founding member's, so this device
         # learning its own name can change what its whole group is called.
         group = self._group

@@ -111,6 +111,7 @@ def _make_connected_player(
     hello = type("Hello", (), {})()
     hello.client_id = client_id
     hello.name = client_id
+    hello.device_info = None
     hello.player_support = ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(

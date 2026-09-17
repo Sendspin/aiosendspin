@@ -30,6 +30,7 @@ def _bare_connection() -> SendspinConnection:
     conn._logger = logging.getLogger("test")  # noqa: SLF001
     conn._management_waiter = None  # noqa: SLF001
     conn._client = None  # noqa: SLF001
+    conn._hello_description = ""  # noqa: SLF001
     conn._server = SimpleNamespace(allow_noncompliant_clients=True)  # type: ignore[assignment]  # noqa: SLF001
     return conn
 
