@@ -21,6 +21,18 @@ def is_valid_static_pairing_code(code: str) -> bool:
     return len(code) == STATIC_DIGITS and code.isascii() and code.isdigit()
 
 
+def format_pairing_code(code: str) -> str:
+    """Return ``code`` grouped for presentation: ``123-456`` or ``1234-5678``.
+
+    Raises ``ValueError`` unless ``code`` is 6 or 8 ASCII decimal digits.
+    """
+    if len(code) not in (DYNAMIC_DIGITS, STATIC_DIGITS) or not (code.isascii() and code.isdigit()):
+        msg = f"pairing code must be {DYNAMIC_DIGITS} or {STATIC_DIGITS} ASCII digits"
+        raise ValueError(msg)
+    half = len(code) // 2
+    return f"{code[:half]}-{code[half:]}"
+
+
 def strip_separators(code: str) -> str:
     """Return ``code`` without the spaces and hyphens an operator may type between groups."""
     return code.replace(" ", "").replace("-", "")

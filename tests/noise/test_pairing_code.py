@@ -16,6 +16,7 @@ from aiosendspin.noise.pairing_code import (
     commit,
     derive_digits,
     derive_qr_code,
+    format_pairing_code,
     generate_nonce,
     verify_commit,
 )
@@ -86,3 +87,31 @@ def test_size_validation() -> None:
         derive_digits(H, b"short", NONCE_B)
     with pytest.raises(ValueError, match="nonce_b"):
         derive_qr_code(H, NONCE_A, b"short")
+
+
+@pytest.mark.parametrize(
+    ("code", "grouped"),
+    [("123456", "123-456"), ("12345678", "1234-5678"), ("000000", "000-000")],
+)
+def test_format_pairing_code_groups_the_digits(code: str, grouped: str) -> None:
+    """The dynamic code is presented 3-3 and the static one 4-4."""
+    assert format_pairing_code(code) == grouped
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "",
+        "12345",
+        "1234567",
+        "123456789",
+        "123-456",
+        "12345a",
+        "\u0661\u0662\u0663\u0664\u0665\u0666",  # Arabic-Indic digits
+        "\uff11\uff12\uff13\uff14\uff15\uff16",  # fullwidth digits
+    ],
+)
+def test_format_pairing_code_rejects_anything_but_6_or_8_ascii_digits(code: str) -> None:
+    """Other lengths, separators and non-ASCII digits are not a pairing code."""
+    with pytest.raises(ValueError, match="ASCII digits"):
+        format_pairing_code(code)

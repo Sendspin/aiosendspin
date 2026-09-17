@@ -129,6 +129,7 @@ from aiosendspin.noise.pairing import (
     run_pairing_psk_client,
     run_static_pairing_code_client,
 )
+from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 
@@ -882,7 +883,8 @@ class SendspinConnection:
             return
         emissions = []
         if self._client.pairing_code_display is not None:
-            emissions.append(self._client.pairing_code_display(pairing_code))
+            grouped = format_pairing_code(pairing_code) if pairing_code is not None else None
+            emissions.append(self._client.pairing_code_display(pairing_code, grouped=grouped))
         if self._client.pairing_code_speaker is not None:
             emissions.append(
                 self._client.pairing_code_speaker(pairing_code, languages=self._server_languages())

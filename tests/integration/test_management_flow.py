@@ -441,7 +441,7 @@ async def test_open_pairing_window_round_trip() -> None:
     client_store = InMemoryClientPairingStore()
     await _seed_pairing(server, server_store, client_store, identity.peer_id)
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     async with _serve(server) as url:

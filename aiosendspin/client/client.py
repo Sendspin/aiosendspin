@@ -423,8 +423,9 @@ class SendspinClient:
     def pairing_code_display(self) -> PairingCodeDisplay | None:
         """Out-channel that surfaces a derived pairing code, if configured.
 
-        Called with the pairing code string when one is derived, and with ``None`` when the
-        pairing exchange ends (success or failure) so the channel can clear.
+        Called with the pairing code string and its grouped form when one is derived, and with
+        ``None`` for both when the pairing exchange ends (success or failure) so the channel can
+        clear.
         """
         return (
             self._pairing_support.pairing_code_display

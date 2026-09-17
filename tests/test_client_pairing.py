@@ -192,7 +192,7 @@ def _pairing_connection(pairing_support: PairingSupport) -> tuple[SendspinConnec
 def _dynamic_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
     """Build a connection whose client offers the dynamic pairing code."""
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     return _pairing_connection(PairingSupport(pairing_code_display=display))
@@ -581,7 +581,7 @@ async def test_declining_static_pairing_code_drops_it_from_implemented_methods()
 async def test_hello_descriptors_carry_the_wired_channels_and_locations() -> None:
     """Out-channels follow the wired callbacks, and locations ride the static-secret methods."""
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
@@ -614,7 +614,7 @@ async def test_pairing_code_speaker_receives_the_server_hello_languages() -> Non
     spoken: list[tuple[str | None, tuple[str, ...]]] = []
     displayed: list[str | None] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         displayed.append(pairing_code)
 
     async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
@@ -635,6 +635,19 @@ async def test_pairing_code_speaker_receives_the_server_hello_languages() -> Non
     await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
     assert spoken == [("123456", ("ca", "en"))]
     assert displayed == ["123456"]
+
+
+async def test_pairing_code_display_receives_the_grouped_code() -> None:
+    """The display gets the raw code with its 3-3 grouping, and ``None`` for both on clear."""
+    displayed: list[tuple[str | None, str | None]] = []
+
+    async def display(pairing_code: str | None, *, grouped: str | None) -> None:
+        displayed.append((pairing_code, grouped))
+
+    connection, _ws = _pairing_connection(PairingSupport(pairing_code_display=display))
+    await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
+    await connection._emit_pairing_code(None, pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
+    assert displayed == [("123456", "123-456"), (None, None)]
 
 
 async def test_pairing_code_speaker_alone_enables_dynamic_pairing_code() -> None:
@@ -845,7 +858,7 @@ async def test_finalize_ack_persists_before_the_reader_moves_on() -> None:
 async def test_malformed_pairing_message_fails_the_attempt_at_once() -> None:
     """A pairing message that does not parse reaches the attempt, which fails on it."""
 
-    async def display(_pairing_code: str | None) -> None:
+    async def display(_pairing_code: str | None, **_kwargs: object) -> None:
         return
 
     connection, server_ews = _live_connection(
@@ -938,7 +951,7 @@ async def test_out_channel_resumes_when_releasing_the_code_fails() -> None:
     """A failing release of the out-channel still resumes the suspended output."""
     events: list[bool] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is None:
             raise RuntimeError("display gone")
 
@@ -961,7 +974,7 @@ async def test_out_channel_is_suspended_while_the_code_is_emitted(
     """The suspend hook brackets the dynamic pairing code's emission."""
     events: list[object] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         events.append(pairing_code)
 
     async def suspend(active: bool) -> None:  # noqa: FBT001
@@ -1049,7 +1062,7 @@ async def test_post_pairing_activation_sends_stateless_initial_state() -> None:
 async def _connection_offering_both_code_methods() -> SendspinConnection:
     """Build a connection whose config enables both pairing-code methods."""
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     client = make_sdk_client(
