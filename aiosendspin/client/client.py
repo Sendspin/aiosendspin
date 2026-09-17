@@ -91,10 +91,12 @@ StreamStartCallback = Callable[[StreamStartMessage], None]
 
 # Callback invoked when audio streaming ends.
 # Receives list of roles to end, or None if all roles should be ended.
+# Output MUST stop and buffers MUST be cleared for those roles, also while unavailable.
 StreamEndCallback = Callable[[list[str] | None], None]
 
 # Callback invoked when stream buffers should be cleared (e.g., seek operation).
 # Receives list of roles to clear, or None if all roles should be cleared.
+# Buffered data MUST be cleared for those roles, also while unavailable.
 StreamClearCallback = Callable[[list[str] | None], None]
 
 # Callback invoked with (server_timestamp_us, audio_data, format, send_ahead) when audio
@@ -1081,6 +1083,10 @@ class SendspinClient:
     def add_stream_end_listener(self, callback: StreamEndCallback) -> Callable[[], None]:
         """Add a listener for stream end events.
 
+        The callback receives the roles that ended, or ``None`` for all. For each, the
+        embedder MUST stop output and clear its buffers. Stream end keeps arriving while
+        the client reports unavailable and MUST be handled then too.
+
         Returns:
             A function that removes this listener when called.
         """
@@ -1093,6 +1099,11 @@ class SendspinClient:
 
     def add_stream_clear_listener(self, callback: StreamClearCallback) -> Callable[[], None]:
         """Add a listener for stream clear events.
+
+        The callback receives the roles to clear, or ``None`` for all. When the player
+        role is included, the embedder MUST drop all buffered audio and continue with
+        chunks received after the clear. Stream clear keeps arriving while the client
+        reports unavailable and MUST be handled then too.
 
         Returns:
             A function that removes this listener when called.
