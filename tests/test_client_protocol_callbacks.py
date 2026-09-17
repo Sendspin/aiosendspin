@@ -223,6 +223,140 @@ async def test_sentinel_playback_activity_rejected_without_unpaired_access() -> 
     assert reason is GoodbyeReason.PAIRING_REQUIRED
 
 
+async def _admitted_connection(
+    category: PskCategory, activation: ServerActivatePayload
+) -> tuple[SendspinConnection, list[dict[str, Any]]]:
+    """Admit a live connection under ``activation`` with unpaired access enabled.
+
+    Returns the connection and the JSON messages it sends.
+    """
+    connection = await _connection(category, unpaired_access=True)
+    sent: list[dict[str, Any]] = []
+
+    async def _capture(payload: str) -> None:
+        sent.append(json.loads(payload))
+
+    connection._ws = MagicMock(closed=False, send_str=_capture, close=AsyncMock())  # noqa: SLF001
+    connection._connected = True  # noqa: SLF001
+    assert await connection._apply_activation(activation) is None  # noqa: SLF001
+    connection._client._admitted_connection = connection  # noqa: SLF001
+    return connection, sent
+
+
+@pytest.mark.parametrize(
+    "activation",
+    [
+        pytest.param(ServerActivatePayload(activities=[Activity.PLAYBACK]), id="playback"),
+        pytest.param(
+            ServerActivatePayload(activities=[], active_roles=[Roles.PLAYER.value]), id="roles"
+        ),
+        pytest.param(
+            ServerActivatePayload(
+                activities=[Activity.PLAYBACK, Activity.PAIRING],
+                active_roles=[Roles.PLAYER.value],
+                pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
+            ),
+            id="playback_and_pairing",
+        ),
+    ],
+)
+async def test_disabling_unpaired_access_closes_a_connection_relying_on_it(
+    activation: ServerActivatePayload,
+) -> None:
+    """An unpaired connection with playback or roles is closed with pairing_required."""
+    connection, sent = await _admitted_connection(PskCategory.SENTINEL, activation)
+    client = connection._client  # noqa: SLF001
+
+    await client.set_unpaired_access(enabled=False)
+
+    assert not (await client.pairing_store.get_pairing_config()).unpaired_access_enabled
+    assert sent == [{"type": "client/goodbye", "payload": {"reason": "pairing_required"}}]
+    assert not connection.connected
+    assert not client.connected
+
+
+@pytest.mark.parametrize(
+    ("category", "activation"),
+    [
+        pytest.param(
+            PskCategory.LONG_TERM,
+            ServerActivatePayload(
+                activities=[Activity.PLAYBACK], active_roles=[Roles.PLAYER.value]
+            ),
+            id="paired",
+        ),
+        pytest.param(
+            PskCategory.SENTINEL,
+            ServerActivatePayload(
+                activities=[Activity.PAIRING],
+                pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
+            ),
+            id="unpaired_pairing_only",
+        ),
+        pytest.param(
+            PskCategory.SENTINEL, ServerActivatePayload(activities=[]), id="unpaired_idle"
+        ),
+    ],
+)
+async def test_disabling_unpaired_access_keeps_a_connection_not_relying_on_it(
+    category: PskCategory, activation: ServerActivatePayload
+) -> None:
+    """A paired connection, or an unpaired one without playback or roles, stays open."""
+    connection, sent = await _admitted_connection(category, activation)
+    client = connection._client  # noqa: SLF001
+
+    await client.set_unpaired_access(enabled=False)
+
+    assert not (await client.pairing_store.get_pairing_config()).unpaired_access_enabled
+    assert sent == []
+    assert client.connected
+
+
+async def test_enabling_unpaired_access_closes_nothing() -> None:
+    """Enabling persists the setting and leaves the admitted connection alone."""
+    connection, sent = await _admitted_connection(
+        PskCategory.SENTINEL, ServerActivatePayload(activities=[Activity.PLAYBACK])
+    )
+    client = connection._client  # noqa: SLF001
+    await client.pairing_store.store_pairing_config(
+        replace(await client.pairing_store.get_pairing_config(), unpaired_access_enabled=False)
+    )
+    await client.set_unpaired_access(enabled=True)
+
+    assert (await client.pairing_store.get_pairing_config()).unpaired_access_enabled
+    assert sent == []
+    assert client.connected
+
+
+async def test_setting_unpaired_access_without_a_connection_persists_it() -> None:
+    """With no admitted connection the setting is stored and later hellos advertise it."""
+    connection = await _connection(PskCategory.SENTINEL, unpaired_access=True)
+    client = connection._client  # noqa: SLF001
+
+    await client.set_unpaired_access(enabled=False)
+
+    hello = await connection._build_client_hello()  # noqa: SLF001
+    assert hello.payload.unpaired_access is not None
+    assert hello.payload.unpaired_access.enabled is False
+
+
+async def test_unpaired_access_store_failure_closes_nothing() -> None:
+    """A failed write propagates and the connection relying on the old setting stays open."""
+    connection, sent = await _admitted_connection(
+        PskCategory.SENTINEL, ServerActivatePayload(activities=[Activity.PLAYBACK])
+    )
+    client = connection._client  # noqa: SLF001
+    client.pairing_store.store_pairing_config = AsyncMock(  # type: ignore[method-assign]
+        side_effect=OSError("disk full")
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        await client.set_unpaired_access(enabled=False)
+
+    assert sent == []
+    assert client.connected
+
+
 @pytest.mark.asyncio
 async def test_start_runs_pairing_alongside_reader_and_time_sync(
     monkeypatch: pytest.MonkeyPatch,

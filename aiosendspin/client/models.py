@@ -10,12 +10,22 @@ from aiosendspin.models.types import SECRET_LOCATIONS, AudioCodec
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-
-# Visual out-channel for a derived dynamic pairing code, cleared by a ``None`` call.
-type PairingCodeDisplay = Callable[[str | None], Awaitable[None]]
+# Longest operator message a client/pair-pending may carry.
+_PAIR_PENDING_MESSAGE_MAX_LENGTH = 200
 
 # Renders a dynamic pairing token as a QR code, cleared by a ``None`` call.
 type QRCodeDisplay = Callable[[str | None], Awaitable[None]]
+
+
+class PairingCodeDisplay(Protocol):
+    """Shows a derived dynamic pairing code on the device's visual out-channel."""
+
+    def __call__(self, pairing_code: str | None, *, grouped: str | None) -> Awaitable[None]:
+        """Show ``pairing_code``, or clear the display when it is ``None``.
+
+        ``grouped`` is the same code in its presentation form (``123-456``), which the
+        display should show; it is ``None`` exactly when ``pairing_code`` is.
+        """
 
 
 class PairingCodeSpeaker(Protocol):
@@ -47,8 +57,8 @@ class PairingSupport:
     pairing_code_display: PairingCodeDisplay | None = None
     """Visual out-channel for the derived dynamic pairing code (``digits`` format).
 
-    Called with the same code at the start of every round, and with ``None`` when the
-    pairing exchange ends so the channel can clear.
+    Called with the same code and its grouped presentation form at the start of every round,
+    and with ``None`` for both when the pairing exchange ends so the channel can clear.
     """
     pairing_code_speaker: PairingCodeSpeaker | None = None
     """Spoken out-channel for the derived dynamic pairing code, which also receives the operator's
@@ -76,12 +86,26 @@ class PairingSupport:
     player discards the audio scheduled while suspended and resumes in sync.
     """
 
+    pair_pending_message: str | None = None
+    """Optional short plain-text sentence for the operator sent in ``client/pair-pending``,
+    such as naming the pairing gesture, at most 200 characters.
+
+    The server shows it as unauthenticated text attributed to the device, never as markup.
+    """
+
     def __post_init__(self) -> None:
-        """Reject a secret location the descriptor cannot carry."""
+        """Reject a secret location the descriptor cannot carry, or an overlong message."""
         unknown = sorted(set(self.secret_locations) - SECRET_LOCATIONS)
         if unknown:
             names = ", ".join(unknown)
             raise ValueError(f"unknown secret_locations: {names}")
+        if (
+            self.pair_pending_message is not None
+            and len(self.pair_pending_message) > _PAIR_PENDING_MESSAGE_MAX_LENGTH
+        ):
+            raise ValueError(
+                f"pair_pending_message exceeds {_PAIR_PENDING_MESSAGE_MAX_LENGTH} characters"
+            )
 
 
 @dataclass(slots=True)

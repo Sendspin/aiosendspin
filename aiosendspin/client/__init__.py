@@ -1,6 +1,7 @@
 """Public interface for the Sendspin client package."""
 
 from aiosendspin.models.types import SECRET_LOCATIONS
+from aiosendspin.noise.pairing_code import format_pairing_code
 
 from .client import (
     AudioChunkCallback,
@@ -47,4 +48,5 @@ __all__ = [
     "StreamEndCallback",
     "StreamStartCallback",
     "VisualizerCallback",
+    "format_pairing_code",
 ]

@@ -7,7 +7,7 @@ import json
 import logging
 from contextlib import suppress
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from aiohttp import WSMsgType
@@ -205,7 +205,7 @@ def _pairing_connection(pairing_support: PairingSupport) -> tuple[SendspinConnec
 def _dynamic_pairing_code_connection() -> tuple[SendspinConnection, _FakeWS]:
     """Build a connection whose client offers the dynamic pairing code."""
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     return _pairing_connection(PairingSupport(pairing_code_display=display))
@@ -240,6 +240,75 @@ async def test_dynamic_attempt_at_round_limit_is_held_back() -> None:
 
     assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 1
     assert await store.pairing_round_count() == PAIRING_ROUND_LIMIT
+
+
+async def _sent_pair_pending(
+    method: PairMethod, pair_pending_message: str | None
+) -> dict[str, object]:
+    """Run an attempt of ``method`` up to its client/pair-pending and return the sent JSON."""
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        pass
+
+    connection, ws = _pairing_connection(
+        PairingSupport(pairing_code_display=display, pair_pending_message=pair_pending_message)
+    )
+    store = connection._client.pairing_store  # noqa: SLF001
+    if method is PairMethod.STATIC_PAIRING_CODE:
+        # Every static attempt is gesture-gated.
+        await store.set_static_pairing_code("12345678")
+        config = await store.get_pairing_config()
+        await store.store_pairing_config(
+            replace(config, static_pairing_code_enabled=True, dynamic_pairing_code_enabled=False)
+        )
+    else:
+        # A dynamic attempt is held back at the round limit.
+        for _ in range(PAIRING_ROUND_LIMIT):
+            await store.record_pairing_round()
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=method, format="digits" if method is PairMethod.DYNAMIC_PAIRING_CODE else None
+    )
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    ws.receive = queue.get  # type: ignore[attr-defined]
+
+    attempt = asyncio.create_task(
+        connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+    )
+    async with asyncio.timeout(1):
+        while not ws.sent:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    attempt.cancel()
+    with suppress(asyncio.CancelledError):
+        await attempt
+
+    pending: dict[str, object] = json.loads(ws.sent[0])
+    assert pending["type"] == "client/pair-pending"
+    return pending
+
+
+@pytest.mark.parametrize(
+    "method", [PairMethod.STATIC_PAIRING_CODE, PairMethod.DYNAMIC_PAIRING_CODE]
+)
+async def test_pair_pending_carries_the_configured_message(method: PairMethod) -> None:
+    """The gesture gate and the round-limit hold-back both name what the client waits for."""
+    pending = await _sent_pair_pending(method, "Press the pairing button")
+    assert pending["payload"] == {"pairing_index": 1, "message": "Press the pairing button"}
+
+
+@pytest.mark.parametrize(
+    "method", [PairMethod.STATIC_PAIRING_CODE, PairMethod.DYNAMIC_PAIRING_CODE]
+)
+async def test_pair_pending_omits_an_unconfigured_message(method: PairMethod) -> None:
+    """Without a configured message the key is left out."""
+    pending = await _sent_pair_pending(method, None)
+    assert pending["payload"] == {"pairing_index": 1}
+
+
+def test_pair_pending_message_is_limited_to_200_characters() -> None:
+    """A message the spec allows is kept whole; a longer one is refused rather than cut."""
+    assert PairingSupport(pair_pending_message="x" * 200).pair_pending_message == "x" * 200
+    with pytest.raises(ValueError, match="200 characters"):
+        PairingSupport(pair_pending_message="x" * 201)
 
 
 async def test_ungated_dynamic_attempt_starts_immediately(
@@ -594,7 +663,7 @@ async def test_declining_static_pairing_code_drops_it_from_implemented_methods()
 async def test_hello_descriptors_carry_the_wired_channels_and_locations() -> None:
     """Out-channels follow the wired callbacks, and locations ride the static-secret methods."""
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
@@ -627,7 +696,7 @@ async def test_pairing_code_speaker_receives_the_server_hello_languages() -> Non
     spoken: list[tuple[str | None, tuple[str, ...]]] = []
     displayed: list[str | None] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         displayed.append(pairing_code)
 
     async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
@@ -648,6 +717,19 @@ async def test_pairing_code_speaker_receives_the_server_hello_languages() -> Non
     await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
     assert spoken == [("123456", ("ca", "en"))]
     assert displayed == ["123456"]
+
+
+async def test_pairing_code_display_receives_the_grouped_code() -> None:
+    """The display gets the raw code with its 3-3 grouping, and ``None`` for both on clear."""
+    displayed: list[tuple[str | None, str | None]] = []
+
+    async def display(pairing_code: str | None, *, grouped: str | None) -> None:
+        displayed.append((pairing_code, grouped))
+
+    connection, _ws = _pairing_connection(PairingSupport(pairing_code_display=display))
+    await connection._emit_pairing_code("123456", pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
+    await connection._emit_pairing_code(None, pairing_format=PairingCodeFormat.DIGITS)  # noqa: SLF001
+    assert displayed == [("123456", "123-456"), (None, None)]
 
 
 async def test_pairing_code_speaker_alone_enables_dynamic_pairing_code() -> None:
@@ -858,7 +940,7 @@ async def test_finalize_ack_persists_before_the_reader_moves_on() -> None:
 async def test_malformed_pairing_message_fails_the_attempt_at_once() -> None:
     """A pairing message that does not parse reaches the attempt, which fails on it."""
 
-    async def display(_pairing_code: str | None) -> None:
+    async def display(_pairing_code: str | None, **_kwargs: object) -> None:
         return
 
     connection, server_ews = _live_connection(
@@ -947,11 +1029,323 @@ async def test_remote_abort_leaves_the_connection_in_pairing() -> None:
         await connection.disconnect()
 
 
+class _CancelObserver:
+    """Records what a cancelled attempt does to the operator-facing callbacks."""
+
+    def __init__(self) -> None:
+        self.displayed: list[tuple[str | None, str | None]] = []
+        self.suspended: list[bool] = []
+        self.prompts: list[bool] = []
+        self.aborts: list[PairAbortReason] = []
+
+    async def display(self, pairing_code: str | None, *, grouped: str | None) -> None:
+        self.displayed.append((pairing_code, grouped))
+
+    async def suspend(self, active: bool) -> None:  # noqa: FBT001
+        self.suspended.append(active)
+
+    async def prompt(self, active: bool) -> None:  # noqa: FBT001
+        self.prompts.append(active)
+
+    def support(self) -> PairingSupport:
+        return PairingSupport(
+            gesture_prompt=self.prompt,
+            pairing_code_display=self.display,
+            out_channel_suspend=self.suspend,
+        )
+
+
+def _admitted_live_connection(
+    observer: _CancelObserver,
+) -> tuple[SendspinConnection, EncryptedWebSocket]:
+    """Build a live Sentinel connection admitted by a client wired to ``observer``."""
+    connection, server_ews = _live_connection(PskCategory.SENTINEL, observer.support())
+    client = connection._client  # noqa: SLF001
+    client._admitted_connection = connection  # noqa: SLF001
+    client.add_pairing_abort_listener(observer.aborts.append)
+    return connection, server_ews
+
+
+async def _next_non_time_message(server_ews: EncryptedWebSocket) -> dict[str, Any]:
+    """Return the next JSON message the client sent, skipping time sync."""
+    async with asyncio.timeout(1):
+        while True:
+            msg = await server_ews.receive()
+            assert msg.type is WSMsgType.TEXT
+            message: dict[str, Any] = json.loads(msg.data)
+            if message["type"] != "client/time":
+                return message
+
+
+async def _assert_cancelled(connection: SendspinConnection, server_ews: EncryptedWebSocket) -> None:
+    """Cancel the attempt and check the abort, the open connection and the closed window."""
+    client = connection._client  # noqa: SLF001
+    # Concurrent cancellations send a single abort.
+    await asyncio.gather(client.cancel_pairing(), client.cancel_pairing())
+
+    assert await _next_non_time_message(server_ews) == {
+        "type": "pair/abort",
+        "payload": {"reason": "user_cancelled"},
+    }
+    assert connection._pairing_task is None  # noqa: SLF001
+    assert connection.connected
+    assert connection.is_pairing
+    assert not client.pairing_window_open
+
+    # A pairing message the server sent before seeing the abort is discarded.
+    await connection._handle_json_message(ServerPairFinalizeMessage().to_json())  # noqa: SLF001
+    assert connection.connected
+
+    await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
+    assert (await _next_non_time_message(server_ews))["type"] == "client/goodbye"
+
+
+async def test_cancel_pairing_ends_a_started_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A started attempt is aborted with user_cancelled and its displayed code is cleared."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    client = connection._client  # noqa: SLF001
+    shown = asyncio.Event()
+
+    async def fake_run(_ws: object, *, pairing_code_emitter: object, **_kwargs: object) -> None:
+        emit = cast("Callable[[str], Awaitable[None]]", pairing_code_emitter)
+        await emit("123456")
+        shown.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
+    try:
+        client.open_pairing_window()
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.DYNAMIC_PAIRING_CODE)
+        )
+        async with asyncio.timeout(1):
+            await shown.wait()
+
+        await _assert_cancelled(connection, server_ews)
+
+        assert observer.displayed == [("123456", "123-456"), (None, None)]
+        assert observer.suspended == [True, False]
+        assert observer.prompts == []
+        assert observer.aborts == []
+    finally:
+        await connection.disconnect()
+
+
+@pytest.mark.parametrize(
+    "method", [PairMethod.DYNAMIC_PAIRING_CODE, PairMethod.STATIC_PAIRING_CODE]
+)
+async def test_cancel_pairing_ends_an_attempt_awaiting_a_window(method: PairMethod) -> None:
+    """A gated attempt that sent client/pair-pending is aborted and its prompt cleared."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    store = connection._client.pairing_store  # noqa: SLF001
+    if method is PairMethod.STATIC_PAIRING_CODE:
+        await store.set_static_pairing_code("12345678")
+        config = await store.get_pairing_config()
+        await store.store_pairing_config(
+            replace(config, static_pairing_code_enabled=True, dynamic_pairing_code_enabled=False)
+        )
+    else:
+        for _ in range(PAIRING_ROUND_LIMIT):
+            await store.record_pairing_round()
+    try:
+        await connection._handle_server_activate(_pairing_activation(method))  # noqa: SLF001
+        assert (await _next_non_time_message(server_ews))["type"] == "client/pair-pending"
+        async with asyncio.timeout(1):
+            while not observer.prompts:  # noqa: ASYNC110
+                await asyncio.sleep(0)
+        assert observer.prompts == [True]
+
+        await _assert_cancelled(connection, server_ews)
+
+        assert observer.prompts == [True, False]
+        if method is PairMethod.DYNAMIC_PAIRING_CODE:
+            assert observer.displayed == [(None, None)]
+        else:
+            assert observer.displayed == []
+        assert observer.suspended == []
+        assert observer.aborts == []
+    finally:
+        await connection.disconnect()
+
+
+async def test_cancel_pairing_before_the_attempt_first_runs() -> None:
+    """An attempt cancelled before its first step leaves no stale task behind."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.DYNAMIC_PAIRING_CODE)
+        )
+        assert connection._pairing_task is not None  # noqa: SLF001
+
+        # No await precedes the cancellation, so the attempt has not been scheduled yet.
+        await connection._client.cancel_pairing()  # noqa: SLF001
+
+        assert connection._pairing_task is None  # noqa: SLF001
+        assert connection._pairing_queue is None  # noqa: SLF001
+        assert await _next_non_time_message(server_ews) == {
+            "type": "pair/abort",
+            "payload": {"reason": "user_cancelled"},
+        }
+        assert connection.connected
+        assert observer.aborts == []
+    finally:
+        await connection.disconnect()
+
+
+async def test_cancel_pairing_during_a_replacement_activation_is_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While a server/activate ends the attempt, a cancel does not abort the one it starts."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    unwinding = asyncio.Event()
+    release = asyncio.Event()
+    indexes: list[int] = []
+
+    async def fake_run(_ws: object, *, pairing_index: int, **_kwargs: object) -> None:
+        indexes.append(pairing_index)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if pairing_index == 1:
+                unwinding.set()
+                await release.wait()
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
+    activation = _pairing_activation(PairMethod.DYNAMIC_PAIRING_CODE)
+    try:
+        await connection._handle_server_activate(activation)  # noqa: SLF001
+        await asyncio.sleep(0)
+        replacing = asyncio.create_task(
+            connection._handle_server_activate(activation)  # noqa: SLF001
+        )
+        async with asyncio.timeout(1):
+            await unwinding.wait()
+
+        await connection._client.cancel_pairing()  # noqa: SLF001
+        release.set()
+        async with asyncio.timeout(1):
+            await replacing
+        await asyncio.sleep(0)
+        await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
+
+        assert indexes == [1, 2]
+        assert connection._pairing_task is not None  # noqa: SLF001
+        # No pair/abort went out before the goodbye.
+        assert (await _next_non_time_message(server_ews))["type"] == "client/goodbye"
+    finally:
+        await connection.disconnect()
+
+
+async def test_cancel_pairing_after_finalize_lets_the_attempt_complete() -> None:
+    """Once client/pair-finalize is out the server may have stored the record, so it pairs."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    connection._noise_psk = ResolvedPsk(  # noqa: SLF001
+        "psk-id", b"\x00" * 32, PskCategory.PAIRING
+    )
+    client = connection._client  # noqa: SLF001
+    store = client.pairing_store
+    pairing = generate_psk()
+    await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.PAIRING_PSK)
+        )
+        assert (await _next_non_time_message(server_ews))["type"] == "client/pair-init"
+        assert (await _next_non_time_message(server_ews))["type"] == "client/pair-finalize"
+
+        await client.cancel_pairing()
+        assert connection._pairing_task is not None  # noqa: SLF001
+
+        await connection._handle_json_message(ServerPairFinalizeMessage().to_json())  # noqa: SLF001
+        await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
+
+        assert connection._pairing_task is None  # noqa: SLF001
+        assert await store.record_by_server_id("server-1") is not None
+        # No pair/abort went out before the goodbye.
+        assert (await _next_non_time_message(server_ews))["type"] == "client/goodbye"
+    finally:
+        await connection.disconnect()
+
+
+async def test_cancel_pairing_while_releasing_the_code_lets_the_release_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt the server ended is clearing its display; a cancel does not cut that short."""
+    observer = _CancelObserver()
+    clearing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def display(pairing_code: str | None, *, grouped: str | None) -> None:
+        if pairing_code is None:
+            clearing.set()
+            await release.wait()
+        observer.displayed.append((pairing_code, grouped))
+
+    monkeypatch.setattr(observer, "display", display)
+    connection, server_ews = _admitted_live_connection(observer)
+    client = connection._client  # noqa: SLF001
+
+    async def fake_run(_ws: object, *, pairing_code_emitter: object, **_kwargs: object) -> None:
+        emit = cast("Callable[[str], Awaitable[None]]", pairing_code_emitter)
+        await emit("123456")
+        raise RemotePairingAbortError(PairAbortReason.PAIRING_CODE_MISMATCH)
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
+    try:
+        await connection._handle_server_activate(  # noqa: SLF001
+            _pairing_activation(PairMethod.DYNAMIC_PAIRING_CODE)
+        )
+        async with asyncio.timeout(1):
+            await clearing.wait()
+
+        await client.cancel_pairing()
+        release.set()
+        task = connection._pairing_task  # noqa: SLF001
+        if task is not None:
+            await asyncio.wait((task,))
+        await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
+
+        assert observer.displayed == [("123456", "123-456"), (None, None)]
+        assert observer.suspended == [True, False]
+        assert observer.aborts == [PairAbortReason.PAIRING_CODE_MISMATCH]
+        assert (await _next_non_time_message(server_ews))["type"] == "client/goodbye"
+    finally:
+        await connection.disconnect()
+
+
+async def test_cancel_pairing_without_an_attempt_is_a_noop() -> None:
+    """With no connection, or no attempt on it, nothing is sent and nothing changes."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    client = connection._client  # noqa: SLF001
+    client._admitted_connection = None  # noqa: SLF001
+    client.open_pairing_window()
+    await client.cancel_pairing()
+
+    client._admitted_connection = connection  # noqa: SLF001
+    try:
+        await client.cancel_pairing()
+        await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
+
+        # The goodbye is the first frame the server sees: no pair/abort went before it.
+        assert (await _next_non_time_message(server_ews))["type"] == "client/goodbye"
+        assert client.pairing_window_open
+        assert observer.displayed == []
+        assert connection.connected
+    finally:
+        await connection.disconnect()
+
+
 async def test_out_channel_resumes_when_releasing_the_code_fails() -> None:
     """A failing release of the out-channel still resumes the suspended output."""
     events: list[bool] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is None:
             raise RuntimeError("display gone")
 
@@ -974,7 +1368,7 @@ async def test_out_channel_is_suspended_while_the_code_is_emitted(
     """The suspend hook brackets the dynamic pairing code's emission."""
     events: list[object] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         events.append(pairing_code)
 
     async def suspend(active: bool) -> None:  # noqa: FBT001
@@ -1062,7 +1456,7 @@ async def test_post_pairing_activation_sends_stateless_initial_state() -> None:
 async def _connection_offering_both_code_methods() -> SendspinConnection:
     """Build a connection whose config enables both pairing-code methods."""
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     client = make_sdk_client(

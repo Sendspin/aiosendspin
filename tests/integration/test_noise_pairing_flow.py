@@ -564,7 +564,7 @@ async def test_live_pairing_dynamic_pairing_code() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -701,7 +701,7 @@ async def test_live_pairing_updates_connection_security_trust() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -747,7 +747,7 @@ async def test_live_pairing_method_enabled_after_hello_still_pairs() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -801,7 +801,7 @@ async def test_live_pairing_qr_code() -> None:
         if token is not None and not shown.done():
             shown.set_result(token)
 
-    async def digits_display(pairing_code: str | None) -> None:
+    async def digits_display(pairing_code: str | None, **_kwargs: object) -> None:
         digits_calls.append(pairing_code)
 
     async def speak(pairing_code: str | None, *, languages: tuple[str, ...]) -> None:
@@ -859,7 +859,7 @@ async def test_live_pairing_ignores_unrecognized_advertised_formats() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -912,7 +912,9 @@ async def test_live_pairing_unusable_advertised_formats() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=lambda _code: asyncio.sleep(0)),
+            pairing_support=PairingSupport(
+                pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+            ),
         )
         try:
             await client.connect(url)
@@ -952,7 +954,9 @@ async def test_live_pairing_dropped_unusable_descriptor_is_refused() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=lambda _code: asyncio.sleep(0)),
+            pairing_support=PairingSupport(
+                pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+            ),
         )
         try:
             await client.connect(url)
@@ -988,7 +992,9 @@ async def test_live_pairing_unoffered_format_fails_before_activation() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=lambda _code: asyncio.sleep(0)),
+            pairing_support=PairingSupport(
+                pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+            ),
         )
         try:
             await client.connect(url)
@@ -1020,7 +1026,9 @@ async def test_live_pairing_unadvertised_format_client_aborts() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=lambda _code: asyncio.sleep(0)),
+            pairing_support=PairingSupport(
+                pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+            ),
         )
         try:
             await client.connect(url)
@@ -1050,7 +1058,7 @@ async def test_live_pairing_method_disabled_after_hello_aborts() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -1122,7 +1130,7 @@ async def test_live_pairing_dynamic_pairing_code_wrong_then_retry() -> None:
     shown: asyncio.Queue[str] = asyncio.Queue()
     shown_pins: list[str] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None:
             shown_pins.append(pairing_code)
             shown.put_nowait(pairing_code)
@@ -1172,7 +1180,7 @@ async def test_live_pairing_round_limit_holds_back_until_pairing_window() -> Non
     client_store = InMemoryClientPairingStore()
     shown: asyncio.Queue[str] = asyncio.Queue()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None:
             shown.put_nowait(pairing_code)
 
@@ -1249,7 +1257,7 @@ async def test_live_pairing_invalid_operator_input_leaves_pairing() -> None:
     client_identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         pass
 
     async def typo() -> str:
@@ -1298,7 +1306,7 @@ async def _code_pairing_client(
         await store.set_static_pairing_code(_STATIC_PAIRING_CODE)
         shown.put_nowait(_STATIC_PAIRING_CODE)
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None:
             shown.put_nowait(pairing_code)
 
@@ -1470,7 +1478,7 @@ async def test_pair_retry_in_flight_does_not_fail_the_next_attempt() -> None:
     client_store = InMemoryClientPairingStore()
     shown: asyncio.Queue[str] = asyncio.Queue()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None:
             shown.put_nowait(pairing_code)
 
@@ -1538,7 +1546,7 @@ async def test_list_form_client_pairs_under_the_pre_round_sid(
     client_store = InMemoryClientPairingStore()
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -1739,7 +1747,7 @@ async def test_end_pairing_after_failed_attempt_leaves_pairing() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -1787,7 +1795,7 @@ async def test_end_pairing_during_attempt_leaves_pairing() -> None:
     displayed = asyncio.Event()
     never: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None:
             shown_pins.append(pairing_code)
             displayed.set()
@@ -1989,7 +1997,7 @@ async def test_external_cancel_of_initiate_pairing_stays_cancelled() -> None:
     displayed = asyncio.Event()
     never: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None:
             displayed.set()
 
@@ -2044,7 +2052,7 @@ async def _paired_client_with_stalled_success_tail(
     shown_pins: list[str] = []
     displayed = asyncio.Event()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None:
             shown_pins.append(pairing_code)
             displayed.set()
@@ -2241,9 +2249,12 @@ async def _legacy_pairing_psk_client(
     pairing_index: int,  # noqa: ARG001
     server_id: str,
     store: ClientPairingStore,
+    on_finalize: Callable[[], None] | None = None,
 ) -> None:
     """Pairing PSK client that goes straight to client/pair-finalize."""
-    await pairing_module._finalize_client(ws, server_id=server_id, store=store)  # noqa: SLF001
+    await pairing_module._finalize_client(  # noqa: SLF001
+        ws, server_id=server_id, store=store, on_finalize=on_finalize
+    )
 
 
 async def _staged_pairing_psk_stores(
@@ -2469,6 +2480,7 @@ class _AbandonedPairingPskClient:
         pairing_index: int,
         server_id: str,  # noqa: ARG002
         store: ClientPairingStore,  # noqa: ARG002
+        on_finalize: Callable[[], None] | None = None,  # noqa: ARG002
     ) -> None:
         if self._stale is None:
             self._stale = asyncio.create_task(self._send_stale(ws, pairing_index))
@@ -2633,7 +2645,7 @@ async def test_reverification_leaves_staged_and_trusted_unpaired() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -2729,7 +2741,7 @@ async def test_live_pairing_keeps_the_writer_running_during_exchange() -> None:
     shown: asyncio.Future[str] = loop.create_future()
     during: dict[str, object] = {}
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -2909,7 +2921,7 @@ async def test_live_pairing_runs_alongside_playback() -> None:
     code: asyncio.Future[str] = asyncio.get_running_loop().create_future()
     suspended: list[bool] = []
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not code.done():
             code.set_result(pairing_code)
 
@@ -2960,7 +2972,7 @@ async def test_revoking_approval_mid_attempt_ends_pairing() -> None:
     await server.trust_unpaired(identity.peer_id)
     waiting = asyncio.Event()
 
-    async def display(_pairing_code: str | None) -> None:
+    async def display(_pairing_code: str | None, **_kwargs: object) -> None:
         return
 
     async def provide() -> str:
@@ -3018,7 +3030,7 @@ async def test_live_pairing_quiesces_a_legacy_generation_client() -> None:
         hello.payload.player_support.supported_commands = [PlayerCommand.VOLUME]
         return hello
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not code.done():
             code.set_result(pairing_code)
 
@@ -3156,7 +3168,7 @@ async def test_resync_resends_current_player_state() -> None:
     loop = asyncio.get_running_loop()
     shown: asyncio.Future[str] = loop.create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -3262,7 +3274,7 @@ async def test_reverification_over_long_term_keeps_pairing() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -3356,7 +3368,7 @@ async def test_reverification_at_round_limit_is_held_back() -> None:
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -3820,7 +3832,7 @@ async def test_re_pairing_restores_service_after_a_credential_mismatch() -> None
 
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
-    async def display(pairing_code: str | None) -> None:
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
         if pairing_code is not None and not shown.done():
             shown.set_result(pairing_code)
 
@@ -4062,7 +4074,7 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
         )
     )
 
-    async def display(_pairing_code: str | None) -> None:
+    async def display(_pairing_code: str | None, **_kwargs: object) -> None:
         """Offer a dynamic out-channel; the attempt aborts before a code is emitted."""
         return
 

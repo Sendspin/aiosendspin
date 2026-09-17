@@ -129,6 +129,7 @@ from aiosendspin.noise.pairing import (
     run_pairing_psk_client,
     run_static_pairing_code_client,
 )
+from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 
@@ -353,6 +354,9 @@ class SendspinConnection:
         self._selected_pairing: ActivatePairing | None = None
         self._pairing_index = 0
         self._pairing_attempt_in_progress = False
+        # Whether cancel_pairing may still end the attempt; cleared once it is finalizing or
+        # releasing its out-channels.
+        self._pairing_cancellable = False
         self._out_channel_suspended = False
         self._logged_static_pairing_code_dropped = False
         self._exchange_in_progress = False
@@ -502,7 +506,7 @@ class SendspinConnection:
         """
         activate = await self._exchange_hellos()
         if (reason := await self._apply_activation(activate)) is not None:
-            await self._goodbye_and_disconnect(reason)
+            await self.goodbye_and_disconnect(reason)
             raise RuntimeError(f"server activation rejected ({reason.value})")
 
     async def _exchange_hellos(self) -> ServerActivatePayload:
@@ -635,6 +639,7 @@ class SendspinConnection:
         """Start the attempt the current pairing activation admits, alongside other traffic."""
         assert self._ws is not None
         self._pairing_index += 1
+        self._pairing_cancellable = True
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_queue = queue
         self._pairing_task = self._client.loop.create_task(
@@ -646,8 +651,14 @@ class SendspinConnection:
         task = self._pairing_task
         if task is None:
             return
+        # A concurrent cancel_pairing must not abort whatever attempt follows this one.
+        self._pairing_cancellable = False
         task.cancel()
         await asyncio.wait((task,))
+        # A task cancelled before its first step never ran the attempt's own cleanup.
+        if self._pairing_task is task:
+            self._pairing_task = None
+            self._pairing_queue = None
 
     async def _pair(self, ws: EncryptedWebSocket, pairing_index: int) -> None:
         """Run one pairing attempt; a non-closing abort leaves the connection in pairing.
@@ -683,7 +694,11 @@ class SendspinConnection:
         if method is PairMethod.PAIRING_PSK:
             with self._attempt_in_progress():
                 await run_pairing_psk_client(
-                    ws, pairing_index=pairing_index, server_id=self._server_id, store=store
+                    ws,
+                    pairing_index=pairing_index,
+                    server_id=self._server_id,
+                    store=store,
+                    on_finalize=self._end_cancellability,
                 )
             return
         assert self._handshake_hash is not None
@@ -701,6 +716,7 @@ class SendspinConnection:
                         static_pairing_code=static_pairing_code,
                         server_id=self._server_id,
                         store=store,
+                        on_finalize=self._end_cancellability,
                     )
             except LocalPairingAbortError as err:
                 # The client aborts with pairing_code_mismatch only when server_kc fails.
@@ -709,14 +725,14 @@ class SendspinConnection:
                 raise
             self._client.record_pairing_window_attempt(self, paired=True)
             return
-        # Dynamic pairing code is held back only at the round limit, until an operator action.
         pairing_format = await self._validate_pairing_format(pairing.format)
-        if await store.is_pairing_round_limit_reached():
-            await self._gate_on_pairing_window(ws, pairing_index)
-            await store.reset_pairing_rounds()
-            # The operator action is spent on lifting the hold-back.
-            self._client.close_pairing_window()
         try:
+            # Dynamic pairing code is held back only at the round limit, until an operator action.
+            if await store.is_pairing_round_limit_reached():
+                await self._gate_on_pairing_window(ws, pairing_index)
+                await store.reset_pairing_rounds()
+                # The operator action is spent on lifting the hold-back.
+                self._client.close_pairing_window()
             with self._attempt_in_progress():
                 await run_dynamic_pairing_code_client(
                     ws,
@@ -728,9 +744,15 @@ class SendspinConnection:
                     ),
                     server_id=self._server_id,
                     store=store,
+                    on_finalize=self._end_cancellability,
                 )
         finally:
+            self._end_cancellability()
             await self._emit_pairing_code(None, pairing_format=pairing_format)
+
+    def _end_cancellability(self) -> None:
+        """Let the attempt in progress run to its own end, past ``cancel_pairing``."""
+        self._pairing_cancellable = False
 
     @contextmanager
     def _attempt_in_progress(self) -> Iterator[None]:
@@ -753,7 +775,9 @@ class SendspinConnection:
             return
         await ws.send_str(
             ClientPairPendingMessage(
-                payload=ClientPairPendingPayload(pairing_index=pairing_index),
+                payload=ClientPairPendingPayload(
+                    pairing_index=pairing_index, message=self._client.pair_pending_message
+                ),
             ).to_json(),
         )
         window = asyncio.ensure_future(self._client.await_pairing_window(self))
@@ -882,7 +906,8 @@ class SendspinConnection:
             return
         emissions = []
         if self._client.pairing_code_display is not None:
-            emissions.append(self._client.pairing_code_display(pairing_code))
+            grouped = format_pairing_code(pairing_code) if pairing_code is not None else None
+            emissions.append(self._client.pairing_code_display(pairing_code, grouped=grouped))
         if self._client.pairing_code_speaker is not None:
             emissions.append(
                 self._client.pairing_code_speaker(pairing_code, languages=self._server_languages())
@@ -911,7 +936,7 @@ class SendspinConnection:
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
 
-    async def _goodbye_and_disconnect(self, reason: GoodbyeReason) -> None:
+    async def goodbye_and_disconnect(self, reason: GoodbyeReason) -> None:
         """Send ``client/goodbye`` with ``reason`` and disconnect."""
         await self.send_goodbye(reason)
         await self.disconnect()
@@ -926,8 +951,24 @@ class SendspinConnection:
         # A goodbye precedes disconnect, so it must reach the wire even mid-exchange.
         await self._send_message(message.to_json(), force=True)
 
+    async def cancel_pairing(self) -> None:
+        """Cancel the pairing attempt in progress, as on operator cancellation.
+
+        Ends the attempt, whether started or awaiting a pairing window, closes the pairing
+        window and sends ``pair/abort`` with reason ``user_cancelled``. The connection stays
+        open. A no-op when no attempt is in progress, or once it has sent
+        ``client/pair-finalize`` or is releasing its out-channels: it then runs to its own end.
+        Must not be called from a ``PairingSupport`` callback, which runs inside the attempt.
+        """
+        if self._pairing_task is None or not self._pairing_cancellable:
+            return
+        self._client.close_pairing_window()
+        # Ending the attempt clears its out-channels and stops its sends before the abort.
+        await self._cancel_pairing_attempt()
+        await self.send_pair_abort(PairAbortReason.USER_CANCELLED)
+
     async def send_pair_abort(self, reason: PairAbortReason) -> None:
-        """Send a pair/abort to the server (for a pairing connection lost to arbitration)."""
+        """Send a pair/abort to the server, even while an in-band exchange owns the wire."""
         if not self.connected:
             return
         message = PairAbortMessage(payload=PairAbortPayload(reason=reason))
@@ -938,6 +979,19 @@ class SendspinConnection:
     def is_pairing(self) -> bool:
         """Whether this connection is currently a pairing connection."""
         return Activity.PAIRING in self._activities
+
+    @property
+    def relies_on_unpaired_access(self) -> bool:
+        """Whether this connection is unpaired and its activities or roles need unpaired access."""
+        psk = self._noise_psk
+        if psk is None or psk.category is PskCategory.LONG_TERM:
+            return False
+        return not _admissible(
+            psk.category,
+            set(self._activities),
+            has_roles=bool(self._active_roles),
+            unpaired_access=False,
+        )
 
     @property
     def pairing_attempt_in_progress(self) -> bool:
@@ -1461,7 +1515,7 @@ class SendspinConnection:
         was_artwork_active = self._is_role_active("artwork")
         was_visualizer_active = self._is_role_active("visualizer")
         if (reason := await self._apply_activation(payload)) is not None:
-            await self._goodbye_and_disconnect(reason)
+            await self.goodbye_and_disconnect(reason)
             return
         if self.is_pairing:
             self._start_pairing_attempt()
@@ -1635,7 +1689,7 @@ class SendspinConnection:
         if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
             return  # Not a long-term session (pairing / unpaired): ignore and continue.
         await handle_unpair(self._client.pairing_store, matched_psk_id=self._noise_psk.psk_id)
-        await self._goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
+        await self.goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
 
     async def _handle_management_request(self, message: _ManagementRequest) -> None:
         """Handle a management/* request, gating on the management activity."""
@@ -1665,7 +1719,10 @@ class SendspinConnection:
                 )
             case ManagementSetPairingConfigMessage(payload=request):
                 payload, effect = await handle_set_pairing_config(
-                    store, request, implemented_pair_methods=self._client.implemented_pair_methods
+                    store,
+                    request,
+                    implemented_pair_methods=self._client.implemented_pair_methods,
+                    config_lock=self._client.admission_lock,
                 )
             case ManagementOpenPairingWindowMessage():
                 payload, effect = await handle_open_pairing_window(
@@ -1684,7 +1741,7 @@ class SendspinConnection:
         )
         await self._send_message(ManagementResultMessage(payload=payload).to_json())
         if effect is ManagementEffect.GOODBYE_UNAUTHORIZED:
-            await self._goodbye_and_disconnect(GoodbyeReason.UNAUTHORIZED)
+            await self.goodbye_and_disconnect(GoodbyeReason.UNAUTHORIZED)
 
     def _configure_audio_output(self, audio_format: AudioFormat) -> None:
         """Store the current audio format for use in callbacks."""

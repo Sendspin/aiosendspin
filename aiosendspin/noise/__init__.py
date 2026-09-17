@@ -60,6 +60,7 @@ from .pairing import (
     run_static_pairing_code_client,
     run_static_pairing_code_server,
 )
+from .pairing_code import format_pairing_code
 from .pairing_token import (
     PSKPairingToken,
     decode_pairing_code_token,
@@ -149,6 +150,7 @@ __all__ = [
     "decode_psk_token",
     "encode_pairing_code_token",
     "encode_psk_token",
+    "format_pairing_code",
     "generate_psk",
     "psk_id_for",
     "run_dynamic_pairing_code_client",
