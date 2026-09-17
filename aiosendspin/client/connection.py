@@ -651,6 +651,8 @@ class SendspinConnection:
         task = self._pairing_task
         if task is None:
             return
+        # A concurrent cancel_pairing must not abort whatever attempt follows this one.
+        self._pairing_cancellable = False
         task.cancel()
         await asyncio.wait((task,))
         # A task cancelled before its first step never ran the attempt's own cleanup.
@@ -960,8 +962,6 @@ class SendspinConnection:
         """
         if self._pairing_task is None or not self._pairing_cancellable:
             return
-        # A concurrent caller returns above instead of sending a second abort.
-        self._pairing_cancellable = False
         self._client.close_pairing_window()
         # Ending the attempt clears its out-channels and stops its sends before the abort.
         await self._cancel_pairing_attempt()

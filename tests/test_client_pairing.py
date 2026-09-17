@@ -1182,6 +1182,51 @@ async def test_cancel_pairing_before_the_attempt_first_runs() -> None:
         await connection.disconnect()
 
 
+async def test_cancel_pairing_during_a_replacement_activation_is_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While a server/activate ends the attempt, a cancel does not abort the one it starts."""
+    observer = _CancelObserver()
+    connection, server_ews = _admitted_live_connection(observer)
+    unwinding = asyncio.Event()
+    release = asyncio.Event()
+    indexes: list[int] = []
+
+    async def fake_run(_ws: object, *, pairing_index: int, **_kwargs: object) -> None:
+        indexes.append(pairing_index)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if pairing_index == 1:
+                unwinding.set()
+                await release.wait()
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
+    activation = _pairing_activation(PairMethod.DYNAMIC_PAIRING_CODE)
+    try:
+        await connection._handle_server_activate(activation)  # noqa: SLF001
+        await asyncio.sleep(0)
+        replacing = asyncio.create_task(
+            connection._handle_server_activate(activation)  # noqa: SLF001
+        )
+        async with asyncio.timeout(1):
+            await unwinding.wait()
+
+        await connection._client.cancel_pairing()  # noqa: SLF001
+        release.set()
+        async with asyncio.timeout(1):
+            await replacing
+        await asyncio.sleep(0)
+        await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
+
+        assert indexes == [1, 2]
+        assert connection._pairing_task is not None  # noqa: SLF001
+        # No pair/abort went out before the goodbye.
+        assert (await _next_non_time_message(server_ews))["type"] == "client/goodbye"
+    finally:
+        await connection.disconnect()
+
+
 async def test_cancel_pairing_after_finalize_lets_the_attempt_complete() -> None:
     """Once client/pair-finalize is out the server may have stored the record, so it pairs."""
     observer = _CancelObserver()
