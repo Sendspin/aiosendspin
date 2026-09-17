@@ -88,7 +88,7 @@ def _hello(roles: list[str], *, legacy: bool = False) -> ClientHelloPayload:
                 _ALTERNATE_FORMAT,
             ],
             buffer_capacity=100_000,
-            supported_commands=[],
+            supported_commands=[] if legacy else None,
         ),
         artwork_support=ClientHelloArtworkSupport(channels=[_ARTWORK_CHANNEL]) if legacy else None,
         source_support=ClientHelloSourceSupport(),
@@ -167,8 +167,10 @@ def _client(conn: SendspinConnection) -> SendspinClient:
 
 @pytest.mark.asyncio
 async def test_removed_roles_are_torn_down_before_server_activate() -> None:
-    """refresh_trusted_unpaired writes stream/end and the null state ahead of server/activate."""
-    conn, fake = await _connect(_hello([Roles.PLAYER.value, Roles.METADATA.value]))
+    """refresh_trusted_unpaired writes stream/end, and no state role null, ahead of activate."""
+    state_roles = [Roles.METADATA.value, Roles.COLOR.value, Roles.CONTROLLER.value]
+    conn, fake = await _connect(_hello([Roles.PLAYER.value, *state_roles]))
+    assert all(_client(conn).role(role_id) is not None for role_id in state_roles)
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
@@ -177,11 +179,25 @@ async def test_removed_roles_are_torn_down_before_server_activate() -> None:
 
     await _set_trusted(conn, trusted=False)
 
+    assert await _drain_priority(conn, fake) == ["stream/end", "server/activate"]
+    assert fake.sent_payloads()[1]["payload"]["active_roles"] == []
+    assert not conn._role_queues.get("player")  # noqa: SLF001
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_removed_roles_send_legacy_null_state_before_server_activate() -> None:
+    """A legacy-generation client gets the null metadata object ahead of server/activate."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value, Roles.METADATA.value], legacy=True))
+    player = _client(conn).role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._stream_started = True  # noqa: SLF001
+
+    await _set_trusted(conn, trusted=False)
+
     # Reverse attach order: metadata unwinds before the player.
     assert await _drain_priority(conn, fake) == ["server/state", "stream/end", "server/activate"]
     assert fake.sent_payloads()[0]["payload"] == {"metadata": None}
-    assert fake.sent_payloads()[2]["payload"]["active_roles"] == []
-    assert not conn._role_queues.get("player")  # noqa: SLF001
 
 
 @pytest.mark.asyncio

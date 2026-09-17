@@ -728,13 +728,11 @@ class ServerTimeMessage(ServerMessage):
 class ServerStatePayload(SendspinModel):
     """Server sends state updates to the client."""
 
-    metadata: SessionUpdateMetadata | None | UndefinedField = field(default_factory=undefined_field)
+    metadata: SessionUpdateMetadata | UndefinedField = field(default_factory=undefined_field)
     """Metadata state - only sent to clients with metadata role."""
-    controller: ControllerStatePayload | None | UndefinedField = field(
-        default_factory=undefined_field
-    )
+    controller: ControllerStatePayload | UndefinedField = field(default_factory=undefined_field)
     """Controller state - only sent to clients with controller role."""
-    color: SessionUpdateColor | None | UndefinedField = field(default_factory=undefined_field)
+    color: SessionUpdateColor | UndefinedField = field(default_factory=undefined_field)
     """Color state - only sent to clients with color role."""
     application_objects: dict[str, Any] = field(default_factory=dict)
     """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
@@ -742,7 +740,7 @@ class ServerStatePayload(SendspinModel):
     def merge(self, other: ServerStatePayload) -> ServerStatePayload:
         """Return this state updated with the role objects present in `other`.
 
-        Each present role object, including `None`, replaces the existing one wholesale.
+        Each present role object replaces the existing one wholesale.
         Role objects omitted from `other` are kept. Application-specific role objects
         follow the same rule per key.
         """
@@ -759,7 +757,14 @@ class ServerStatePayload(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Nest application-specific role objects under `application_objects`."""
+        """
+        Nest application-specific role objects under `application_objects`.
+
+        Raises ValueError if a role object is null.
+        """
+        if null_roles := sorted(key for key, value in d.items() if value is None):
+            msg = f"server/state role objects must not be null, got {null_roles}"
+            raise ValueError(msg)
         return collect_application_objects(d)
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
@@ -770,6 +775,23 @@ class ServerStatePayload(SendspinModel):
         """Config for parsing json messages."""
 
         omit_default = True
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+@dataclass
+class LegacyServerStateClearMessage(ServerMessage):
+    """
+    Legacy server/state clearing one role with a null role object.
+
+    Only for clients that predate the activation-driven discard; never parsed.
+    """
+
+    role: str
+    """Wire key of the role object to clear."""
+
+    def __post_serialize__(self, _d: dict[str, Any]) -> dict[str, Any]:
+        """Send the role object as null inside a server/state envelope."""
+        return {"type": "server/state", "payload": {self.role: None}}
 
 
 @dataclass

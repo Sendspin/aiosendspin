@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
+from aiosendspin.models.core import LegacyServerStateClearMessage
 from aiosendspin.server.roles.base import Role
 
 if TYPE_CHECKING:
@@ -46,8 +46,10 @@ class ColorV1Role(Role):
         self._subscribe_to_group_role()
 
     def on_deactivate(self) -> None:
-        """Clear color state when the role is deactivated while still connected."""
-        self.send_message(ServerStateMessage(ServerStatePayload(color=None)))
+        """Stop color updates when the role is deactivated while still connected."""
+        # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+        if self.clears_state_with_null():
+            self.send_message(LegacyServerStateClearMessage(self.role_family))
         super().on_deactivate()
 
     def on_disconnect(self) -> None:

@@ -350,6 +350,12 @@ class Role(ABC):
             return
         self._client.send_role_message(self.role_family, message)
 
+    # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+    def clears_state_with_null(self) -> bool:
+        """Whether the client clears this role's server/state object only on a null object."""
+        connection = self._client.connection
+        return connection is not None and connection.clears_role_state_with_null
+
     def emit_client_event(self, event: ClientRoleEvent) -> None:
         """Emit a role event on the owning client's event stream."""
         self._client._signal_event(event)  # noqa: SLF001

@@ -428,6 +428,26 @@ def test_controller_group_role_on_member_join_includes_repeat_and_shuffle_defaul
     assert msg.payload.controller.shuffle is False
 
 
+def test_controller_group_role_on_member_join_sends_complete_state_without_players() -> None:
+    """on_member_join() sends every required controller field even with no player group role."""
+    group = _make_group_stub()
+    cgr = ControllerGroupRole(group)
+
+    member = MagicMock()
+    cgr.on_member_join(member)
+
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.to_dict() == {
+        "controller": {
+            "supported_commands": ["switch"],
+            "volume": 100,
+            "muted": False,
+            "repeat": "off",
+            "shuffle": False,
+        }
+    }
+
+
 def test_controller_group_role_set_repeat_pushes_state() -> None:
     """set_repeat() pushes updated controller state to members."""
     group = _make_group_stub()

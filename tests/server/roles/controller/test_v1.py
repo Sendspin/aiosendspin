@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from aiosendspin.models.controller import ControllerCommandPayload
-from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import MediaCommand
 from aiosendspin.server.roles.controller.v1 import ControllerV1Role
 
@@ -20,17 +19,35 @@ def _make_client_stub() -> MagicMock:
     return client
 
 
-def test_controller_role_on_deactivate_clears_state() -> None:
-    """on_deactivate() sends server/state with a null controller object."""
+def test_controller_role_on_deactivate_sends_no_state() -> None:
+    """on_deactivate() sends no server/state; the server/activate carries the discard."""
     client = _make_client_stub()
+    client.connection.clears_role_state_with_null = False
     role = ControllerV1Role(client=client)
     role.on_connect()
     client.send_role_message.reset_mock()
 
     role.on_deactivate()
 
-    sent = [call.args[1] for call in client.send_role_message.call_args_list]
-    assert any(isinstance(m, ServerStateMessage) and m.payload.controller is None for m in sent)
+    client.send_role_message.assert_not_called()
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+def test_controller_role_on_deactivate_clears_legacy_state_with_null() -> None:
+    """on_deactivate() sends a null controller object to a legacy-generation client."""
+    client = _make_client_stub()
+    client.connection.clears_role_state_with_null = True
+    role = ControllerV1Role(client=client)
+    role.on_connect()
+    client.send_role_message.reset_mock()
+
+    role.on_deactivate()
+
+    client.send_role_message.assert_called_once()
+    assert client.send_role_message.call_args.args[1].to_dict() == {
+        "type": "server/state",
+        "payload": {"controller": None},
+    }
 
 
 def test_controller_role_has_role_id() -> None:

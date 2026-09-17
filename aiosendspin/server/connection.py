@@ -429,6 +429,17 @@ class SendspinConnection:
         """
         return self._legacy_hello
 
+    # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+    @property
+    def clears_role_state_with_null(self) -> bool:
+        """
+        Whether the client clears a role's server/state object only on a null role object.
+
+        Unencrypted clients never receive server/activate, and pre-spec-#177 clients predate
+        the activation-driven discard.
+        """
+        return not self.is_encrypted or self._legacy_hello
+
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
         if self._client is None:

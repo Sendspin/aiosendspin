@@ -23,6 +23,7 @@ from aiosendspin.models.artwork import (
     pack_artwork_announce,
     pack_artwork_parts,
 )
+from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.core import (
     ActivatePairing,
@@ -963,14 +964,17 @@ async def test_send_group_command_rejects_unlisted_command() -> None:
     assert sent == []
 
 
-@pytest.mark.parametrize("controller", [None, "cleared"])
+@pytest.mark.parametrize("controller", [None, "discarded"])
 async def test_send_group_command_rejects_without_controller_state(
     controller: str | None,
 ) -> None:
     """Commands are rejected without sending until a controller state is received."""
-    connection, sent = await _controller_connection(None)
-    if controller == "cleared":
-        connection._handle_server_state(ServerStatePayload(controller=None))  # noqa: SLF001
+    connection, sent = await _controller_connection(
+        None if controller is None else _controller_state([MediaCommand.PLAY])
+    )
+    if controller == "discarded":
+        connection._active_roles = [Roles.CONTROLLER.value]  # noqa: SLF001
+        connection._discard_removed_role_state([])  # noqa: SLF001
 
     with pytest.raises(ValueError, match="No controller state"):
         await connection.send_group_command(MediaCommand.PLAY)
@@ -1094,12 +1098,46 @@ async def test_current_track_position_unknown(
     assert connection._client.current_track_position() is None  # noqa: SLF001
 
 
-async def test_current_track_position_after_metadata_cleared() -> None:
-    """Clearing the metadata clears the position."""
+async def test_current_track_position_after_metadata_discarded() -> None:
+    """Discarding the metadata on role removal clears the position."""
     connection, _ = _position_connection(_progress_metadata(30_000))
-    connection._handle_server_state(ServerStatePayload(metadata=None))  # noqa: SLF001
+    assert connection.current_track_position() is not None
+    connection._active_roles = [Roles.METADATA.value]  # noqa: SLF001
+    connection._discard_removed_role_state([])  # noqa: SLF001
 
     assert connection.current_track_position() is None
+
+
+async def test_state_listeners_receive_none_on_discard() -> None:
+    """Each state role listener receives None when its role's state is discarded."""
+    client = make_sdk_client(
+        client_name="Test Client", roles=[Roles.METADATA, Roles.CONTROLLER, Roles.COLOR]
+    )
+    connection = SendspinConnection(client)
+    received: list[tuple[str, ServerStatePayload | None]] = []
+    client.add_metadata_listener(lambda payload: received.append(("metadata", payload)))
+    client.add_controller_state_listener(lambda payload: received.append(("controller", payload)))
+    client.add_color_listener(lambda payload: received.append(("color", payload)))
+    state = ServerStatePayload(
+        metadata=SessionUpdateMetadata(timestamp=1),
+        controller=_controller_state([MediaCommand.PLAY]),
+        color=SessionUpdateColor(timestamp=1),
+    )
+    connection._handle_server_state(state)  # noqa: SLF001
+    received.clear()
+    connection._active_roles = [  # noqa: SLF001
+        Roles.METADATA.value,
+        Roles.CONTROLLER.value,
+        Roles.COLOR.value,
+    ]
+
+    connection._discard_removed_role_state([])  # noqa: SLF001
+
+    assert sorted(received, key=lambda item: item[0]) == [
+        ("color", None),
+        ("controller", None),
+        ("metadata", None),
+    ]
 
 
 async def test_current_track_position_without_connection() -> None:

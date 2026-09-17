@@ -376,6 +376,21 @@ class TestEncryptedActivities:
         assert await conn._exchange_hellos() is True  # noqa: SLF001
         assert conn.uses_pre_spec_177_wire is expected
 
+    # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("support_extra", "expected"),
+        [({"supported_commands": ["volume"]}, True), ({}, False)],
+    )
+    async def test_only_pre_spec_177_encrypted_hello_clears_role_state_with_null(
+        self, mock_server: _MockServer, support_extra: dict[str, object], *, expected: bool
+    ) -> None:
+        """An encrypted connection gets null role objects only after a pre-#177 hello."""
+        conn = self._long_term_connection(mock_server, self._player_hello(**support_extra))
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert conn.clears_role_state_with_null is expected
+
     # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_strict_server_rejects_hello_player_commands(self) -> None:
@@ -974,6 +989,21 @@ class TestLegacyServerHello:
 
         reason = fake.sent_payloads()[0]["payload"]["connection_reason"]
         assert reason == ConnectionReason.DISCOVERY.value
+
+    # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_legacy_hello_clears_role_state_with_null(self, mock_server: _MockServer) -> None:
+        """An unencrypted connection, which never gets server/activate, gets null role objects."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        conn._transport = _FakeTransport()  # type: ignore[assignment]  # noqa: SLF001
+        hello = _player_hello("client-1")
+        assert hello.player_support is not None
+        hello.player_support.supported_commands = None
+        conn._pending_first_text = ClientHelloMessage(payload=hello).to_json()  # noqa: SLF001
+        await conn._exchange_hellos()  # noqa: SLF001
+
+        assert conn.uses_pre_spec_177_wire is False
+        assert conn.clears_role_state_with_null is True
 
 
 class _FakePairingTransport(_FakeTransport, EncryptedWebSocket):

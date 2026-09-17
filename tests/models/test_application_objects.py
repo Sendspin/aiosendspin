@@ -28,7 +28,7 @@ PAYLOADS = pytest.mark.parametrize(
     [
         (ClientStatePayload, {"available": True}),
         (ClientCommandPayload, {}),
-        (ServerStatePayload, {"metadata": None}),
+        (ServerStatePayload, {"metadata": {"timestamp": 1}}),
         (ServerCommandPayload, {}),
         (StreamStartPayload, {"server_transmitted": 7}),
     ],

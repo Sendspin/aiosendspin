@@ -74,17 +74,20 @@ def _validate_decodable_formats(player_support: ClientHelloPlayerSupport) -> Non
         )
 
 
-# Callback invoked when server state metadata updates are received.
-MetadataCallback = Callable[[ServerStatePayload], None]
+# Callback invoked when server state metadata updates are received, or with None when
+# a server/activate removed the metadata role and its state was discarded.
+MetadataCallback = Callable[[ServerStatePayload | None], None]
 
 # Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
 
-# Callback invoked when controller state updates are received.
-ControllerStateCallback = Callable[[ServerStatePayload], None]
+# Callback invoked when controller state updates are received, or with None when
+# a server/activate removed the controller role and its state was discarded.
+ControllerStateCallback = Callable[[ServerStatePayload | None], None]
 
-# Callback invoked when server state color updates are received.
-ColorCallback = Callable[[ServerStatePayload], None]
+# Callback invoked when server state color updates are received, or with None when
+# a server/activate removed the color role and its state was discarded.
+ColorCallback = Callable[[ServerStatePayload | None], None]
 
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
@@ -1335,8 +1338,8 @@ class SendspinClient:
 
     # --- Listener dispatch ---
 
-    def notify_metadata_callback(self, payload: ServerStatePayload) -> None:
-        """Dispatch a server/state with metadata to the registered listeners."""
+    def notify_metadata_callback(self, payload: ServerStatePayload | None) -> None:
+        """Dispatch a server/state with metadata, or None on discard, to the listeners."""
         for callback in list(self._metadata_callbacks):
             try:
                 callback(payload)
@@ -1351,16 +1354,16 @@ class SendspinClient:
             except Exception:
                 logger.exception("Error in group callback %s", callback)
 
-    def notify_controller_callback(self, payload: ServerStatePayload) -> None:
-        """Dispatch a server/state to the registered controller listeners."""
+    def notify_controller_callback(self, payload: ServerStatePayload | None) -> None:
+        """Dispatch a server/state, or None on discard, to the controller listeners."""
         for callback in list(self._controller_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in controller callback %s", callback)
 
-    def notify_color_callback(self, payload: ServerStatePayload) -> None:
-        """Dispatch a server/state with color to the registered listeners."""
+    def notify_color_callback(self, payload: ServerStatePayload | None) -> None:
+        """Dispatch a server/state with color, or None on discard, to the listeners."""
         for callback in list(self._color_callbacks):
             try:
                 callback(payload)

@@ -103,6 +103,7 @@ from aiosendspin.models.types import (
     SignalState,
     UndefinedField,
     role_family,
+    undefined_field,
 )
 from aiosendspin.models.visualizer import StreamStartVisualizer, VisualizerFrame
 from aiosendspin.noise.constants import SENTINEL_PSK
@@ -609,6 +610,7 @@ class SendspinConnection:
         source_dropped = (
             Roles.SOURCE.value in self._active_roles and Roles.SOURCE.value not in effective_roles
         )
+        self._discard_removed_role_state(effective_roles)
         self._active_roles = effective_roles
         if source_dropped:
             self._source_start_authorized = False
@@ -1696,6 +1698,32 @@ class SendspinConnection:
     def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
         self._group_state = payload
         self._client.notify_group_callback(payload)
+
+    def _discard_removed_role_state(self, active_roles: list[str]) -> None:
+        """Discard the server/state object of every active role missing from `active_roles`."""
+        state = self._server_state
+        removed = {role_family(role_id) for role_id in set(self._active_roles) - set(active_roles)}
+        if state is None or not removed:
+            return
+        notifiers = {
+            "metadata": self._client.notify_metadata_callback,
+            "controller": self._client.notify_controller_callback,
+            "color": self._client.notify_color_callback,
+        }
+        discarded = [
+            family
+            for family in notifiers
+            if family in removed and not isinstance(getattr(state, family), UndefinedField)
+        ]
+        self._server_state = replace(
+            state,
+            **dict.fromkeys(discarded, undefined_field()),
+            application_objects={
+                key: value for key, value in state.application_objects.items() if key not in removed
+            },
+        )
+        for family in discarded:
+            notifiers[family](None)
 
     def _handle_server_state(self, payload: ServerStatePayload) -> None:
         self._server_state = (
