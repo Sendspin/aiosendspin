@@ -847,6 +847,23 @@ async def test_repairing_a_known_server_at_capacity_evicts_nothing(tmp_path: Pat
     assert await _per_server_psk_ids(store) == expected
 
 
+@pytest.mark.parametrize("kind", ["memory", "file"])
+async def test_repairing_keeps_the_prior_record_while_a_connection_uses_it(
+    kind: str, tmp_path: Path
+) -> None:
+    """Re-pairing a server keeps its prior record while an open connection still uses it."""
+    store = await _client_store_with_capacity(kind, tmp_path, 5)
+    seeded = await seed_used_client_records(store, 5)
+    renewed = _client_record(server_id="server-2")
+
+    await store.replace_record_for_server_id(renewed, protected={seeded[2].psk_id})
+
+    assert await store.record_by_psk_id(seeded[2].psk_id) is not None
+    assert await store.record_by_psk_id(renewed.psk_id) == renewed
+    assert await store.record_by_psk_id(seeded[0].psk_id) is None
+    assert len(await _per_server_psk_ids(store)) == 5
+
+
 async def test_pairing_persists_when_every_other_record_is_protected(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

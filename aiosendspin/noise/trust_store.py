@@ -560,16 +560,19 @@ class ClientPairingStore(ABC):
     ) -> None:
         """Persist ``record``, dropping any prior removable record bound to the same server.
 
-        Past ``record_capacity`` per-server records, the least recently used ones are evicted,
-        except those whose ``psk_id`` is in ``protected`` (the records backing open
-        connections). Shared records are never evicted. When nothing is evictable,
-        ``record`` is still persisted and the store exceeds its capacity.
+        Records whose ``psk_id`` is in ``protected`` (the records backing open connections)
+        are never removed, even the same server's prior record. Past ``record_capacity``
+        per-server records, the least recently used others are evicted. Shared records are
+        never evicted. When nothing is evictable, ``record`` is still persisted and the store
+        exceeds its capacity.
         """
         stale = (
             [
                 existing.psk_id
                 for existing in await self.list_records()
-                if existing.server_id == record.server_id and existing.psk_id != record.psk_id
+                if existing.server_id == record.server_id
+                and existing.psk_id != record.psk_id
+                and existing.psk_id not in protected
             ]
             if record.server_id is not None
             else []
