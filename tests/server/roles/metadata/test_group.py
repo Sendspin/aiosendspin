@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
@@ -413,6 +415,63 @@ def test_update_without_active_stream_keeps_stored_position() -> None:
         "track_duration": 180_000,
         "playback_speed": 1000,
     }
+
+
+def test_update_within_progress_tolerance_sends_nothing() -> None:
+    """A progress refresh close to the extrapolated position is not sent."""
+    group, mgr, member = _playing_group_role()
+    group._signal_event.reset_mock()  # noqa: SLF001
+
+    mgr.update(track_progress=40_200)
+
+    member.send_message.assert_not_called()
+    group._signal_event.assert_not_called()  # noqa: SLF001
+
+
+def test_seek_within_progress_tolerance_is_sent() -> None:
+    """A seek is sent even when it lands close to the extrapolated position."""
+    group, mgr, member = _playing_group_role()
+    other_member = MagicMock()
+    mgr._members.append(other_member)  # noqa: SLF001
+    group._signal_event.reset_mock()  # noqa: SLF001
+
+    mgr.seek(40_200)
+
+    for recipient in (member, other_member):
+        assert _sent_metadata(recipient)["timestamp"] == 11_000_000
+        assert _sent_metadata(recipient)["progress"] == {
+            "track_progress": 40_200,
+            "track_duration": 180_000,
+            "playback_speed": 1000,
+        }
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, MetadataUpdatedEvent)
+    assert event.metadata.track_progress == 40_200
+
+
+def test_seek_to_negative_position_raises_without_sending() -> None:
+    """A negative seek position is rejected and nothing is sent."""
+    group, mgr, member = _playing_group_role()
+    group._signal_event.reset_mock()  # noqa: SLF001
+
+    with pytest.raises(ValueError, match="non-negative"):
+        mgr.seek(-1)
+
+    member.send_message.assert_not_called()
+    group._signal_event.assert_not_called()  # noqa: SLF001
+    assert mgr.metadata is not None
+    assert mgr.metadata.track_progress == 30_000
+
+
+def test_seek_without_playback_speed_raises() -> None:
+    """A seek needs metadata that carries a playback speed."""
+    mgr = MetadataGroupRole(_make_group_stub())
+    with pytest.raises(ValueError, match="playback_speed"):
+        mgr.seek(1_000)
+
+    mgr.set_metadata(Metadata(title="Song"))
+    with pytest.raises(ValueError, match="playback_speed"):
+        mgr.seek(1_000)
 
 
 # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
