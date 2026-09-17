@@ -1,4 +1,4 @@
-"""A PSK downgrade suspends the source stream until the next activation re-admits it."""
+"""A re-handshake's quiet period runs to the new server/activate, not to the exchange's end."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from aiosendspin.client.connection import SendspinConnection
+from aiosendspin.client.source import SourceCapture
 from aiosendspin.models.core import ServerActivatePayload
+from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.models.source import ClientHelloSourceFeatures, ClientHelloSourceSupport
-from aiosendspin.models.types import Activity, AudioCodec, Roles
+from aiosendspin.models.types import Activity, AudioCodec, Roles, SignalState
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
-from tests.conftest import make_sdk_client
+from tests.conftest import make_sdk_client, sine_pcm_16bit
 
 
 class _Ws:
@@ -82,56 +84,65 @@ def _downgrade(
     return downgraded
 
 
-async def _attempt_source_sends(conn: SendspinConnection) -> list[str]:
-    """Try both source send paths, returning a label per attempt that reached the wire."""
-    reached: list[str] = []
-    try:
-        await conn.send_source_chunk(b"audio", timestamp_us=1)
-        reached.append("chunk")
-    except RuntimeError:
-        pass
-    try:
-        await conn.send_client_stream_start(
-            codec=AudioCodec.PCM,
-            sample_rate=48000,
-            channels=2,
-            bit_depth=16,
-            codec_header=None,
-        )
-        reached.append("client-stream/start")
-    except RuntimeError:
-        pass
-    return reached
+def _probe_quiet_period(conn: SendspinConnection, probe: Any) -> None:
+    """Run ``probe`` in the window between the key swap and the activation being applied."""
+    original = conn._handle_server_activate  # noqa: SLF001
+
+    async def _wrapped(payload: ServerActivatePayload, **kwargs: Any) -> None:
+        await probe()
+        await original(payload, **kwargs)
+
+    conn._handle_server_activate = _wrapped  # type: ignore[method-assign]  # noqa: SLF001
+
+
+def _source_capture(conn: SendspinConnection) -> SourceCapture:
+    """Build a started PCM capture bound to ``conn``'s open source stream."""
+    capture = SourceCapture(
+        conn._client,  # noqa: SLF001
+        conn,
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    capture._started = True  # noqa: SLF001
+    return capture
 
 
 @pytest.mark.parametrize("category", [PskCategory.SENTINEL, PskCategory.PAIRING])
-async def test_source_is_refused_between_a_psk_downgrade_and_its_activation(
+async def test_no_source_message_reaches_the_wire_in_the_quiet_period(
     monkeypatch: pytest.MonkeyPatch, category: PskCategory
 ) -> None:
-    """Source cannot reach the wire under a downgraded PSK before the activation applies."""
+    """Every source send path is suppressed until the new server/activate is applied."""
     ws = _Ws()
     conn = _streaming_source_connection(ws)
     # The server drops source from the unpaired session.
     downgraded = _downgrade(conn, monkeypatch, category=category, active_roles=[])
 
-    # Probe the window: the exchange has closed and the new PSK is in place, but the
-    # activation that settles active_roles has not been applied yet.
-    in_window: list[str] = []
-    original = conn._handle_server_activate  # noqa: SLF001
-
-    async def _probe(payload: ServerActivatePayload, **kwargs: Any) -> None:
+    async def _probe() -> None:
         assert conn._noise_psk is downgraded  # noqa: SLF001
-        assert not conn._exchange_in_progress  # noqa: SLF001
-        in_window.extend(await _attempt_source_sends(conn))
-        await original(payload, **kwargs)
+        await conn.send_source_chunk(b"audio", timestamp_us=1)
+        for refused in (
+            conn.send_client_stream_start(
+                codec=AudioCodec.PCM,
+                sample_rate=48000,
+                channels=2,
+                bit_depth=16,
+                codec_header=None,
+            ),
+            conn.send_client_stream_end(),
+        ):
+            with pytest.raises(RuntimeError, match="in-band exchange"):
+                await refused
+        await conn.send_source_signal(SignalState.PRESENT)
+        assert ws.sent == []
+        assert ws.sent_bytes == []
 
-    conn._handle_server_activate = _probe  # type: ignore[method-assign]  # noqa: SLF001
+    _probe_quiet_period(conn, _probe)
 
     await conn._handle_handshake("hs1")  # noqa: SLF001
 
-    assert in_window == []
-    assert ws.sent_bytes == []
+    # The activation itself is sent normally: dropping source ends the stream.
+    assert any("client-stream/end" in m for m in ws.sent)
     assert not any("client-stream/start" in m for m in ws.sent)
+    assert ws.sent_bytes == []
 
 
 async def test_source_resumes_once_the_activation_re_admits_the_role(
@@ -140,15 +151,37 @@ async def test_source_resumes_once_the_activation_re_admits_the_role(
     """Re-admitting source@v1 on the new session releases the send paths again."""
     ws = _Ws()
     conn = _streaming_source_connection(ws)
-    _downgrade(
-        conn,
-        monkeypatch,
-        category=PskCategory.SENTINEL,
-        active_roles=[Roles.SOURCE.value],
-    )
+    _downgrade(conn, monkeypatch, category=PskCategory.SENTINEL, active_roles=[Roles.SOURCE.value])
 
     await conn._handle_handshake("hs1")  # noqa: SLF001
 
     assert conn._active_roles == [Roles.SOURCE.value]  # noqa: SLF001
     await conn.send_source_chunk(b"audio", timestamp_us=1)
     assert ws.sent_bytes != []
+
+
+async def test_capture_refused_in_the_quiet_period_still_ends_its_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop() the quiet period refuses leaves the stream endable once source is retained."""
+    ws = _Ws()
+    conn = _streaming_source_connection(ws)
+    _downgrade(conn, monkeypatch, category=PskCategory.SENTINEL, active_roles=[Roles.SOURCE.value])
+    capture = _source_capture(conn)
+
+    async def _probe() -> None:
+        await capture.feed(sine_pcm_16bit(480))
+        with pytest.raises(RuntimeError, match="in-band exchange"):
+            await capture.stop()
+        assert ws.sent == []
+        assert ws.sent_bytes == []
+
+    _probe_quiet_period(conn, _probe)
+
+    await conn._handle_handshake("hs1")  # noqa: SLF001
+
+    # The stream persists across the re-handshake, so the capture can still close it.
+    assert conn.is_source_stream_active()
+    await capture.stop()
+    assert any("client-stream/end" in m for m in ws.sent)
+    assert not conn.is_source_stream_active()

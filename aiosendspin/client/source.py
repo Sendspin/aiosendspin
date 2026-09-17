@@ -141,20 +141,26 @@ class SourceCapture:
         await self._send_frames(self._encoder.process(encoder_pcm, anchor, 0), stale_before_us)
 
     async def stop(self) -> None:
-        """Flush the encoder and end the input stream."""
+        """
+        Flush the encoder and end the input stream.
+
+        The stream persists across a re-handshake, so a refused end leaves the capture
+        started and retriable rather than dropping the encoder state on the floor.
+
+        Raises:
+            RuntimeError: The connection could not end the stream, as during a
+                re-handshake's quiet period.
+        """
         if not self._started:
             return
-        try:
-            if not self._connection.is_source_stream_active():
-                return
+        if self._connection.is_source_stream_active():
             await self._send_frames(
                 self._encoder.flush(), self._client.now_us() - MAX_CAPTURE_BACKLOG_US
             )
             await self._connection.send_client_stream_end()
-        finally:
-            self._encoder.reset()
-            self._capture_spans.clear()
-            self._started = False
+        self._encoder.reset()
+        self._capture_spans.clear()
+        self._started = False
 
     async def _send_frames(self, frames: Iterable[tuple[bytes, int]], stale_before_us: int) -> None:
         """Send encoded frames, skipping those captured before ``stale_before_us``."""

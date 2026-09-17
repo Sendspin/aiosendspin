@@ -346,8 +346,6 @@ class SendspinConnection:
     """True between client-stream/start and client-stream/end for the source role."""
     _source_start_authorized: bool = False
     """True while a server source ``start`` awaits the client-stream/start it authorizes."""
-    _roles_unsettled: bool = False
-    """True from a re-handshake's key swap until the server/activate that follows settles roles."""
     _current_visualizer_config: StreamStartVisualizer | None = None
     """Current visualizer config from stream/start."""
     _artwork_config: StreamStartArtwork | None = None
@@ -639,6 +637,9 @@ class SendspinConnection:
         else:
             effective_roles = []
         has_roles = bool(effective_roles)
+        # The quiet period ends where this activation applies, and nothing below yields
+        # before the role set is settled, so no send escapes under the superseded one.
+        self._end_rehandshake_quiet_period()
         if not _admissible(
             category, activities, has_roles=has_roles, unpaired_access=unpaired_access
         ):
@@ -658,7 +659,6 @@ class SendspinConnection:
         self._discard_removed_role_state(effective_roles)
         self._end_removed_role_streams(effective_roles)
         self._active_roles = effective_roles
-        self._roles_unsettled = False
         if source_dropped:
             self._source_start_authorized = False
             if self._source_stream_active and self.connected:
@@ -1000,9 +1000,6 @@ class SendspinConnection:
         )
         self._noise_psk = result.psk
         self._resolving_psk_id = None
-        # The role set belongs to the superseded session until the server/activate that
-        # follows settles it against the new key.
-        self._roles_unsettled = True
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         if result.psk.category is PskCategory.LONG_TERM:
@@ -1356,8 +1353,6 @@ class SendspinConnection:
             raise RuntimeError("Client is not connected")
         if not self._is_role_active("source"):
             raise RuntimeError("Source role is not active")
-        if self._roles_unsettled:
-            raise RuntimeError("Source role is awaiting the next server/activate")
         if require_stream and not self._source_stream_active:
             raise RuntimeError("Source stream is not active")
 
@@ -1456,6 +1451,17 @@ class SendspinConnection:
             yield
         finally:
             self._exchange_in_progress = False
+
+    def _end_rehandshake_quiet_period(self) -> None:
+        """
+        Release the send suppression where a re-handshake's quiet period ends.
+
+        Neither peer may start a new application message between Noise message 1 and the
+        new ``server/activate``, so for a re-handshake the suppression outlives the
+        exchange carrying the handshake: it lifts only where that activation applies,
+        which is also where the goodbye refusing it becomes sendable.
+        """
+        self._exchange_in_progress = False
 
     async def _reader_loop(self) -> None:
         assert self._ws is not None
@@ -1601,10 +1607,11 @@ class SendspinConnection:
     async def _handle_handshake(self, data: str) -> None:
         """Run a server-initiated re-handshake, ending any pairing attempt still in progress."""
         await self._cancel_pairing_attempt()
-        async with self._exchange(), asyncio.timeout(REHANDSHAKE_TIMEOUT_S):
-            await self._rehandshake(data)
-            activate = await self._receive_server_activate()
-        await self._handle_server_activate(activate, resync=True)
+        async with self._exchange():
+            async with asyncio.timeout(REHANDSHAKE_TIMEOUT_S):
+                await self._rehandshake(data)
+                activate = await self._receive_server_activate()
+            await self._handle_server_activate(activate, resync=True)
 
     async def _handle_server_activate(
         self, payload: ServerActivatePayload, *, resync: bool = False
