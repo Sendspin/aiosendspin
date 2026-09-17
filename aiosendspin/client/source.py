@@ -98,7 +98,20 @@ class SourceCapture:
         self._started = True
 
     async def feed(self, pcm: bytes, capture_timestamp_us: int | None = None) -> None:
-        """Encode PCM captured at a client-local first-sample timestamp, defaulting to now."""
+        """
+        Encode and send PCM in ``audio_format``, dropping capture older than the backlog bound.
+
+        Args:
+            pcm: Whole PCM frames, captured after the previously fed PCM.
+            capture_timestamp_us: Time the first sample reached the input, on the client
+                clock (``SendspinClient.now_us()``). Defaults to the time of this call, which
+                trails the capture by the capture and buffering latency and makes backlog
+                from a stall look fresh; pass it when the capture clock is known.
+
+        Raises:
+            RuntimeError: ``start()`` has not been called.
+            ValueError: ``pcm`` is not a whole number of frames.
+        """
         if not self._started:
             raise RuntimeError("SourceCapture.start() must be called before feed()")
         if not pcm:
