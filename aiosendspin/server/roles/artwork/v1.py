@@ -176,6 +176,7 @@ class ArtworkV1Role(Role):
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self.uses_single_message_framing():
             self._queued.pop(channel, None)
+            self._queue_changed.set()
             if timestamp_us - MAX_ANNOUNCE_LEAD_US <= now_us:
                 self._send_single_message(channel, image_data, timestamp_us)
             else:
@@ -216,12 +217,14 @@ class ArtworkV1Role(Role):
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self.uses_single_message_framing():
             self._queued.pop(channel, None)
+            self._queue_changed.set()
             return False
         now_us = self._client._server.clock.now_us()  # noqa: SLF001
         if queued := self._current_queued(channel, now_us):
             self._queued[channel] = queued
         else:
             self._queued.pop(channel, None)
+        self._queue_changed.set()
         if self._discard_client_scheduled(channel, now_us, keep_current=True):
             self._start_transfers()
         return True

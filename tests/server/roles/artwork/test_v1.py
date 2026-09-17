@@ -745,6 +745,28 @@ async def test_artwork_cancel_scheduled_image_in_flight(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_artwork_cancel_of_held_scheduled_image_ends_transfer_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling an image held back by the 20 s limit stops the transfer loop waiting for it."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM))
+    events.clear()
+    role.send_artwork(0, b"later", _NOW_US + MAX_ANNOUNCE_LEAD_US + 10_000_000)
+    await asyncio.sleep(0)
+
+    assert role.cancel_scheduled_artwork(0)
+    await asyncio.sleep(0)
+
+    assert events == []
+    assert role._transfer_task is not None  # noqa: SLF001
+    assert role._transfer_task.done()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_artwork_cancel_drops_queued_scheduled_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -973,25 +995,33 @@ async def test_legacy_hello_client_gets_scheduled_artwork_at_most_20s_ahead() ->
         pack_binary_header_raw(8, later_us) + b"later"
     ]
 
-    role.send_artwork(channel=0, image_data=b"much later", timestamp_us=later_us + 1_000)
+    role.send_artwork(channel=0, image_data=b"much later", timestamp_us=later_us + 10_000_000)
     role.send_artwork(channel=0, image_data=b"now", timestamp_us=clock.now_us())
-    clock.advance_us(1_000)
-    role._queue_changed.set()  # noqa: SLF001
     await asyncio.sleep(0)
     assert [call.args[0] for call in client.send_binary.call_args_list][1:] == [
         pack_binary_header_raw(8, _NOW_US + 1_000) + b"now"
     ]
+    # The replaced image's deadline no longer keeps the transfer loop waiting.
+    assert role._transfer_task is not None  # noqa: SLF001
+    assert role._transfer_task.done()  # noqa: SLF001
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-def test_legacy_hello_client_cannot_cancel_scheduled_artwork() -> None:
+@pytest.mark.asyncio
+async def test_legacy_hello_client_cannot_cancel_scheduled_artwork() -> None:
     """A single-message client needs the current image re-sent to drop a scheduled one."""
     client = _make_legacy_client_stub()
     role = ArtworkV1Role(client=client)
     role.on_connect()
+    role.send_artwork(0, b"later", _NOW_US + MAX_ANNOUNCE_LEAD_US + 10_000_000)
+    await asyncio.sleep(0)
 
     assert not role.cancel_scheduled_artwork(0)
+    await asyncio.sleep(0)
+
     client.send_binary.assert_not_called()
+    assert role._transfer_task is not None  # noqa: SLF001
+    assert role._transfer_task.done()  # noqa: SLF001
 
 
 def test_legacy_initial_state_without_artwork_is_not_a_deviation() -> None:
