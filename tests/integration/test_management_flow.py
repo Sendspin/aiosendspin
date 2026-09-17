@@ -1,8 +1,10 @@
 """End-to-end management command tests: records, gating, interleaving."""
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -33,16 +35,19 @@ from aiosendspin.noise.trust_store import (
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer
-from tests.conftest import make_sdk_client
+from tests.conftest import make_sdk_client, recorded_deprecations
 from tests.pairing_stores import BoundedClientStore
 
 
-def _make_server(store: InMemoryServerPairingStore) -> SendspinServer:
+def _make_server(
+    store: InMemoryServerPairingStore, *, allow_noncompliant_clients: bool = True
+) -> SendspinServer:
     return SendspinServer(
         loop=asyncio.get_running_loop(),
         identity=Identity.generate(),
         server_name="test-server",
         pairing_store=store,
+        allow_noncompliant_clients=allow_noncompliant_clients,
     )
 
 
@@ -169,9 +174,9 @@ async def test_disable_management_keeps_connection() -> None:
             await _await_without_activity(client, Activity.MANAGEMENT)
             assert client.connected
 
-            # The gate is re-engaged: a management/* request is now denied.
-            result = await conn.remove_record(psk_id=psk_id_for(generate_psk()))
-            assert result is ManagementResult.PERMISSION_DENIED
+            # The server no longer sends management/* requests on this connection.
+            with pytest.raises(RuntimeError, match="management is not enabled"):
+                await conn.remove_record(psk_id=psk_id_for(generate_psk()))
         finally:
             await client.disconnect()
 
@@ -265,7 +270,156 @@ async def test_list_records_reports_storage_and_tracks_usage() -> None:
             await client.disconnect()
 
 
-async def test_management_request_without_session_is_denied() -> None:
+async def test_management_apis_warn_once_each(caplog: pytest.LogCaptureFixture) -> None:
+    """Every deprecated management API warns once per process and keeps working."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_pairing(server, server_store, client_store, identity.peer_id)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _await_connected_client(server, identity.peer_id)
+            with caplog.at_level(logging.WARNING), recorded_deprecations() as deprecations:
+                for _ in range(2):
+                    conn = server.enable_management(identity.peer_id)
+                    await _await_activity(client, Activity.MANAGEMENT)
+                    result, _, _ = await conn.list_records()
+                    assert result is ManagementResult.OK
+                    added = await conn.add_record(psk=generate_psk(), server_id="srv2")
+                    assert added is ManagementResult.OK
+                    removed = await conn.remove_record(psk_id="absent")
+                    assert removed is ManagementResult.NOT_FOUND
+                    result, _, _ = await conn.get_pairing_config()
+                    assert result is ManagementResult.OK
+                    patch = ManagementSetPairingConfigPayload()
+                    assert await conn.set_pairing_config(patch) is ManagementResult.OK
+                    await conn.open_pairing_window()
+                    server.disable_management(identity.peer_id)
+                    await _await_without_activity(client, Activity.MANAGEMENT)
+        finally:
+            await client.disconnect()
+
+    expected = sorted(
+        [
+            "SendspinServer.enable_management",
+            "SendspinServer.disable_management",
+            "SendspinConnection.list_records",
+            "SendspinConnection.add_record",
+            "SendspinConnection.remove_record",
+            "SendspinConnection.get_pairing_config",
+            "SendspinConnection.set_pairing_config",
+            "SendspinConnection.open_pairing_window",
+            "management/* request handling",
+        ]
+    )
+    assert sorted(m.split(" is deprecated")[0] for m in deprecations) == expected
+    logged = [
+        r.message.split(" is deprecated")[0] for r in caplog.records if r.name == "aiosendspin.util"
+    ]
+    assert sorted(logged) == expected
+
+
+async def test_management_result_is_flagged_when_lenient(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lenient server accepts a management/result and logs the deprecated wire."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_pairing(server, server_store, client_store, identity.peer_id)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _await_connected_client(server, identity.peer_id)
+            conn = server.enable_management(identity.peer_id)
+            await _await_activity(client, Activity.MANAGEMENT)
+            with caplog.at_level(logging.WARNING):
+                result, _, _ = await conn.list_records()
+            assert result is ManagementResult.OK
+            assert any(
+                "non-compliant client: sent management/result" in r.message for r in caplog.records
+            )
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_management_result_is_rejected_when_strict() -> None:
+    """A strict server rejects the client that answers with a management/result."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store, allow_noncompliant_clients=False)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_pairing(server, server_store, client_store, identity.peer_id)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _await_connected_client(server, identity.peer_id)
+            conn = server.enable_management(identity.peer_id)
+            await _await_activity(client, Activity.MANAGEMENT)
+            with pytest.raises(RuntimeError, match="connection closed"):
+                await conn.list_records()
+            await _await_disconnected(client)
+        finally:
+            await client.disconnect()
+
+
+async def test_management_request_without_session_is_not_sent() -> None:
+    """The server refuses a management/* request on a connection it never enabled."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_pairing(server, server_store, client_store, identity.peer_id)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            server_client = await _await_connected_client(server, identity.peer_id)
+            conn = server_client.connection
+            assert conn is not None
+            # The embedder never enabled management, so no activation declared it.
+            assert Activity.MANAGEMENT not in client.activities
+            assert Activity.MANAGEMENT not in (conn._declared_activities or [])  # noqa: SLF001
+            with pytest.raises(RuntimeError, match="management is not enabled"):
+                await conn.remove_record(psk_id=psk_id_for(generate_psk()))
+        finally:
+            await client.disconnect()
+
+
+async def test_client_denies_management_request_without_session(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A management/* request on a connection without the management activity is denied."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
@@ -285,8 +439,21 @@ async def test_management_request_without_session_is_denied() -> None:
             server_client = await _await_connected_client(server, identity.peer_id)
             conn = server_client.connection
             assert conn is not None
-            result = await conn.remove_record(psk_id=psk_id_for(generate_psk()))
-            assert result is ManagementResult.PERMISSION_DENIED
+            # Issue the request without declaring the activity, as a stale server would.
+            conn._management_active = True  # noqa: SLF001
+            with recorded_deprecations() as deprecations:
+                result = await conn.remove_record(psk_id=psk_id_for(generate_psk()))
+                assert result is ManagementResult.PERMISSION_DENIED
+                second = await conn.remove_record(psk_id="absent")
+                assert second is ManagementResult.PERMISSION_DENIED
+            handling = [m for m in deprecations if m.startswith("management/* request handling")]
+            assert len(handling) == 1
+            handled = [
+                r
+                for r in caplog.records
+                if "management/* request handling is deprecated" in r.message
+            ]
+            assert len(handled) == 1
         finally:
             await client.disconnect()
 

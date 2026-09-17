@@ -41,6 +41,7 @@ from aiosendspin.noise.driver import HandshakeAbortedError
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
+from aiosendspin.util import create_task
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
 from .models import (
@@ -193,6 +194,8 @@ class SendspinClient:
     """The currently-admitted connection (at most one), if any."""
     _provisional_connections: set[SendspinConnection]
     """Incoming connections still being brought up / awaiting admission."""
+    _open_connections: set[SendspinConnection]
+    """Open connections, capped below the pairing store's record capacity."""
     _admission_lock: asyncio.Lock
     """Serializes the admit/displace decision across concurrent connections."""
 
@@ -347,6 +350,7 @@ class SendspinClient:
         )
 
         self._provisional_connections = set()
+        self._open_connections = set()
         self._admission_lock = asyncio.Lock()
         self._last_playback_loaded = False
         self._pairing_window_opened = asyncio.Event()
@@ -587,8 +591,7 @@ class SendspinClient:
     def open_pairing_window(self) -> None:
         """Open a pairing window admitting gesture-gated pairing attempts until it closes.
 
-        Called on an operator gesture, or by a paired server through
-        ``management/open-pairing-window``. A no-op while a window is already open.
+        Called on an operator gesture. A no-op while a window is already open.
         """
         if self.pairing_window_open:
             return
@@ -814,36 +817,39 @@ class SendspinClient:
 
         The user explicitly chose this server, so the new connection is admitted
         unconditionally — an explicit switch — unless it relies on unpaired access the
-        client no longer admits, which raises ``RuntimeError``. Returns once admitted; the
-        reader and time-sync loops, and any pairing attempt the server requests, then run in
-        the background.
+        client no longer admits, which raises ``RuntimeError``. Also raises ``RuntimeError``,
+        before dialing, when the open connections already fill every slot below the pairing
+        store's record capacity. Returns once admitted; the reader and time-sync loops, and
+        any pairing attempt the server requests, then run in the background.
         """
+        connection = SendspinConnection(self)
+        if not self._claim_connection_slot(connection):
+            raise RuntimeError("open connection limit reached")
+
         if self._session is None:
             self._session = ClientSession()
 
         logger.info("Connecting to Sendspin server at %s", url)
 
-        raw_ws = await self._session.ws_connect(url, heartbeat=30)
-        connection = SendspinConnection(self)
         self._provisional_connections.add(connection)
         try:
-            await connection.connect(raw_ws, expected_server_id=expected_server_id)
-        finally:
-            self._provisional_connections.discard(connection)
-
-        # Hold the lock only for the admit decision, not for start()/pairing.
-        try:
-            async with self._admission_lock:
-                refused = await self._refuse_unpaired_access(connection)
-                if not refused:
-                    await self._admit_connection(connection)
+            try:
+                raw_ws = await self._session.ws_connect(url, heartbeat=30)
+                await connection.connect(raw_ws, expected_server_id=expected_server_id)
+                # Hold the lock only for the admit decision, not for start()/pairing.
+                async with self._admission_lock:
+                    refused = await self._refuse_unpaired_access(connection)
+                    admitted = not refused and await self._admit_connection(connection)
+            finally:
+                self._end_admission(connection)
+            if refused:
+                raise RuntimeError("server activation rejected (pairing_required)")  # noqa: TRY301
+            if not admitted:
+                raise RuntimeError("connection closed before admission")  # noqa: TRY301
+            await connection.start()
         except BaseException:
-            # Bring-up already dropped it from _provisional_connections, so nothing else owns it.
             await connection.disconnect()
             raise
-        if refused:
-            raise RuntimeError("server activation rejected (pairing_required)")
-        await connection.start()
 
     async def attach_websocket(
         self, ws: web.WebSocketResponse, *, expected_server_id: str | None = None
@@ -861,23 +867,17 @@ class SendspinClient:
                 match or the handshake is aborted.
         """
         connection = SendspinConnection(self)
+        # Over the limit, bring-up rejects the connection once its handshake completes.
+        self._claim_connection_slot(connection)
         self._provisional_connections.add(connection)
         try:
-            await connection.attach_websocket(ws, expected_server_id=expected_server_id)
-        except (HandshakeAbortedError, OSError, RuntimeError, TimeoutError) as exc:
-            # Bring-up failed; the connection/socket is already torn down.
-            self._provisional_connections.discard(connection)
-            logger.debug("Incoming connection failed bring-up: %s", exc)
-            return
-        except BaseException:
-            # Failures outside the expected set may leave the transport half-open.
-            await connection.disconnect()
-            raise
-        finally:
-            self._provisional_connections.discard(connection)
-
-        # Hold the lock only for the admit/reject decision, not for start()/pairing.
-        try:
+            try:
+                await connection.attach_websocket(ws, expected_server_id=expected_server_id)
+            except (HandshakeAbortedError, OSError, RuntimeError, TimeoutError) as exc:
+                # Bring-up failed; the connection/socket is already torn down.
+                logger.debug("Incoming connection failed bring-up: %s", exc)
+                return
+            # Hold the lock only for the admit/reject decision, not for start()/pairing.
             async with self._admission_lock:
                 await self._ensure_last_playback_loaded()
                 if not self._should_admit_connection(connection):
@@ -885,16 +885,23 @@ class SendspinClient:
                     return
                 if await self._refuse_unpaired_access(connection):
                     return
-                await self._admit_connection(connection)
+                if not await self._admit_connection(connection):
+                    return
         except BaseException:
-            # Bring-up already dropped it from _provisional_connections, so nothing else owns it.
+            # Failures outside the expected set may leave the transport half-open.
             await connection.disconnect()
             raise
+        finally:
+            self._end_admission(connection)
         try:
             await connection.start()
         except (OSError, RuntimeError, TimeoutError) as exc:
             logger.debug("Admitted connection did not reach steady state: %s", exc)
+            await connection.disconnect()
             return
+        except BaseException:
+            await connection.disconnect()
+            raise
         await connection.wait_closed()
 
     async def disconnect(self, reason: GoodbyeReason = GoodbyeReason.SHUTDOWN) -> None:
@@ -913,11 +920,38 @@ class SendspinClient:
 
     # --- Connection admission ---
 
+    def has_connection_slot(self, connection: SendspinConnection) -> bool:
+        """Whether ``connection`` holds one of the capped open-connection slots."""
+        return connection in self._open_connections
+
+    def protected_psk_ids(self) -> set[str]:
+        """Return the ``psk_id``s of the pairing records backing open connections.
+
+        Connections still being brought up count, including those over the limit.
+        """
+        connections = self._open_connections | self._provisional_connections
+        return {psk_id for c in connections for psk_id in c.record_psk_ids}
+
+    def _claim_connection_slot(self, connection: SendspinConnection) -> bool:
+        """Claim an open-connection slot for ``connection``; False when none is free.
+
+        Open connections stay below the record capacity, so a completing pairing always
+        finds a record it may evict.
+        """
+        if len(self._open_connections) >= self._pairing_store.record_capacity - 1:
+            return False
+        self._open_connections.add(connection)
+        return True
+
+    def _end_admission(self, connection: SendspinConnection) -> None:
+        """Stop tracking ``connection`` as provisional, releasing its slot unless still open."""
+        self._provisional_connections.discard(connection)
+        if not connection.connected:
+            self._open_connections.discard(connection)
+
     @staticmethod
     def _activity_rank(activities: list[Activity]) -> int:
-        """Rank a connection by its highest activity: management > playback > pairing > none."""
-        if Activity.MANAGEMENT in activities:
-            return 3
+        """Rank a connection by its highest activity: playback > pairing > none."""
         if Activity.PLAYBACK in activities:
             return 2
         if Activity.PAIRING in activities:
@@ -952,16 +986,22 @@ class SendspinClient:
             self.last_playback_server_id = await self._pairing_store.get_last_playback_server_id()
         self._last_playback_loaded = True
 
-    async def _admit_connection(self, connection: SendspinConnection) -> None:
-        """Make ``connection`` the admitted one, displacing any prior holder."""
-        previous = self._admitted_connection
-        if previous is connection:
-            return
+    async def _admit_connection(self, connection: SendspinConnection) -> bool:
+        """Make ``connection`` the admitted one, displacing any prior holder.
+
+        Returns False, admitting nothing, when ``connection`` has closed.
+        """
+        if self._admitted_connection is connection:
+            return True
         await self._record_last_playback(connection)
+        if not connection.connected:
+            return False
+        previous = self._admitted_connection
         self._admitted_connection = connection
         if previous is not None:
             await self._dismiss_connection(previous, GoodbyeReason.ANOTHER_SERVER)
             await previous.disconnect()
+        return True
 
     async def note_playback_activity(self, connection: SendspinConnection) -> None:
         """Record the admitted server as last-playback when it carries the playback activity."""
@@ -1007,6 +1047,12 @@ class SendspinClient:
     def on_connection_closed(self, connection: SendspinConnection) -> None:
         """Report a disconnect only when the admitted connection (not a provisional one) closes."""
         self._provisional_connections.discard(connection)
+        self._open_connections.discard(connection)
+        # A record a re-pairing replaced is kept only while a connection still used it.
+        create_task(
+            self._pairing_store.remove_superseded_records(protected=self.protected_psk_ids()),
+            loop=self._loop,
+        )
         if self._pairing_window_connection is connection:
             self.close_pairing_window()
         if self._admitted_connection is connection:

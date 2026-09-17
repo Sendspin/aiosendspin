@@ -4,14 +4,36 @@ from __future__ import annotations
 
 import math
 import struct
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from aiosendspin import util
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.trust_store import ClientPairingStore, InMemoryClientPairingStore
+
+
+@pytest.fixture(autouse=True)
+def _reset_deprecation_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test a process state in which no deprecation has been reported yet."""
+    monkeypatch.setattr(util, "_WARNED_DEPRECATIONS", set())
+
+
+@contextmanager
+def recorded_deprecations() -> Iterator[list[str]]:
+    """Collect the messages of every DeprecationWarning raised inside the block."""
+    messages: list[str] = []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            yield messages
+        finally:
+            messages.extend(str(w.message) for w in caught if w.category is DeprecationWarning)
 
 
 def make_sdk_client(

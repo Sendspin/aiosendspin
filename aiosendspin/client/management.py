@@ -1,5 +1,8 @@
 """Client-side handling of management commands.
 
+The ``management/*`` handlers are deprecated: the Sendspin spec no longer defines the
+management activity.
+
 Pure logic that maps a parsed server→client request onto the client's
 ``ClientPairingStore``, returning the
 ``ManagementResultPayload`` to reply with and an
@@ -65,11 +68,14 @@ def _result(
 async def handle_unpair(store: ClientPairingStore, *, matched_psk_id: str) -> None:
     """Drop the matched record on server/unpair; a shared-PSK record is never removed here."""
     record = await store.record_by_psk_id(matched_psk_id)
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+    # The server_id check skips shared record-mode records.
     if record is None or record.server_id is None:
         return
     await store.remove_record(matched_psk_id)
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def handle_list_records(
     store: ClientPairingStore,
 ) -> tuple[ManagementResultPayload, ManagementEffect]:
@@ -82,6 +88,7 @@ async def handle_list_records(
     return _result(ManagementResult.OK, data), ManagementEffect.NONE
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def handle_add_record(
     store: ClientPairingStore, payload: ManagementAddRecordPayload
 ) -> tuple[ManagementResultPayload, ManagementEffect]:
@@ -107,6 +114,7 @@ async def handle_add_record(
     return _result(ManagementResult.OK), ManagementEffect.NONE
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def handle_remove_record(
     store: ClientPairingStore,
     payload: ManagementRemoveRecordPayload,
@@ -128,6 +136,7 @@ async def handle_remove_record(
     return _result(ManagementResult.OK), effect
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def handle_get_pairing_config(
     store: ClientPairingStore,
     *,
@@ -156,6 +165,7 @@ async def handle_get_pairing_config(
     return _result(ManagementResult.OK, data), ManagementEffect.NONE
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def handle_set_pairing_config(
     store: ClientPairingStore,
     payload: ManagementSetPairingConfigPayload,
@@ -228,6 +238,7 @@ async def handle_set_pairing_config(
     return _result(ManagementResult.OK), ManagementEffect.NONE
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def handle_open_pairing_window(
     store: ClientPairingStore,
     *,
@@ -235,6 +246,9 @@ async def handle_open_pairing_window(
     open_window: Callable[[], None],
 ) -> tuple[ManagementResultPayload, ManagementEffect]:
     """Open a pairing window in place of the operator gesture.
+
+    Deprecated: the Sendspin spec no longer defines the management activity; an operator
+    gesture opens the window through ``SendspinClient.open_pairing_window``.
 
     Invalid when no pairing-code method is enabled; a no-op ``ok`` when a window is
     already open (``open_window`` is expected to absorb that case).
@@ -254,6 +268,7 @@ async def handle_open_pairing_window(
     return _result(ManagementResult.OK), ManagementEffect.NONE
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def with_storage(
     payload: ManagementResultPayload, store: ClientPairingStore, *, include_static: bool
 ) -> ManagementResultPayload:

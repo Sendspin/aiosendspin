@@ -1,4 +1,5 @@
 """Unit tests for the client-side management command handlers."""
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 
 from __future__ import annotations
 
@@ -216,6 +217,7 @@ async def test_unpair_removes_stored_pubkey_record() -> None:
     assert await store.record_by_psk_id(record.psk_id) is None
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_unpair_keeps_shared_psk_record() -> None:
     """server/unpair must not remove a shared-PSK record (it may back other servers)."""
     store = InMemoryClientPairingStore()
