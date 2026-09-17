@@ -211,6 +211,23 @@ def test_controller_group_role_set_supported_commands() -> None:
     assert MediaCommand.PAUSE in commands
 
 
+def test_controller_group_role_reordered_supported_commands_do_not_push() -> None:
+    """Re-setting the same supported commands in another order pushes no new state."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+    cgr.set_supported_commands([MediaCommand.PLAY, MediaCommand.PAUSE])
+    member.send_message.reset_mock()
+
+    cgr.set_supported_commands([MediaCommand.PAUSE, MediaCommand.PLAY])
+    member.send_message.assert_not_called()
+
+    cgr.set_supported_commands([MediaCommand.PAUSE])
+    member.send_message.assert_called_once()
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.controller.supported_commands == [MediaCommand.PAUSE, MediaCommand.SWITCH]
+
+
 def test_controller_group_role_on_member_join_sends_state() -> None:
     """on_member_join() sends current controller state."""
     group = _make_group_stub()
