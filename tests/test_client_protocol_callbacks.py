@@ -920,9 +920,12 @@ async def test_server_command_set_output_delay_applies_and_notifies() -> None:
         state_supported_commands=[PlayerCommand.SET_OUTPUT_DELAY],
     )
     connection, _ = await _reporting_connection(client)
+    client._admitted_connection = connection  # noqa: SLF001
 
     received: list[ServerCommandPayload] = []
     client.add_server_command_listener(received.append)
+    delays: list[float] = []
+    client.add_output_delay_listener(delays.append)
 
     payload = ServerCommandPayload(
         player=PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY, output_delay_ms=250)
@@ -930,6 +933,8 @@ async def test_server_command_set_output_delay_applies_and_notifies() -> None:
     connection._handle_server_command(payload)  # noqa: SLF001
 
     assert connection.output_delay_ms == 250.0
+    assert client.output_delay_us == 250_000
+    assert delays == [250.0]
     assert received == [payload]
 
 
@@ -942,6 +947,7 @@ async def test_server_command_pre_rename_delay_applies_and_notifies() -> None:
         state_supported_commands=[PlayerCommand.SET_STATIC_DELAY],
     )
     connection, _ = await _reporting_connection(client)
+    client._admitted_connection = connection  # noqa: SLF001
 
     received: list[ServerCommandPayload] = []
     client.add_server_command_listener(received.append)
@@ -953,6 +959,28 @@ async def test_server_command_pre_rename_delay_applies_and_notifies() -> None:
 
     assert connection.output_delay_ms == 250.0
     assert received == [payload]
+
+
+async def test_output_delay_listener_fires_on_changes_only() -> None:
+    """The output delay listener receives each clamped change, not no-op sets."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+        output_delay_ms=100.0,
+    )
+    delays: list[float] = []
+    remove = client.add_output_delay_listener(delays.append)
+
+    client.set_output_delay_ms(100.0)
+    client.set_output_delay_ms(120.5)
+    client.set_output_delay_ms(9_000.0)
+    client.set_output_delay_ms(5_000.0)
+    remove()
+    client.set_output_delay_ms(0.0)
+
+    assert delays == [120.5, 5_000.0]
+    assert client.output_delay_us == 0
 
 
 async def test_server_command_without_player_only_notifies() -> None:

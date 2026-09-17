@@ -110,6 +110,9 @@ PairingAbortCallback = Callable[[PairAbortReason], None]
 # Callback invoked when the server sends a command.
 ServerCommandCallback = Callable[[ServerCommandPayload], None]
 
+# Callback invoked with the new output delay in milliseconds whenever it changes.
+OutputDelayCallback = Callable[[float], None]
+
 # Callback invoked when visualizer frames are received. Beat events are
 # delivered through the same callback as a `VisualizerFrame` carrying
 # only `timestamp_us` + `is_downbeat`.
@@ -126,6 +129,9 @@ class SendspinClient:
     The client must be created within an async context and requires explicit
     role specification. Player and metadata support configs are required if
     their respective roles are enabled.
+
+    Player embedders MUST persist the output delay across restarts, using
+    ``add_output_delay_listener()``, and pass it back as ``output_delay_ms``.
     """
 
     _identity: Identity
@@ -212,6 +218,8 @@ class SendspinClient:
     """Callbacks invoked when a non-closing pairing attempt ends with an abort reason."""
     _server_command_callbacks: list[ServerCommandCallback]
     """Callbacks invoked when server sends player commands."""
+    _output_delay_callbacks: list[OutputDelayCallback]
+    """Callbacks invoked when the output delay changes."""
     _visualizer_callbacks: list[VisualizerCallback]
     """Callbacks invoked when visualizer frames are received (beats included)."""
     _artwork_callbacks: list[ArtworkCallback]
@@ -304,6 +312,8 @@ class SendspinClient:
         self._loop = asyncio.get_running_loop()
         self._initial_volume = initial_volume
         self._initial_muted = initial_muted
+        # set_output_delay_ms() notifies these listeners.
+        self._output_delay_callbacks = []
         self.set_output_delay_ms(output_delay_ms)
         self.set_required_lead_time_ms(required_lead_time_ms)
         self.set_min_buffer_ms(min_buffer_ms)
@@ -623,7 +633,12 @@ class SendspinClient:
         return self._output_delay_us / 1_000.0
 
     def set_output_delay_ms(self, delay_ms: float) -> None:
-        """Update the output delay applied after clock synchronisation."""
+        """Update the output delay applied after clock synchronisation, clamped to 0-5000 ms.
+
+        The embedder MUST persist the delay across restarts and pass it back as
+        ``output_delay_ms`` when creating the client; a server can also change it, so
+        persist it from ``add_output_delay_listener()``.
+        """
         delay_ms = max(0.0, min(5000.0, delay_ms))
         delay_us = round(delay_ms * 1_000.0)
         if self._admitted_connection is not None:
@@ -632,6 +647,7 @@ class SendspinClient:
             return
         self._output_delay_us = delay_us
         logger.info("Set output delay to %.1f ms", self.output_delay_ms)
+        self.notify_output_delay_callback(delay_us / 1_000.0)
 
     @property
     def required_lead_time_ms(self) -> float:
@@ -1148,6 +1164,22 @@ class SendspinClient:
             else None
         )
 
+    def add_output_delay_listener(self, callback: OutputDelayCallback) -> Callable[[], None]:
+        """Add a listener for output delay changes, local or server-set.
+
+        The callback receives the clamped delay in milliseconds. Persist it and pass it
+        back as ``output_delay_ms`` on the next start.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._output_delay_callbacks.append(callback)
+        return lambda: (
+            self._output_delay_callbacks.remove(callback)
+            if callback in self._output_delay_callbacks
+            else None
+        )
+
     def add_visualizer_listener(self, callback: VisualizerCallback) -> Callable[[], None]:
         """Add a listener for visualizer frame events.
 
@@ -1254,6 +1286,14 @@ class SendspinClient:
                 callback(payload)
             except Exception:
                 logger.exception("Error in server command callback %s", callback)
+
+    def notify_output_delay_callback(self, delay_ms: float) -> None:
+        """Dispatch an output delay change to the registered listeners."""
+        for callback in list(self._output_delay_callbacks):
+            try:
+                callback(delay_ms)
+            except Exception:
+                logger.exception("Error in output delay callback %s", callback)
 
     def notify_visualizer_callbacks(self, frames: list[VisualizerFrame]) -> None:
         """Dispatch visualizer frames to the registered listeners."""
