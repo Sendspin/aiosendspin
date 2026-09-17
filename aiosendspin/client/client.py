@@ -455,6 +455,15 @@ class SendspinClient:
         )
 
     @property
+    def pair_pending_message(self) -> str | None:
+        """Operator message sent in ``client/pair-pending``, if configured."""
+        return (
+            self._pairing_support.pair_pending_message
+            if self._pairing_support is not None
+            else None
+        )
+
+    @property
     def pairing_code_out_channels(self) -> tuple[str, ...]:
         """Channels the dynamic pairing code is conveyed through, in descriptor order."""
         channels = []

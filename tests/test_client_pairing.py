@@ -229,6 +229,75 @@ async def test_dynamic_attempt_at_round_limit_is_held_back() -> None:
     assert await store.pairing_round_count() == PAIRING_ROUND_LIMIT
 
 
+async def _sent_pair_pending(
+    method: PairMethod, pair_pending_message: str | None
+) -> dict[str, object]:
+    """Run an attempt of ``method`` up to its client/pair-pending and return the sent JSON."""
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        pass
+
+    connection, ws = _pairing_connection(
+        PairingSupport(pairing_code_display=display, pair_pending_message=pair_pending_message)
+    )
+    store = connection._client.pairing_store  # noqa: SLF001
+    if method is PairMethod.STATIC_PAIRING_CODE:
+        # Every static attempt is gesture-gated.
+        await store.set_static_pairing_code("12345678")
+        config = await store.get_pairing_config()
+        await store.store_pairing_config(
+            replace(config, static_pairing_code_enabled=True, dynamic_pairing_code_enabled=False)
+        )
+    else:
+        # A dynamic attempt is held back at the round limit.
+        for _ in range(PAIRING_ROUND_LIMIT):
+            await store.record_pairing_round()
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=method, format="digits" if method is PairMethod.DYNAMIC_PAIRING_CODE else None
+    )
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    ws.receive = queue.get  # type: ignore[attr-defined]
+
+    attempt = asyncio.create_task(
+        connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+    )
+    async with asyncio.timeout(1):
+        while not ws.sent:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    attempt.cancel()
+    with suppress(asyncio.CancelledError):
+        await attempt
+
+    pending: dict[str, object] = json.loads(ws.sent[0])
+    assert pending["type"] == "client/pair-pending"
+    return pending
+
+
+@pytest.mark.parametrize(
+    "method", [PairMethod.STATIC_PAIRING_CODE, PairMethod.DYNAMIC_PAIRING_CODE]
+)
+async def test_pair_pending_carries_the_configured_message(method: PairMethod) -> None:
+    """The gesture gate and the round-limit hold-back both name what the client waits for."""
+    pending = await _sent_pair_pending(method, "Press the pairing button")
+    assert pending["payload"] == {"pairing_index": 1, "message": "Press the pairing button"}
+
+
+@pytest.mark.parametrize(
+    "method", [PairMethod.STATIC_PAIRING_CODE, PairMethod.DYNAMIC_PAIRING_CODE]
+)
+async def test_pair_pending_omits_an_unconfigured_message(method: PairMethod) -> None:
+    """Without a configured message the key is left out."""
+    pending = await _sent_pair_pending(method, None)
+    assert pending["payload"] == {"pairing_index": 1}
+
+
+def test_pair_pending_message_is_limited_to_200_characters() -> None:
+    """A message the spec allows is kept whole; a longer one is refused rather than cut."""
+    assert PairingSupport(pair_pending_message="x" * 200).pair_pending_message == "x" * 200
+    with pytest.raises(ValueError, match="200 characters"):
+        PairingSupport(pair_pending_message="x" * 201)
+
+
 async def test_ungated_dynamic_attempt_starts_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -754,7 +754,9 @@ class SendspinConnection:
             return
         await ws.send_str(
             ClientPairPendingMessage(
-                payload=ClientPairPendingPayload(pairing_index=pairing_index),
+                payload=ClientPairPendingPayload(
+                    pairing_index=pairing_index, message=self._client.pair_pending_message
+                ),
             ).to_json(),
         )
         window = asyncio.ensure_future(self._client.await_pairing_window(self))
