@@ -1,4 +1,6 @@
-"""Visualizer role models."""
+"""Deprecated visualizer role models for the `visualizer@_draft_r1` wire."""
+
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 
 from __future__ import annotations
 

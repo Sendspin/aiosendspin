@@ -24,7 +24,10 @@ _FAMILY_ORDER = {
     )
 }
 
-# Legacy backwards-compat wires excluded from negotiation in strict mode.
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+# Legacy backwards-compat wires. They are excluded from negotiation in strict mode,
+# and in every mode lose to another registered role of the same family.
+# `visualizer@_draft_r1` reuses binary type 16 with a different payload.
 _LEGACY_ROLE_IDS = frozenset({"visualizer@_draft_r1"})
 
 
@@ -37,14 +40,23 @@ def negotiate_roles(client_supported_roles: list[str], *, strict: bool = False) 
     """Negotiate the mutually-supported role set from the client-supported role list.
 
     For each role family, pick the first role in client order that is registered
-    in ROLE_FACTORIES. The result is sorted by the server-defined family
-    activation order. When ``strict``, legacy backwards-compat wires are skipped
-    so a later spec role in the same family can win instead.
+    in ROLE_FACTORIES. Legacy backwards-compat wires are skipped whenever the client
+    also lists another registered role of the same family, whatever the client's
+    order, and always when ``strict``. The result is sorted by the server-defined
+    family activation order.
     """
     active: dict[str, str] = {}
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+    spec_families = {
+        role_family(role_id)
+        for role_id in client_supported_roles
+        if role_id in ROLE_FACTORIES and role_id not in _LEGACY_ROLE_IDS
+    }
 
     for client_role_id in client_supported_roles:
-        if strict and client_role_id in _LEGACY_ROLE_IDS:
+        if client_role_id in _LEGACY_ROLE_IDS and (
+            strict or role_family(client_role_id) in spec_families
+        ):
             continue
         family = role_family(client_role_id)
         if family in active:

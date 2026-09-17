@@ -6,6 +6,8 @@ attribute presence). draft_r1 must NOT expose those attributes, or it
 would accidentally start receiving beats it can't render.
 """
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+
 from __future__ import annotations
 
 import pytest

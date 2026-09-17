@@ -141,36 +141,6 @@ def test_parse_peak_frame() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pitch (msg 21)
-# ---------------------------------------------------------------------------
-
-
-def test_parse_pitch_frame() -> None:
-    """Parse pitch frame."""
-    # A4 = MIDI 69 → 0x4500. Confidence 200.
-    payload = struct.pack(">q", 1) + struct.pack(">H", 0x4500) + bytes([200])
-    cfg = _basic_config(types=("pitch",))
-    frame = SendspinConnection._parse_visualization_frame(  # noqa: SLF001
-        BinaryMessageType.VISUALIZATION_PITCH, payload, cfg
-    )
-    assert frame is not None
-    assert frame.pitch_midi_q88 == 0x4500
-    assert frame.pitch_confidence == 200
-
-
-def test_parse_pitch_rejects_wrong_length() -> None:
-    """Parse pitch rejects wrong length."""
-    cfg = _basic_config(types=("pitch",))
-    bad = struct.pack(">q", 1) + struct.pack(">H", 0x4500)  # missing confidence byte
-    assert (
-        SendspinConnection._parse_visualization_frame(  # noqa: SLF001
-            BinaryMessageType.VISUALIZATION_PITCH, bad, cfg
-        )
-        is None
-    )
-
-
-# ---------------------------------------------------------------------------
 # beat (msg 17) — delivered through the visualizer callback
 # ---------------------------------------------------------------------------
 
@@ -249,6 +219,26 @@ async def test_handle_beat_rejects_empty_payload() -> None:
     connection, received = _connection_with_visualizer_callback()
     connection._handle_visualization_beat(b"")  # noqa: SLF001
     assert received == []
+
+
+# ---------------------------------------------------------------------------
+# Reserved type 21 (formerly pitch)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserved_type_21_is_ignored() -> None:
+    """A type-21 binary reaches no visualizer callback and raises nothing."""
+    connection, received = _connection_with_visualizer_callback()
+    connection._visualizer_stream_active = True  # noqa: SLF001
+
+    body = struct.pack(">q", _NOW_US) + struct.pack(">H", 0x4500) + bytes([200])
+    connection._handle_binary_message(bytes([21]) + body)  # noqa: SLF001
+    connection._handle_binary_message(  # noqa: SLF001
+        bytes([BinaryMessageType.VISUALIZATION_LOUDNESS.value]) + _loudness_body(_NOW_US)
+    )
+
+    assert [frame.loudness for frame in received] == [1]
 
 
 # ---------------------------------------------------------------------------

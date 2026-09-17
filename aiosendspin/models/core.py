@@ -297,6 +297,7 @@ class ClientHelloPayload(SendspinModel):
         ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
     ] = None
     """Visualizer support configuration - only if visualizer@v1 role is in supported_roles."""
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     visualizer_draft_r1_support: Annotated[
         ClientHelloVisualizerSupportDraftR1 | None, Alias("visualizer@_draft_r1_support")
     ] = None
@@ -327,6 +328,7 @@ class ClientHelloPayload(SendspinModel):
         "player_support": "player@v1_support",
         "artwork_support": "artwork@v1_support",
         "visualizer_support": "visualizer@v1_support",
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         "visualizer_draft_r1_support": "visualizer@_draft_r1_support",
     }
 
@@ -384,6 +386,7 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append(Roles.VISUALIZER.value)
             self.visualizer_support = None
 
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         visualizer_draft_supported = "visualizer@_draft_r1" in self.supported_roles
         if visualizer_draft_supported and self.visualizer_draft_r1_support is None:
             missing.append("visualizer@_draft_r1")
@@ -888,6 +891,7 @@ class ServerCommandMessage(ServerMessage):
 # Shape carried by `StreamStartPayload.visualizer`. The field is typed `Any`
 # so mashumaro defers to the dispatch hooks below, but callers should annotate
 # against this alias for static checking.
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 StreamStartVisualizerLike = StreamStartVisualizer | StreamStartVisualizerDraftR1 | None
 
 
@@ -916,6 +920,7 @@ def _deserialize_stream_start_visualizer(
     """
     if not isinstance(value, dict):
         return None
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     if "batch_max" in value and "rate_max" not in value:
         return StreamStartVisualizerDraftR1.from_dict(value)
     return StreamStartVisualizer.from_dict(value)

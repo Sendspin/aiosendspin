@@ -208,7 +208,6 @@ _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
         BinaryMessageType.VISUALIZATION_F_PEAK,
         BinaryMessageType.VISUALIZATION_SPECTRUM,
         BinaryMessageType.VISUALIZATION_PEAK,
-        BinaryMessageType.VISUALIZATION_PITCH,
     }
 )
 
@@ -2092,15 +2091,6 @@ class SendspinConnection:
             if len(rest) != 1:
                 return None
             return VisualizerFrame(timestamp_us=timestamp_us, peak_strength=rest[0])
-        if message_type is BinaryMessageType.VISUALIZATION_PITCH:
-            if len(rest) != 3:
-                return None
-            (midi_q88,) = struct.unpack(">H", rest[:2])
-            return VisualizerFrame(
-                timestamp_us=timestamp_us,
-                pitch_midi_q88=midi_q88,
-                pitch_confidence=rest[2],
-            )
         return None
 
     def _handle_visualization_beat(self, payload: bytes) -> None:

@@ -44,6 +44,7 @@ from aiosendspin.util import create_task, get_local_ip
 from .client import SendspinClient
 from .connection import SendspinConnection
 from .group import SendspinGroup
+from .roles.visualizer.v1 import warn_pitch_deprecated
 
 logger = logging.getLogger(__name__)
 
@@ -220,11 +221,12 @@ class SendspinServer:
 
         self._clients: dict[str, SendspinClient] = {}
         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []
-        # Server-wide toggle for the visualizer `pitch` feature. Off by default:
-        # `pitch` rides reserved binary type 21, so enabling it puts a
-        # spec-reserved type on the wire and is technically non-compliant. It is
-        # kept as an opt-in extension for constrained/experimental setups. Read by
-        # VisualizerV1Role when building its stream config.
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        # Server-wide toggle for the deprecated visualizer `pitch` feature. Off by
+        # default: `pitch` rides reserved binary type 21, so enabling it puts a
+        # spec-reserved type on the wire and is non-compliant. It only applies to
+        # connections whose hello carried the pre-#195 visualizer stream
+        # configuration. Read by VisualizerV1Role when building its stream config.
         self._visualizer_pitch_enabled: bool = False
 
         if client_session is None:
@@ -324,25 +326,30 @@ class SendspinServer:
         """Get a persistent client device by id, if known."""
         return self._clients.get(client_id)
 
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     @property
     def visualizer_pitch_enabled(self) -> bool:
         """Whether visualizer roles compute the `pitch` feature (default False)."""
         return self._visualizer_pitch_enabled
 
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
     def set_visualizer_pitch_enabled(self, *, enabled: bool) -> None:
-        """Enable or disable the visualizer `pitch` feature server-wide.
+        """Enable or disable the deprecated visualizer `pitch` feature server-wide.
 
-        This option is ignored while `allow_noncompliant_clients` is False: `pitch`
-        uses reserved binary type 21, which the spec forbids, so a compliance-strict
-        server never emits it regardless of this toggle. It otherwise stays available
-        as an opt-in extension. Pitch (YINFFT) is also the heaviest per-frame
-        visualizer computation, so leaving it off sheds that cost on constrained
-        hardware.
+        `pitch` uses reserved binary type 21, which the spec forbids, so this option
+        only applies to legacy connections: those whose hello carried the pre-#195
+        visualizer stream configuration. Other clients never receive `pitch`, and a
+        server with `allow_noncompliant_clients` False never emits it. Enabling it
+        logs a deprecation warning once per process. Pitch (YINFFT) is also the
+        heaviest per-frame visualizer computation, so leaving it off sheds that cost
+        on constrained hardware.
         Toggling drops/adds `pitch` on live roles' negotiated types and re-emits
         `stream/start`; new roles pick the setting up when they connect.
         """
         if enabled == self._visualizer_pitch_enabled:
             return
+        if enabled:
+            warn_pitch_deprecated()
         self._visualizer_pitch_enabled = enabled
         for client in self._clients.values():
             for role in client.active_roles:

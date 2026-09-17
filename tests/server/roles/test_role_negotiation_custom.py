@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from aiosendspin.server.roles.negotiation import negotiate_roles, sort_role_ids
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
@@ -38,21 +40,30 @@ def test_negotiate_orders_player_before_controller() -> None:
     assert active == ["player@v1", "controller@v1"]
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_negotiate_activates_draft_visualizer_by_default() -> None:
     """The legacy visualizer@_draft_r1 wire is negotiated in the default (lenient) mode."""
     assert negotiate_roles(["visualizer@_draft_r1"]) == ["visualizer@_draft_r1"]
 
 
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_strict_excludes_draft_visualizer() -> None:
     """Under strict, the legacy draft wire is skipped and not activated."""
     assert negotiate_roles(["visualizer@_draft_r1"], strict=True) == []
 
 
-def test_strict_falls_back_to_v1_visualizer() -> None:
-    """Under strict, a client offering both draft and v1 gets v1 for the family."""
-    assert negotiate_roles(["visualizer@_draft_r1", "visualizer@v1"], strict=True) == [
-        "visualizer@v1"
-    ]
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    "roles",
+    [
+        ["visualizer@_draft_r1", "visualizer@v1"],
+        ["visualizer@v1", "visualizer@_draft_r1"],
+    ],
+)
+def test_v1_visualizer_wins_over_draft(roles: list[str], *, strict: bool) -> None:
+    """A client offering both draft and v1 gets v1, whatever its order or the mode."""
+    assert negotiate_roles(roles, strict=strict) == ["visualizer@v1"]
 
 
 def test_negotiate_orders_player_before_controller_with_metadata() -> None:
