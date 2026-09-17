@@ -19,7 +19,12 @@ from .artwork import (
     StreamRequestFormatArtwork,
     StreamStartArtwork,
 )
-from .base import SendspinConfig, SendspinModel
+from .base import (
+    SendspinConfig,
+    SendspinModel,
+    collect_application_objects,
+    expand_application_objects,
+)
 from .color import SessionUpdateColor
 from .controller import ControllerCommandPayload, ControllerStatePayload
 from .metadata import SessionUpdateMetadata
@@ -462,17 +467,26 @@ class ClientStatePayload(SendspinModel):
     """Artwork channel configuration - only if client has artwork role."""
     visualizer: VisualizerStatePayload | None = None
     """Visualizer stream configuration - only if client has visualizer role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Normalize a legacy `state` enum to `available`, recording that it was used."""
-        d = dict(d)
+        """Normalize a legacy `state` enum to `available`, recording that it was used.
+
+        Application-specific role objects are nested under `application_objects`.
+        """
+        d = collect_application_objects(d)
         legacy_state = "state" in d
         if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"
         # Always overwrite so a client cannot spoof the record via the wire.
         d["legacy_state_used"] = legacy_state or None
         return d
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -495,6 +509,17 @@ class ClientCommandPayload(SendspinModel):
 
     controller: ControllerCommandPayload | None = None
     """Controller commands - only if client has controller role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -679,21 +704,35 @@ class ServerStatePayload(SendspinModel):
     """Controller state - only sent to clients with controller role."""
     color: SessionUpdateColor | None | UndefinedField = field(default_factory=undefined_field)
     """Color state - only sent to clients with color role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
 
     def merge(self, other: ServerStatePayload) -> ServerStatePayload:
         """Return this state updated with the role objects present in `other`.
 
         Each present role object, including `None`, replaces the existing one wholesale.
-        Role objects omitted from `other` are kept.
+        Role objects omitted from `other` are kept. Application-specific role objects
+        follow the same rule per key.
         """
         return replace(
             self,
             **{
                 role.name: getattr(other, role.name)
                 for role in fields(other)
-                if not isinstance(getattr(other, role.name), UndefinedField)
+                if role.name != "application_objects"
+                and not isinstance(getattr(other, role.name), UndefinedField)
             },
+            application_objects=self.application_objects | other.application_objects,
         )
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -759,6 +798,17 @@ class ServerCommandPayload(SendspinModel):
     """Player commands - only sent to clients with player role."""
     source: SourceCommandServerPayload | None = None
     """Source command - only sent to clients with source role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -837,6 +887,17 @@ class StreamStartPayload(SendspinModel):
     Carries the v1 schema by default; legacy clients on `visualizer@_draft_r1`
     get the draft schema. Roles emit whichever matches their negotiated wire.
     """
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return collect_application_objects(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

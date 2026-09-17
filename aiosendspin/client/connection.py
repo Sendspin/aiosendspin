@@ -209,6 +209,9 @@ _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
     }
 )
 
+# Binary message IDs the spec leaves to application-specific roles.
+_APPLICATION_BINARY_TYPES = range(192, 256)
+
 
 @dataclass(slots=True)
 class _PendingArtwork:
@@ -1398,6 +1401,9 @@ class SendspinConnection:
             return
 
         raw_type = payload[0]
+        if raw_type in _APPLICATION_BINARY_TYPES:
+            self._client.notify_application_binary(raw_type, payload[1:])
+            return
         try:
             message_type = BinaryMessageType(raw_type)
         except ValueError:
@@ -1520,8 +1526,12 @@ class SendspinConnection:
 
         player = message.payload.player
         if player is None:
-            # stream/start without player payload - may be for artwork/visualizer only
-            if message.payload.visualizer is not None or message.payload.artwork is not None:
+            # stream/start without player payload - may be for other roles only
+            if (
+                message.payload.visualizer is not None
+                or message.payload.artwork is not None
+                or message.payload.application_objects
+            ):
                 self._client.notify_stream_start(message)
             else:
                 logger.debug("Stream start message without player payload")

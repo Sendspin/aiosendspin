@@ -45,6 +45,34 @@ def int_to_wire(value: Any) -> int:
     raise TypeError(msg)
 
 
+APPLICATION_OBJECTS_FIELD = "application_objects"
+
+
+def collect_application_objects(d: dict[str, Any]) -> dict[str, Any]:
+    """Return ``d`` with its `_`-prefixed application-specific role objects nested.
+
+    The objects move under ``application_objects``, which is always overwritten so the
+    field cannot be set from the wire.
+    """
+    normalized = {k: v for k, v in d.items() if not k.startswith("_")}
+    normalized[APPLICATION_OBJECTS_FIELD] = {k: v for k, v in d.items() if k.startswith("_")}
+    return normalized
+
+
+def expand_application_objects(d: dict[str, Any]) -> dict[str, Any]:
+    """Return ``d`` with ``application_objects`` lifted back to top-level payload keys.
+
+    Raises:
+        ValueError: If an application object key does not start with `_`.
+    """
+    objects = d.pop(APPLICATION_OBJECTS_FIELD, None) or {}
+    if invalid := sorted(key for key in objects if not key.startswith("_")):
+        msg = f"application object keys must start with '_', got {invalid}"
+        raise ValueError(msg)
+    d.update(objects)
+    return d
+
+
 class SendspinConfig(BaseConfig):
     """Base mashumaro config for Sendspin models.
 

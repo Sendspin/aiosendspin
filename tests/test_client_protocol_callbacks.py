@@ -508,6 +508,50 @@ def _artwork_stream_start() -> StreamStartMessage:
 
 
 @pytest.mark.asyncio
+async def test_stream_start_with_only_application_objects_reaches_listener() -> None:
+    """A stream/start for application-specific roles alone is delivered to the embedder."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+    captured: list[StreamStartMessage] = []
+    client.add_stream_start_listener(captured.append)
+    connection = SendspinConnection(client)
+    message = StreamStartMessage(
+        payload=StreamStartPayload(application_objects={"_acme": {"session": 1}})
+    )
+
+    await connection._handle_stream_start(message)  # noqa: SLF001
+
+    assert captured == [message]
+
+
+@pytest.mark.asyncio
+async def test_application_binary_ids_reach_application_listener() -> None:
+    """IDs 192-255 go to the application binary listener; other unknown IDs are dropped."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+    )
+    captured: list[tuple[int, bytes]] = []
+    remove = client.add_application_binary_listener(
+        lambda message_id, data: captured.append((message_id, data))
+    )
+    connection = SendspinConnection(client)
+
+    connection._handle_binary_message(bytes([192]) + b"first")  # noqa: SLF001
+    connection._handle_binary_message(bytes([255]))  # noqa: SLF001
+    connection._handle_binary_message(bytes([191]) + b"reserved")  # noqa: SLF001
+    connection._handle_binary_message(bytes([2]) + b"reserved")  # noqa: SLF001
+    remove()
+    connection._handle_binary_message(bytes([200]) + b"after-remove")  # noqa: SLF001
+
+    assert captured == [(192, b"first"), (255, b"")]
+
+
+@pytest.mark.asyncio
 async def test_artwork_binary_dropped_when_only_player_stream_active() -> None:
     """Artwork binaries must be rejected when only the player stream is active."""
     client = make_sdk_client(
