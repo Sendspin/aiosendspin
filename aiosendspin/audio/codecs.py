@@ -46,6 +46,17 @@ def opus_available() -> bool:
     return True
 
 
+@functools.cache
+def flac_encoder_available() -> bool:
+    """Whether FLAC can be encoded, which needs PyAV with FFmpeg's FLAC encoder."""
+    try:
+        _get_av().codec.Codec("flac", "w")
+    except (ImportError, ValueError):
+        # PyAV reports a missing codec as UnknownCodecError, a ValueError.
+        return False
+    return True
+
+
 class PcmPassthrough:
     """Chunk PCM into fixed-size frames."""
 
@@ -703,5 +714,6 @@ __all__ = [
     "PcmPassthrough",
     "create_decoder",
     "create_encoder",
+    "flac_encoder_available",
     "opus_available",
 ]

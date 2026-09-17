@@ -8,7 +8,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aiosendspin.audio.codecs import create_decoder, create_encoder, opus_available
+from aiosendspin.audio.codecs import (
+    create_decoder,
+    create_encoder,
+    flac_encoder_available,
+    opus_available,
+)
 from tests.conftest import sine_pcm_16bit
 
 
@@ -18,6 +23,14 @@ def _uncached_opus_probe() -> Iterator[None]:
     opus_available.cache_clear()
     yield
     opus_available.cache_clear()
+
+
+@pytest.fixture
+def _uncached_flac_probe() -> Iterator[None]:
+    """Run one flac_encoder_available() probe without reusing or leaving a cached result."""
+    flac_encoder_available.cache_clear()
+    yield
+    flac_encoder_available.cache_clear()
 
 
 def _roundtrip(codec: str, pcm: bytes) -> bytes:
@@ -126,3 +139,35 @@ def test_opus_unavailable_without_libopus(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("aiosendspin.audio.codecs._get_av", lambda: stub)
 
     assert opus_available() is False
+
+
+@pytest.mark.usefixtures("_uncached_flac_probe")
+def test_flac_encoder_available_with_pyav() -> None:
+    """FLAC encoding is available with the PyAV the test environment installs."""
+    assert flac_encoder_available() is True
+
+
+@pytest.mark.usefixtures("_uncached_flac_probe")
+def test_flac_encoder_unavailable_without_pyav(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FLAC encoding is unavailable when PyAV itself cannot be imported."""
+
+    def _no_av() -> types.ModuleType:
+        raise ImportError("no av")
+
+    monkeypatch.setattr("aiosendspin.audio.codecs._get_av", _no_av)
+
+    assert flac_encoder_available() is False
+
+
+@pytest.mark.usefixtures("_uncached_flac_probe")
+def test_flac_encoder_unavailable_without_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FLAC encoding is unavailable when PyAV's FFmpeg lacks the FLAC encoder."""
+
+    class _Codec:
+        def __init__(self, name: str, mode: str) -> None:
+            raise ValueError(f"unknown codec {name!r} for mode {mode!r}")
+
+    stub = types.SimpleNamespace(codec=types.SimpleNamespace(Codec=_Codec))
+    monkeypatch.setattr("aiosendspin.audio.codecs._get_av", lambda: stub)
+
+    assert flac_encoder_available() is False
