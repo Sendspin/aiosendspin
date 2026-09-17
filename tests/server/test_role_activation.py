@@ -36,12 +36,14 @@ from aiosendspin.models.types import (
     ArtworkSource,
     AudioCodec,
     BinaryMessageType,
+    PairMethod,
     PictureFormat,
     PlayerCommand,
     Roles,
 )
 from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, VisualizerStatePayload
-from aiosendspin.noise.keys import generate_psk, psk_id_for
+from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
+from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, TrustedUnpairedClient
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
@@ -51,7 +53,8 @@ from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
 from aiosendspin.server.roles.source.v1 import SourceV1Role
-from tests.server.test_multi_server import _FakeTransport, _MockServer
+from tests.noise.conftest import make_paired_sessions
+from tests.server.test_multi_server import _FakePairingTransport, _FakeTransport, _MockServer
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
@@ -182,6 +185,47 @@ async def test_removed_roles_are_torn_down_before_server_activate() -> None:
     assert await _drain_priority(conn, fake) == ["stream/end", "server/activate"]
     assert fake.sent_payloads()[1]["payload"]["active_roles"] == []
     assert not conn._role_queues.get("player")  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_long_term_pairing_ends_streams_before_rehandshake() -> None:
+    """Pairing on a long-term PSK puts stream/end on the wire before Noise message 1.
+
+    The patched re-handshake stands in for sending Noise message 1.
+    """
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), category=PskCategory.LONG_TERM)
+    player = _client(conn).role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._stream_started = True  # noqa: SLF001
+    transport = _FakePairingTransport()
+    # The attempt's queued view shares the base transport's socket and Noise session.
+    transport._ws = transport  # noqa: SLF001
+    transport._session = make_paired_sessions()[1]  # noqa: SLF001
+    conn._transport = transport  # noqa: SLF001
+    conn._handshake_hash = b"hash"  # noqa: SLF001
+    conn._server.identity = Identity.generate()  # type: ignore[misc]  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+    sent_before_rehandshake: list[str] = []
+
+    async def _rehandshake(*_args: object, **_kwargs: object) -> None:
+        sent_before_rehandshake.extend(p["type"] for p in transport.sent_payloads())
+        raise _RehandshakeReachedError
+
+    with (
+        patch("aiosendspin.server.connection.run_rehandshake_server", _rehandshake),
+        pytest.raises(_RehandshakeReachedError),
+    ):
+        await conn.initiate_pairing(
+            PairingAttempt(
+                method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id=CLIENT_ID
+            )
+        )
+
+    assert "stream/end" in sent_before_rehandshake
+
+
+class _RehandshakeReachedError(Exception):
+    """Raised by the patched re-handshake to stop the attempt at Noise message 1."""
 
 
 # DEPRECATED(spec-pr-275): remove in aiosendspin <version>

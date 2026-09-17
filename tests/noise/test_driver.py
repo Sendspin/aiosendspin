@@ -760,6 +760,8 @@ async def test_rehandshake_discards_old_key_messages_before_message_2() -> None:
     # In flight when the server starts: they reach it ahead of message 2.
     await client_init.encrypted_ws.send_str('{"type":"client/state","payload":{}}')
     await client_init.encrypted_ws.send_bytes(b"\x04audio")
+    await client_init.encrypted_ws.send_str('{"type":"client/from-the-future","payload":{}}')
+    await client_init.encrypted_ws.send_bytes(b"\x64unknown")
 
     server_re, client_re = await asyncio.gather(
         run_rehandshake_server(
