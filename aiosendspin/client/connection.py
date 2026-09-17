@@ -636,10 +636,6 @@ class SendspinConnection:
             effective_roles = self._active_roles
         else:
             effective_roles = []
-        if category is not PskCategory.LONG_TERM and any(
-            role_family(role_id) == "source" for role_id in effective_roles
-        ):
-            return GoodbyeReason.UNAUTHORIZED
         has_roles = bool(effective_roles)
         if not _admissible(
             category, activities, has_roles=has_roles, unpaired_access=unpaired_access
@@ -660,6 +656,9 @@ class SendspinConnection:
         self._discard_removed_role_state(effective_roles)
         self._end_removed_role_streams(effective_roles)
         self._active_roles = effective_roles
+        # The new role set is installed, so the sends below — and any the caller makes
+        # next — are the first that may go out under the new session.
+        self._end_rehandshake_quiet_period()
         if source_dropped:
             self._source_start_authorized = False
             if self._source_stream_active and self.connected:
@@ -1352,8 +1351,6 @@ class SendspinConnection:
     def _ensure_source_authorized(self, *, require_stream: bool = False) -> None:
         if not self.connected:
             raise RuntimeError("Client is not connected")
-        if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
-            raise RuntimeError("Source role requires a paired connection")
         if not self._is_role_active("source"):
             raise RuntimeError("Source role is not active")
         if require_stream and not self._source_stream_active:
@@ -1444,6 +1441,16 @@ class SendspinConnection:
         """Return whether a server source ``start`` is pending for ``SourceCapture.start()``."""
         return self._source_start_authorized
 
+    def is_in_rehandshake_quiet_period(self) -> bool:
+        """
+        Return whether a re-handshake currently bars new application messages.
+
+        Between Noise message 1 and the new ``server/activate`` the connection refuses or
+        drops what it is asked to send, so a caller holding encoder or buffer state should
+        keep it and retry rather than spend it on a send that cannot reach the wire.
+        """
+        return self._exchange_in_progress
+
     @asynccontextmanager
     async def _exchange(self) -> AsyncIterator[None]:
         """Reserve the wire for an in-band exchange: suppress other sends, then drain in-flight."""
@@ -1454,6 +1461,18 @@ class SendspinConnection:
             yield
         finally:
             self._exchange_in_progress = False
+
+    def _end_rehandshake_quiet_period(self) -> None:
+        """
+        Release the send suppression where a re-handshake's quiet period ends.
+
+        Neither peer may start a new application message between Noise message 1 and the
+        new ``server/activate``, so for a re-handshake the suppression outlives the
+        exchange carrying the handshake: it lifts only once that activation has installed
+        its role set. A refused activation never reaches here and stays suppressed until
+        the connection closes, which the ``client/goodbye`` is forced past.
+        """
+        self._exchange_in_progress = False
 
     async def _reader_loop(self) -> None:
         assert self._ws is not None
@@ -1599,10 +1618,11 @@ class SendspinConnection:
     async def _handle_handshake(self, data: str) -> None:
         """Run a server-initiated re-handshake, ending any pairing attempt still in progress."""
         await self._cancel_pairing_attempt()
-        async with self._exchange(), asyncio.timeout(REHANDSHAKE_TIMEOUT_S):
-            await self._rehandshake(data)
-            activate = await self._receive_server_activate()
-        await self._handle_server_activate(activate, resync=True)
+        async with self._exchange():
+            async with asyncio.timeout(REHANDSHAKE_TIMEOUT_S):
+                await self._rehandshake(data)
+                activate = await self._receive_server_activate()
+            await self._handle_server_activate(activate, resync=True)
 
     async def _handle_server_activate(
         self, payload: ServerActivatePayload, *, resync: bool = False

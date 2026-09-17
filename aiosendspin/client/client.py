@@ -615,6 +615,10 @@ class SendspinClient:
     async def set_unpaired_access(self, *, enabled: bool) -> None:
         """Persist whether this client admits unpaired access.
 
+        While enabled, an unpaired server may activate any role for this client,
+        including ``source@v1`` — which exposes the client's audio input. Clients with a
+        privacy-sensitive input such as a microphone should leave it disabled.
+
         Disabling it closes the admitted connection with ``client/goodbye`` reason
         ``pairing_required`` when that connection relies on unpaired access. Enabling it
         closes nothing: the setting is advertised from the next ``client/hello``.

@@ -254,6 +254,12 @@ async def _admitted_connection(
         ),
         pytest.param(
             ServerActivatePayload(
+                activities=[Activity.PLAYBACK], active_roles=[Roles.SOURCE.value]
+            ),
+            id="source_role",
+        ),
+        pytest.param(
+            ServerActivatePayload(
                 activities=[Activity.PLAYBACK, Activity.PAIRING],
                 active_roles=[Roles.PLAYER.value],
                 pairing=ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"),
@@ -470,6 +476,32 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
             GoodbyeReason.UNAUTHORIZED,
         ),
         (PskCategory.SENTINEL, [Activity.MANAGEMENT], [], False, GoodbyeReason.UNAUTHORIZED),
+        # source@v1 ranks like any other role; the server gates it behind its own approval.
+        (PskCategory.LONG_TERM, [Activity.PLAYBACK], [Roles.SOURCE.value], False, None),
+        (PskCategory.PAIRING, [Activity.PLAYBACK], [Roles.SOURCE.value], True, None),
+        (PskCategory.SENTINEL, [Activity.PLAYBACK], [Roles.SOURCE.value], True, None),
+        (
+            PskCategory.PAIRING,
+            [Activity.PLAYBACK],
+            [Roles.SOURCE.value],
+            False,
+            GoodbyeReason.PAIRING_REQUIRED,
+        ),
+        (
+            PskCategory.SENTINEL,
+            [Activity.PLAYBACK],
+            [Roles.SOURCE.value],
+            False,
+            GoodbyeReason.PAIRING_REQUIRED,
+        ),
+        # Roles still need a playback-capable connection, source included.
+        (
+            PskCategory.LONG_TERM,
+            [Activity.PAIRING],
+            [Roles.SOURCE.value],
+            False,
+            GoodbyeReason.UNAUTHORIZED,
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -562,6 +594,20 @@ async def test_persisted_roles_stay_while_playback_capable() -> None:
 
     assert reason is None
     assert connection._active_roles == [Roles.PLAYER.value]  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_persisted_source_role_stays_on_an_unpaired_session() -> None:
+    """An activation that omits active_roles keeps a sticky source@v1 unpaired."""
+    connection = await _connection(PskCategory.SENTINEL, unpaired_access=True)
+    connection._active_roles = [Roles.SOURCE.value]  # noqa: SLF001
+
+    reason = await connection._apply_activation(  # noqa: SLF001
+        ServerActivatePayload(activities=[Activity.PLAYBACK])
+    )
+
+    assert reason is None
+    assert connection._active_roles == [Roles.SOURCE.value]  # noqa: SLF001
 
 
 @pytest.mark.asyncio

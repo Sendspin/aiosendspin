@@ -47,6 +47,9 @@ class _FakeConnection:
     def is_source_stream_active(self) -> bool:
         return self.source_stream_active
 
+    def is_in_rehandshake_quiet_period(self) -> bool:
+        return False
+
 
 class _FakeClient:
     def __init__(self) -> None:

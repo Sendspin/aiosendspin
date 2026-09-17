@@ -99,6 +99,9 @@ class _LoopbackConnection:
     def is_source_stream_active(self) -> bool:
         return self._role.stream_active
 
+    def is_in_rehandshake_quiet_period(self) -> bool:
+        return False
+
 
 class _ClientSideClient:
     def now_us(self) -> int:

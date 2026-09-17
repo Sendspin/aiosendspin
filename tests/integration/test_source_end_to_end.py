@@ -159,8 +159,10 @@ async def test_paired_source_client_streams_pcm_end_to_end() -> None:
 async def test_unpaired_source_client_cannot_activate_source() -> None:
     """On an unpaired (sentinel) connection the server never activates source@v1.
 
-    Source captures local audio (potentially a microphone), so the spec requires a
-    paired connection; the server must withhold the role from unpaired clients.
+    Source captures local audio (potentially a microphone), so the spec has the server
+    withhold the role until explicit approval. This server has no approval mechanism, so
+    it withholds source from unpaired clients outright, whatever unpaired access they
+    advertise.
     """
     server = _make_server(InMemoryServerPairingStore())
     client_store = InMemoryClientPairingStore()
