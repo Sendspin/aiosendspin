@@ -26,6 +26,11 @@ from aiosendspin.server.roles.source.v1 import SourceV1Role
 from tests.conftest import sine_pcm_16bit
 
 
+class _ServerSideConnection:
+    def record_source_start(self) -> None:
+        pass
+
+
 class _ServerSideClient:
     """Minimal stand-in for the server's SendspinClient used by the role under test."""
 
@@ -38,7 +43,7 @@ class _ServerSideClient:
             )
 
         self.info = _Info()
-        self.connection = object()
+        self.connection = _ServerSideConnection()
         self.available = True
         self.sent: list[Any] = []
 

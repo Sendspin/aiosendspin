@@ -46,8 +46,8 @@ class SourceV1Role(Role):
         self._source_state_received = False
         # A start request waiting for can_start; see request_start().
         self._start_queued = False
-        # Require a fresh start request after reconnecting.
-        self._start_requested = False
+        # A start was sent after the latest stop, unavailability, removal or disconnect.
+        self._stream_wanted = False
         # Stamp decoder output produced during flush.
         self._last_timestamp_us = 0
         self._signal: SignalState | None = None
@@ -59,7 +59,7 @@ class SourceV1Role(Role):
 
     @property
     def stream_active(self) -> bool:
-        """Whether the client currently has an open input stream."""
+        """Whether a stream handle is open for consumers."""
         return self._stream_active
 
     def handles_inbound_binary(self, message_type: int) -> bool:
@@ -87,7 +87,7 @@ class SourceV1Role(Role):
         self._end_stream()
         self._source_state_received = False
         self._start_queued = False
-        self._start_requested = False
+        self._stream_wanted = False
         self._signal = None
 
     def on_deactivate(self) -> None:
@@ -95,7 +95,7 @@ class SourceV1Role(Role):
         self._end_stream()
         self._source_state_received = False
         self._start_queued = False
-        self._start_requested = False
+        self._stream_wanted = False
         self._signal = None
         super().on_deactivate()
 
@@ -142,7 +142,7 @@ class SourceV1Role(Role):
     def request_stop(self) -> None:
         """Ask the source client to stop streaming (server/command: stop)."""
         self._start_queued = False
-        self._start_requested = False
+        self._stream_wanted = False
         self.send_message(
             ServerCommandMessage(
                 payload=ServerCommandPayload(source=SourceCommandServerPayload(command="stop"))
@@ -150,16 +150,13 @@ class SourceV1Role(Role):
         )
 
     def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:
-        """Build a decoder and a fresh stream handle, then announce it."""
-        if not self._start_requested:
-            # Let server compliance policy decide whether to disconnect.
-            self._client.flag_noncompliance(
-                "client-stream/start sent without a preceding source start command"
-            )
-            return
+        """Build a decoder and a fresh stream handle, then announce it, if a stream is wanted."""
         source = payload.source
         if self._stream_active:
             self._end_stream()
+        if not self._stream_wanted:
+            # A response to a start that crossed a stop, unavailability or removal: discard it.
+            return
 
         if source.codec not in self.accepted_codecs():
             self._client.flag_noncompliance(
@@ -237,8 +234,6 @@ class SourceV1Role(Role):
             or self._decoder is None
         ):
             return
-        if not self._client.available:
-            return
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
         except Exception:
@@ -293,7 +288,7 @@ class SourceV1Role(Role):
         """Treat becoming unavailable as an implicit source stop."""
         if new_available:
             return
-        self._start_requested = False
+        self._stream_wanted = False
         self._end_stream()
 
     def _send_queued_start(self) -> None:
@@ -301,7 +296,9 @@ class SourceV1Role(Role):
         if not self._start_queued or not self.can_start:
             return
         self._start_queued = False
-        self._start_requested = True
+        self._stream_wanted = True
+        if (connection := self._client.connection) is not None:
+            connection.record_source_start()
         self.send_message(
             ServerCommandMessage(
                 payload=ServerCommandPayload(source=SourceCommandServerPayload(command="start"))

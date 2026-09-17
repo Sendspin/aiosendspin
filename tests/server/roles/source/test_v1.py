@@ -35,11 +35,19 @@ class _FakeInfo:
         )
 
 
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.starts_recorded = 0
+
+    def record_source_start(self) -> None:
+        self.starts_recorded += 1
+
+
 class _FakeClient:
     def __init__(self, *, line_sense: bool = True) -> None:
         self.events: list[Any] = []
         self._info = _FakeInfo(line_sense=line_sense)
-        self.connection: Any = object()
+        self.connection = _FakeConnection()
         self.sent: list[Any] = []
         self.available = True
         self.noncompliance: list[str] = []
@@ -218,24 +226,56 @@ def test_source_requires_initial_state() -> None:
     assert role.requires_initial_state() is True
 
 
-def test_unsolicited_stream_start_opens_no_stream() -> None:
-    """A start the server never asked for is ignored rather than opening a stream."""
-    client = _FakeClient()
-    role = SourceV1Role(client=client)  # type: ignore[arg-type]
-    role.on_connect()
-    role.on_client_stream_start(_pcm_start_payload())
-    assert not role.stream_active
-    assert [e for e in client.events if isinstance(e, SourceStreamStartedEvent)] == []
-    assert client.noncompliance  # flagged, so a strict server can reject the client
-
-
-def test_stream_start_after_stop_opens_no_stream() -> None:
-    """Once stopped, a late start from the client does not reopen the stream."""
+def test_stream_start_after_stop_is_discarded_quietly() -> None:
+    """A start answering a start that crossed a stop opens no handle and ends without events."""
     role, client = _make_role()
     role.request_stop()
     role.on_client_stream_start(_pcm_start_payload())
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00\x00\x00\x00")
+    role.on_client_stream_end()
+
     assert not role.stream_active
-    assert [e for e in client.events if isinstance(e, SourceStreamStartedEvent)] == []
+    assert client.events == []
+    assert client.noncompliance == []
+
+
+def test_start_sent_records_an_authorization_on_the_connection() -> None:
+    """Every start put on the wire is recorded, including one sent after a stop."""
+    role, client = _connected_role()
+    role.request_start()
+    role.request_stop()
+    role.request_start()
+
+    assert _commands(client) == ["start", "stop", "start"]
+    assert client.connection.starts_recorded == 2
+
+
+def test_stream_start_after_restart_opens_a_stream() -> None:
+    """A start requested again after a stop wants the stream, whichever start it answers."""
+    role, client = _make_role()
+    role.request_stop()
+    role.request_start()
+    role.on_client_stream_start(_pcm_start_payload())
+
+    assert role.stream_active
+    assert len([e for e in client.events if isinstance(e, SourceStreamStartedEvent)]) == 1
+
+
+def test_decoder_build_failure_discards_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream whose decoder cannot be built drops its chunks without flagging the client."""
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("no decoder")
+
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.create_decoder", _fail)
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00\x00\x00\x00")
+    role.on_client_stream_end()
+
+    assert not role.stream_active
+    assert client.events == []
+    assert client.noncompliance == []
 
 
 def test_start_request_does_not_survive_disconnect() -> None:
@@ -248,23 +288,8 @@ def test_start_request_does_not_survive_disconnect() -> None:
     assert [e for e in client.events if isinstance(e, SourceStreamStartedEvent)] == []
 
 
-async def test_binary_chunk_dropped_when_client_not_available() -> None:
-    """An open stream still drops chunks while the client is not available."""
-    role, client = _make_role()
-    role.on_client_stream_start(_pcm_start_payload())
-    handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
-    client.available = False
-
-    frame = sine_pcm_16bit(480)
-    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 1_000_000, frame)
-    role.on_client_stream_end()
-
-    drained = [chunk async for chunk, _ in handle]
-    assert drained == []
-
-
 def test_becoming_unavailable_implicitly_stops_stream() -> None:
-    """Becoming unavailable closes the stream and clears start permission."""
+    """Becoming unavailable closes the handle, and a later start opens no new one."""
     role, client = _make_role()
     role.on_client_stream_start(_pcm_start_payload())
 
@@ -272,10 +297,8 @@ def test_becoming_unavailable_implicitly_stops_stream() -> None:
     role.on_client_stream_start(_pcm_start_payload())
 
     assert not role.stream_active
+    assert len([e for e in client.events if isinstance(e, SourceStreamStartedEvent)]) == 1
     assert len([e for e in client.events if isinstance(e, SourceStreamEndedEvent)]) == 1
-    assert client.noncompliance == [
-        "client-stream/start sent without a preceding source start command"
-    ]
 
 
 async def test_second_start_restarts_stream() -> None:

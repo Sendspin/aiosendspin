@@ -100,6 +100,7 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
     Activity,
+    BinaryMessageType,
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
@@ -335,6 +336,12 @@ class SendspinConnection:
         self._legacy_hello = False
 
         self._declared_activities: list[Activity] | None = None
+        # Source start commands sent that no client-stream/start has opened a stream for yet.
+        # Each is counted: a start crossing a stop or role removal can still open a stream.
+        self._source_starts_pending = 0
+        # Whether the client's input stream is open; stop, unavailability and role
+        # removal leave it open until client-stream/end.
+        self._source_input_open = False
         self._client_event_unsub: Callable[[], None] | None = None
         self._group_event_unsub: Callable[[], None] | None = None
 
@@ -427,6 +434,10 @@ class SendspinConnection:
         if self._client is None:
             return False
         return any(role.requires_initial_state() for role in self._client.active_roles)
+
+    def record_source_start(self) -> None:
+        """Record a source start command, which authorizes the client to open one input stream."""
+        self._source_starts_pending += 1
 
     def _flush_pending_binary(self) -> None:
         """Enqueue held binary whose role is no longer held, dropping stale entries."""
@@ -2200,13 +2211,36 @@ class SendspinConnection:
             return
         header = unpack_binary_header(data)
         payload = data[BINARY_HEADER_SIZE:]
+        is_source_audio = header.message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
+        if is_source_audio:
+            if not self._source_input_open:
+                self._flag_noncompliance("sent source audio without an open input stream")
+                return
+            if not self._client.available:
+                self._flag_noncompliance("sent source audio while reporting available: false")
+                return
         for role in self._client.active_roles:
             if role.handles_inbound_binary(header.message_type):
                 role.on_binary_chunk(header.message_type, header.timestamp_us, payload)
                 return
+        if is_source_audio:
+            return  # In flight from before the source role was removed.
         self._logger.warning(
             "Received unhandled binary message type %s from client", header.message_type
         )
+
+    def _accept_source_stream_start(self) -> bool:
+        """Return whether a client-stream/start is authorized, opening the input stream if so."""
+        if self._source_input_open:
+            return True  # Replaces the open stream's format, which needs no start.
+        if not self._source_starts_pending:
+            self._flag_noncompliance(
+                "client-stream/start sent without a preceding source start command"
+            )
+            return False
+        self._source_starts_pending -= 1
+        self._source_input_open = True
+        return True
 
     async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:
         """Handle a single client message, dispatching to roles or the connection."""
@@ -2275,14 +2309,16 @@ class SendspinConnection:
             if self._client is None:
                 return
             self._flag_superseded_message_type(message.type)
-            for role in self._client.active_roles:
-                role.on_client_stream_start(message.payload)
+            if self._accept_source_stream_start():
+                for role in self._client.active_roles:
+                    role.on_client_stream_start(message.payload)
             return
 
         if isinstance(message, ClientStreamEndMessage):
             if self._client is None:
                 return
             self._flag_superseded_message_type(message.type)
+            self._source_input_open = False
             for role in self._client.active_roles:
                 role.on_client_stream_end()
             return
