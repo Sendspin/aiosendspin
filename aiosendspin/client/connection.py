@@ -464,22 +464,33 @@ class SendspinConnection:
         *,
         expected_server_id: str | None,
     ) -> None:
-        """Reach the first server/activate under a bring-up timeout, closing on stall."""
+        """Reach the first server/activate under a bring-up timeout.
+
+        Any failure closes the connection before propagating.
+        """
         try:
             async with asyncio.timeout(PROVISIONAL_CONNECTION_TIMEOUT_S):
                 await self._run_noise_handshake(ws, expected_server_id=expected_server_id)
-                if not self._client.has_connection_slot(self):
-                    # Rejected as if lower priority, before it can back a pairing record.
-                    await self.goodbye_and_disconnect(GoodbyeReason.CONCURRENT_ATTEMPT)
-                    raise RuntimeError("open connection limit reached")
+                await self._require_connection_slot()
                 await self._run_inner_handshake()
-        except TimeoutError:
-            # Close whatever transport bring-up reached: encrypted if up, else the raw socket.
+        except BaseException as err:
+            # Close whatever transport bring-up reached: encrypted if up, else the raw socket,
+            # which a failed handshake has already closed unless it stalled.
             if self._connected:
                 await self.disconnect()
-            else:
+            elif isinstance(err, TimeoutError):
                 await ws.close()
             raise
+
+    async def _require_connection_slot(self) -> None:
+        """Reject this connection, as if lower priority, when it holds no connection slot.
+
+        Raises RuntimeError after closing with ``client/goodbye`` ``concurrent_attempt``.
+        """
+        if self._client.has_connection_slot(self):
+            return
+        await self.goodbye_and_disconnect(GoodbyeReason.CONCURRENT_ATTEMPT)
+        raise RuntimeError("open connection limit reached")
 
     async def _run_noise_handshake(
         self,

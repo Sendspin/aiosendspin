@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -594,6 +595,7 @@ async def test_connect_over_the_open_connection_limit_raises() -> None:
         with pytest.raises(RuntimeError, match="open connection limit reached"):
             await client.connect("ws://127.0.0.1:9/sendspin")
         assert not client._provisional_connections
+        assert client._session is None
     finally:
         await client.disconnect()
 
@@ -667,4 +669,59 @@ async def test_connection_protects_the_record_its_handshake_resolved() -> None:
     connection._noise_psk = ResolvedPsk("sentinel", bytes(32), PskCategory.SENTINEL)
     assert client.protected_psk_ids() == set()
     client.on_connection_closed(connection)
+    assert not client._open_connections
+
+
+def _fail_after_noise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every bring-up complete the Noise handshake and then fail."""
+
+    async def handshake(self: SendspinConnection, ws: object, **_: object) -> None:
+        self._connected = True
+        self._ws = ws  # type: ignore[assignment]
+        raise OSError("record store unavailable")
+
+    monkeypatch.setattr(SendspinConnection, "_run_noise_handshake", handshake)
+
+
+async def test_incoming_failure_after_the_handshake_releases_its_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bring-up that fails past the Noise handshake closes the socket and frees the slot."""
+    client = _client_with_capacity(5)
+    _fail_after_noise(monkeypatch)
+
+    for _ in range(5):
+        ws = _BlockingWebSocket()
+        await client.attach_websocket(ws)  # type: ignore[arg-type]
+        assert ws.closed
+
+    assert not client._open_connections
+    assert not client._provisional_connections
+
+
+async def test_connect_failure_after_the_handshake_releases_its_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dial that fails past the Noise handshake closes the socket and frees the slot."""
+    sockets: list[_BlockingWebSocket] = []
+
+    async def ws_connect(*_: object, **__: object) -> _BlockingWebSocket:
+        sockets.append(_BlockingWebSocket())
+        return sockets[-1]
+
+    session = MagicMock()
+    session.ws_connect = ws_connect
+    client = make_sdk_client(
+        client_name="c",
+        roles=[Roles.CONTROLLER],
+        pairing_store=InMemoryClientPairingStore(record_capacity=5),
+        session=session,
+    )
+    _fail_after_noise(monkeypatch)
+
+    for _ in range(5):
+        with pytest.raises(OSError, match="record store unavailable"):
+            await client.connect("ws://127.0.0.1:9/sendspin")
+
+    assert all(ws.closed for ws in sockets)
     assert not client._open_connections

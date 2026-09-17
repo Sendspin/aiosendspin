@@ -821,12 +821,12 @@ class SendspinClient:
         store's record capacity. Returns once admitted; the reader and time-sync loops, and
         any pairing attempt the server requests, then run in the background.
         """
-        if self._session is None:
-            self._session = ClientSession()
-
         connection = SendspinConnection(self)
         if not self._claim_connection_slot(connection):
             raise RuntimeError("open connection limit reached")
+
+        if self._session is None:
+            self._session = ClientSession()
 
         logger.info("Connecting to Sendspin server at %s", url)
 
