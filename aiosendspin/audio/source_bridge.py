@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Capture-timestamp jitter treated as continuous audio rather than a gap.
-_GAP_TOLERANCE_US = 10_000
+# Timestamp lead over the sample-derived position beyond which a capture gap is filled.
+_GAP_THRESHOLD_US = 15_000
 
 # Persistent occupancy deviation from target before the simple tier drops or inserts.
 _WATERMARK_US = 50_000
@@ -103,9 +103,12 @@ class SourceBridge:
         self._out_av_stride = out_av_bps * output_format.channels
         self._target_us = target_latency_ms * 1000
         self._max_us = max_latency_ms * 1000
+        self._max_ratio_adjust = _MAX_RATIO_ADJUST
         self._buffer = bytearray()
         self._primed = False
-        self._next_ts: int | None = None
+        self._anchor_us: int | None = None
+        self._frames_since_anchor = 0
+        self._timestamp_skew_us = 0
         self._surplus_windows = 0
         self._window_fed_us = 0
         self._window_min_us: int | None = None
@@ -141,20 +144,14 @@ class SourceBridge:
             return
         if len(pcm) % self._in_stride:
             raise ValueError("pcm length must be a whole number of frames")
-        duration_us = (len(pcm) // self._in_stride) * 1_000_000 // self._in.sample_rate
-        if self._next_ts is not None:
-            delta = capture_timestamp_us - self._next_ts
-            if abs(delta) > self._max_us:
-                logger.warning("Source timestamp jumped %d us, resetting bridge", delta)
-                self._reset()
-            elif delta > _GAP_TOLERANCE_US:
-                logger.debug("Capture gap of %d us, inserting silence to hold latency", delta)
-                self._append_silence(delta)
-                self._window_supplied_us += delta
-            elif delta < -_GAP_TOLERANCE_US:
-                logger.debug("Dropping out-of-order chunk %d us behind expected", -delta)
-                return
-        self._next_ts = capture_timestamp_us + duration_us
+        frames = len(pcm) // self._in_stride
+        duration_us = frames * 1_000_000 // self._in.sample_rate
+        if self._anchor_us is not None:
+            self._track_timestamp(capture_timestamp_us, duration_us)
+        # Also re-anchors on this chunk when tracking reset the bridge.
+        if self._anchor_us is None:
+            self._anchor_us = capture_timestamp_us
+        self._frames_since_anchor += frames
         self._buffer += self._convert(pcm)
         overflow_us = self.occupancy_us - self._max_us
         if overflow_us > 0:
@@ -184,6 +181,9 @@ class SourceBridge:
             if self.occupancy_us < self._target_us:
                 return bytes(wanted)
             self._primed = True
+            # Rate measurement starts with playback, so the priming fill is not counted as surplus.
+            self._window_supplied_us = 0
+            self._window_consumed_us = 0
             # Trim inaudible startup surplus before playback begins.
             surplus_us = self.occupancy_us - self._target_us
             if surplus_us > 0:
@@ -203,6 +203,27 @@ class SourceBridge:
                 logger.debug("Underrun: buffer emptied, padding output with silence")
         self._sample_occupancy()
         return out
+
+    def _track_timestamp(self, capture_timestamp_us: int, duration_us: int) -> None:
+        """Compare a timestamp against the sample-derived position, filling gaps or resetting."""
+        assert self._anchor_us is not None
+        expected_us = (
+            self._anchor_us + self._frames_since_anchor * 1_000_000 // self._in.sample_rate
+        )
+        # Offset from the position once the source clock's slow skew is taken out.
+        offset_us = capture_timestamp_us - expected_us - self._timestamp_skew_us
+        if abs(offset_us) > self._max_us:
+            logger.warning("Source timestamp jumped %d us, resetting bridge", offset_us)
+            self._reset()
+        elif offset_us > _GAP_THRESHOLD_US:
+            logger.debug("Capture gap of %d us, inserting silence to hold latency", offset_us)
+            self._append_silence(offset_us)
+            self._frames_since_anchor += offset_us * self._in.sample_rate // 1_000_000
+            self._window_supplied_us += offset_us
+        else:
+            # Follow timestamp clock skew at up to the plausible rate; jitter stays within its band.
+            step_us = int(duration_us * self._max_ratio_adjust)
+            self._timestamp_skew_us += max(-step_us, min(step_us, offset_us))
 
     def _correct_drift(self) -> None:
         """SourceBridge corrects once per window, while AsrcSourceBridge corrects per feed."""
@@ -333,7 +354,9 @@ class SourceBridge:
     def _reset(self) -> None:
         self._buffer.clear()
         self._primed = False
-        self._next_ts = None
+        self._anchor_us = None
+        self._frames_since_anchor = 0
+        self._timestamp_skew_us = 0
         self._surplus_windows = 0
         self._window_fed_us = 0
         self._window_min_us = None

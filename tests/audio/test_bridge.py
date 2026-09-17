@@ -84,12 +84,53 @@ def test_forward_gap_becomes_silence() -> None:
     assert out[960 * STRIDE :] == _pattern(480)
 
 
-def test_backward_chunk_is_dropped() -> None:
-    """A chunk stamped before already-buffered audio is discarded."""
+def test_late_chunk_is_kept() -> None:
+    """A chunk stamped behind the sample-derived position is still buffered."""
     bridge = _bridge()
     bridge.feed(_pattern(4800), 0)
     bridge.feed(_pattern(480), 50_000)
-    assert bridge.occupancy_us == 100_000
+    assert bridge.occupancy_us == 110_000
+
+
+def test_timestamp_jitter_delivers_every_sample() -> None:
+    """Jittered timestamps with small backward steps pass through bit-exact."""
+    bridge = _bridge()
+    fed = [_indexed(4800)]
+    bridge.feed(fed[0], 0)  # exactly the target, primes without a trim
+    out = [bridge.read(240)]
+    # 5ms chunks with up to 5ms of jitter; a +5ms then -1ms pair steps back 1ms.
+    jitter_us = [0, 3_000, -2_000, 5_000, -1_000, 4_000, -5_000, 1_000, 5_000, -1_000]
+    for i in range(400):
+        chunk = _indexed(240, start=4800 + i * 240)
+        fed.append(chunk)
+        bridge.feed(chunk, 100_000 + i * 5_000 + jitter_us[i % len(jitter_us)])
+        out.append(bridge.read(240))
+    out.append(bridge.read(bridge.occupancy_us * 48 // 1000))
+    assert b"".join(out) == b"".join(fed)
+
+
+def test_hole_inserts_matching_silence() -> None:
+    """A 200ms capture hole is filled with exactly 200ms of silence, once."""
+    bridge = _bridge()
+    bridge.feed(_pattern(4800), 0)  # exactly the target, primes without a trim
+    assert bridge.read(4800) == _pattern(4800)
+    bridge.feed(_pattern(480), 300_000)
+    bridge.feed(_pattern(480), 310_000)
+    out = bridge.read(9600 + 960)
+    assert out[: 9600 * STRIDE] == _silence(9600)
+    assert out[9600 * STRIDE :] == _pattern(960)
+    assert bridge.occupancy_us == 0
+
+
+def test_slow_timestamp_clock_inserts_no_silence() -> None:
+    """Timestamps running 0.1% ahead of the sample count never trigger gap silence."""
+    bridge = _bridge()
+    bridge.feed(_pattern(4800), 0)  # exactly the target, primes without a trim
+    ts = 100_000.0
+    for _ in range(3500):  # several correction windows, 35ms of accumulated skew
+        bridge.feed(_pattern(480), round(ts))
+        assert bridge.read(480) == _pattern(480)
+        ts += 10_000 * 1.001
 
 
 def test_jump_beyond_max_resets_and_reprimes() -> None:
@@ -297,6 +338,27 @@ def test_asrc_tracks_fast_source_rate() -> None:
     # 500ms rail toward target (the remaining tail decays at the slow trim rate).
     assert 0.015 <= bridge._rate_estimate <= 0.025  # noqa: SLF001
     assert bridge.occupancy_us <= 300_000
+
+
+def test_asrc_converges_on_slightly_fast_source() -> None:
+    """A 0.1% fast source locks the rate estimate with no overflow and no gap silence."""
+    pytest.importorskip("soxr")
+    bridge = AsrcSourceBridge(
+        input_format=FMT, output_format=FMT, target_latency_ms=100, max_latency_ms=500
+    )
+    bridge.feed(_pattern(4800), 0)  # soxr holds back a few ms, so the first loop read primes
+    ts = 100_000.0
+    peak_us = 0
+    # The source supplies 1001 frames per 1000 pulled; timestamps advance at the true pace.
+    for _ in range(3000):
+        bridge.feed(_pattern(1001), round(ts))
+        out = bridge.read(1000)
+        assert all(out[i : i + STRIDE] != _silence(1) for i in range(0, len(out), STRIDE))
+        peak_us = max(peak_us, bridge.occupancy_us)
+        ts += 1000 * 1_000_000 / 48000
+    assert abs(bridge._rate_estimate - 0.001) <= 0.0002  # noqa: SLF001
+    assert peak_us <= 150_000
+    assert abs(bridge.occupancy_us - 100_000) <= 30_000
 
 
 def test_asrc_relocks_quickly_after_skew_flip() -> None:
