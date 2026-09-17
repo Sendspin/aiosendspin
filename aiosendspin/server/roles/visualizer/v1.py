@@ -883,7 +883,7 @@ class VisualizerV1Role(Role):
             if legacy and self._client._server.allow_noncompliant_clients:  # noqa: SLF001
                 warn_pitch_deprecated()
             else:
-                types.remove("pitch")
+                types = [t for t in types if t != "pitch"]
         return replace(request, types=types)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>

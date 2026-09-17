@@ -23,6 +23,7 @@ from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSpectrum,
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
+    SupportedVisualizerType,
     VisualizerStatePayload,
 )
 from aiosendspin.noise.keys import Identity
@@ -1511,18 +1512,22 @@ def _pitch_binary_count(client: MagicMock) -> int:
 
 
 @pytest.mark.usefixtures("reset_pitch_warning")
-@pytest.mark.parametrize("types", [["loudness", "pitch"], ["pitch"]])
+@pytest.mark.parametrize(
+    "types", [["loudness", "pitch"], ["pitch"], ["loudness", "pitch", "pitch"]]
+)
 def test_client_state_client_never_gets_pitch(
-    types: list[str], caplog: pytest.LogCaptureFixture
+    types: list[SupportedVisualizerType], caplog: pytest.LogCaptureFixture
 ) -> None:
     """A client/state client never gets `pitch`, even on a lenient server with pitch on."""
     client = _make_client_stub()
-    client.visualizer_state = {"types": types, "rate_max": 60}
     client._server.visualizer_pitch_enabled = True  # noqa: SLF001
     client._server.allow_noncompliant_clients = True  # noqa: SLF001
     role = VisualizerV1Role(client)
+    # Built directly rather than parsed, so a duplicated type reaches the role.
+    payload = ClientStatePayload(visualizer=VisualizerStatePayload(types=types, rate_max=60))
     with caplog.at_level(logging.WARNING, logger=visualizer_v1.__name__):
-        _connect(role)
+        role.on_connect()
+        role.on_initial_client_state(payload)
         role.on_stream_start()
         role.on_audio_chunk(_pitch_tone_chunk())
 
