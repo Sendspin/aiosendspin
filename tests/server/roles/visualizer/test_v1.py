@@ -6,6 +6,8 @@ import asyncio
 import struct
 from unittest.mock import MagicMock
 
+import pytest
+
 from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
@@ -647,6 +649,84 @@ def test_join_ordering_beats_before_stream_start_drains_after_start() -> None:
     role.on_audio_chunk(_audio_chunk(1_000_000))
     beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
     assert beat_ts == [500_000]
+
+
+def _beat_only_role() -> tuple[VisualizerV1Role, MagicMock]:
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["beat"], "rate_max": 30}
+    return VisualizerV1Role(client=client), client
+
+
+def _assert_beats_only_inside_streams(client: MagicMock) -> None:
+    """Assert every beat binary was sent between a stream/start and the next stream/end."""
+    in_stream = False
+    for name, args, kwargs in client.method_calls:
+        if name == "send_role_message":
+            if isinstance(args[1], StreamStartMessage):
+                in_stream = True
+            elif isinstance(args[1], StreamEndMessage):
+                in_stream = False
+        elif (
+            name == "send_binary"
+            and kwargs["message_type"] == BinaryMessageType.VISUALIZATION_BEAT.value
+        ):
+            assert in_stream, f"beat {kwargs['timestamp_us']} sent outside a visualizer stream"
+
+
+def _deliver_state(role: VisualizerV1Role) -> None:
+    state = VisualizerStatePayload.from_dict(role._client.visualizer_state)  # noqa: SLF001
+    role.on_client_state(ClientStatePayload(visualizer=state))
+
+
+async def test_beat_only_sends_no_beat_before_state_object() -> None:
+    """Beats and audio before the first client/state send no beat."""
+    role, client = _beat_only_role()
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    _assert_beats_only_inside_streams(client)
+    assert _beat_calls(client) == []
+
+
+async def test_beat_only_sends_no_beat_before_stream_start() -> None:
+    """Beats and audio after client/state but before the stream starts wait for stream/start."""
+    role, client = _beat_only_role()
+    role.on_connect()
+    _deliver_state(role)
+    role.append_beats([BeatTiming(500_000)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+    assert _beat_calls(client) == []
+
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    _assert_beats_only_inside_streams(client)
+    assert [c.kwargs["timestamp_us"] for c in _beat_calls(client)] == [500_000]
+
+
+@pytest.mark.parametrize("drain", ["audio_chunk", "release_scheduler"])
+async def test_beat_only_sends_no_beat_between_streams(drain: str) -> None:
+    """A beat queued after stream/end waits for the next stream/start, whatever drains it."""
+    role, client = _beat_only_role()
+    _connect(role)
+    role.on_stream_start()
+    role.on_stream_end()
+    role.append_beats([BeatTiming(1_500_000)])
+
+    if drain == "audio_chunk":
+        role.on_audio_chunk(_audio_chunk(2_000_000))
+    else:
+        role._run_release_scheduler()  # noqa: SLF001
+    assert _beat_calls(client) == []
+
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    _assert_beats_only_inside_streams(client)
+    assert [c.kwargs["timestamp_us"] for c in _beat_calls(client)] == [1_500_000]
+    role._cancel_release_timer()  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

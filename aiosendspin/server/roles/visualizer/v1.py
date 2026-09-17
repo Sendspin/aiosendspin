@@ -592,9 +592,14 @@ class VisualizerV1Role(Role):
 
         While the near-playhead cap is active, beats drain only up to the cap
         cutoff, so a far-ahead audio chunk cannot push the cursor past beats a
-        later mid-stream schedule will need to sit at.
+        later mid-stream schedule will need to sit at. Outside an announced
+        stream, beats stay queued.
         """
-        if self._stream_config is None or "beat" not in self._stream_config.types:
+        if (
+            not self._stream_started
+            or self._stream_config is None
+            or "beat" not in self._stream_config.types
+        ):
             return
         if self._holdback_active:
             max_ts_us = min(max_ts_us, self._warmup_cutoff_us())
