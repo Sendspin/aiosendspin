@@ -1636,6 +1636,110 @@ async def test_track_change_keeps_parked_periodic_frames() -> None:
     role._cancel_release_timer()  # noqa: SLF001
 
 
+# ---------------------------------------------------------------------------
+# Wire cursor across in-stream stream/start
+# ---------------------------------------------------------------------------
+
+
+def _sent_ts(client: MagicMock) -> list[int]:
+    return [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
+
+
+def _assert_no_regression(client: MagicMock, sent_before: int, periodic_before: int) -> None:
+    sent = _sent_ts(client)
+    assert len(_periodic_calls(client)) > periodic_before, "the new config must take effect"
+    assert min(sent[sent_before:]) >= max(sent[:sent_before]), f"wire regressed: {sent}"
+
+
+async def test_state_change_mid_stream_keeps_wire_cursor() -> None:
+    """A client/state change mid-stream never sends below the highest timestamp already sent."""
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["loudness"], "rate_max": 60}
+    group_role = VisualizerGroupRole(client.group)
+    client.group.group_role.return_value = group_role
+    client.group._server.clock.now_us.return_value = 0  # noqa: SLF001
+    group_role.append_beat_schedule([BeatTiming(1_000_000), BeatTiming(2_100_000)])
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+    sent_before = len(client.send_binary.call_args_list)
+    periodic_before = len(_periodic_calls(client))
+
+    # Requesting beats rejoins the group, which replays beats already behind the cursor.
+    role.on_client_state(_state(types=["loudness", "beat"], rate_max=30))
+    for timestamp_us in range(2_025_000, 2_125_000, 25_000):
+        role.on_audio_chunk(_audio_chunk(timestamp_us))
+
+    _assert_no_regression(client, sent_before, periodic_before)
+    assert 2_100_000 in [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+async def test_pitch_toggle_mid_stream_keeps_wire_cursor() -> None:
+    """A pitch toggle mid-stream never sends below the highest timestamp already sent."""
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["loudness", "pitch", "beat"], "rate_max": 60}
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+    sent_before = len(client.send_binary.call_args_list)
+    periodic_before = len(_periodic_calls(client))
+
+    # A re-pushed schedule starts behind the cursor.
+    role.append_beats([BeatTiming(1_500_000), BeatTiming(2_040_000)])
+    client._server.visualizer_pitch_enabled = False  # noqa: SLF001
+    role.refresh_pitch_setting()
+    role.on_audio_chunk(_audio_chunk(2_025_000))
+
+    _assert_no_regression(client, sent_before, periodic_before)
+    assert 2_040_000 in [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+def test_repeated_stream_start_keeps_wire_cursor() -> None:
+    """A repeated on_stream_start within an announced stream never lowers the cursor."""
+    client = _make_beat_client_stub()
+    # The playhead sits below every beat, so only the cursor can drop the stale one.
+    client._server.clock.now_us.return_value = 0  # noqa: SLF001
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(2_000_000)])
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000), BeatTiming(2_500_000)])
+    role.on_audio_chunk(_audio_chunk(2_500_000))
+
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert beat_ts == [2_000_000, 2_500_000]
+    assert _stream_start_count(client) == 2
+
+
+def test_stream_clear_and_new_stream_reset_wire_cursor() -> None:
+    """After stream/clear, and on a new stream, timestamps may go below those already sent."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(2_000_000)])
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    role.on_stream_clear()
+    role.append_beats([BeatTiming(1_000_000)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+    role.on_stream_end()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000)])
+    role.on_audio_chunk(_audio_chunk(500_000))
+
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert beat_ts == [2_000_000, 1_000_000, 500_000]
+
+
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_request_format_partial_preserves_unchanged_fields() -> None:
     """A partial stream/request-format keeps prior values for omitted fields."""
