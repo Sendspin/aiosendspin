@@ -130,10 +130,11 @@ def test_player_state_accepts_full_supported_command_set() -> None:
     ]
 
 
-def test_player_state_rejects_unknown_supported_command() -> None:
-    """An unknown state-level command fails to parse."""
-    with pytest.raises(ValueError, match="supported_commands"):
-        PlayerStatePayload.from_dict({"supported_commands": ["reboot"]})
+def test_player_state_drops_unknown_supported_command() -> None:
+    """An unknown state-level command is dropped and recorded for the role to flag."""
+    payload = PlayerStatePayload.from_dict({"supported_commands": ["reboot", "mute"]})
+    assert payload.supported_commands == [PlayerCommand.MUTE]
+    assert payload.ignored_commands == ["reboot"]
 
 
 def test_player_state_empty_supported_commands_round_trips() -> None:

@@ -680,6 +680,10 @@ class PlayerV1Role(Role):
             reasons.append("used legacy player.state instead of top-level available")
         if state.legacy_delay_key:
             reasons.append(f"used the pre-rename '{state.legacy_delay_key}' key")
+        if state.ignored_commands:
+            reasons.append(
+                "declared unrecognized supported_commands: " + ", ".join(state.ignored_commands)
+            )
         if state.supported_commands and PlayerCommand.SET_STATIC_DELAY in state.supported_commands:
             reasons.append("declared the pre-rename 'set_static_delay' command")
         if state.format is not None and not self._is_declared_format(state.format):

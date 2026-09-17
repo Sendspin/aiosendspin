@@ -135,3 +135,19 @@ async def test_malformed_message_ends_the_loop(text: str) -> None:
     await conn._run_message_loop()  # noqa: SLF001
 
     client.handle_leave.assert_not_awaited()
+
+
+async def test_unrecognized_goodbye_reason_disconnects_without_retry() -> None:
+    """An unrecognized goodbye reason parses, is recorded, and ends without a reconnect."""
+    goodbye = orjson.dumps(
+        {"type": "client/goodbye", "payload": {"reason": "moving_house"}}
+    ).decode()
+    conn, client = _connection([goodbye, _LEAVE])
+    conn.disconnect = AsyncMock()  # type: ignore[method-assign]
+
+    await conn._run_message_loop()  # noqa: SLF001
+
+    conn.disconnect.assert_awaited_once_with(retry_connection=False)
+    client.handle_leave.assert_awaited_once_with()
+    assert conn.goodbye_reason is None
+    assert client.noncompliance == []

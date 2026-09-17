@@ -2275,10 +2275,16 @@ class SendspinConnection:
             return
 
         if isinstance(message, ClientGoodbyeMessage):
-            self._logger.debug(
-                "Received client/goodbye with reason: %s",
-                message.payload.reason,
-            )
+            if message.payload.unrecognized_reason is not None:
+                self._logger.info(
+                    "Received client/goodbye with unrecognized reason %r; not reconnecting",
+                    message.payload.unrecognized_reason,
+                )
+            else:
+                self._logger.debug(
+                    "Received client/goodbye with reason: %s",
+                    message.payload.reason,
+                )
             self._last_goodbye_reason = message.payload.reason
             retry = message.payload.reason == GoodbyeReason.RESTART
             await self.disconnect(retry_connection=retry)

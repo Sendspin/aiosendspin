@@ -24,6 +24,8 @@ from .base import (
     SendspinModel,
     collect_application_objects,
     expand_application_objects,
+    is_unknown_enum_value,
+    split_enum_values,
 )
 from .color import SessionUpdateColor
 from .controller import ControllerCommandPayload, ControllerStatePayload
@@ -540,8 +542,28 @@ class ClientCommandMessage(ClientMessage):
 class ClientGoodbyePayload(SendspinModel):
     """Payload for client goodbye message."""
 
-    reason: GoodbyeReason
-    """Reason for disconnecting."""
+    reason: GoodbyeReason | None
+    """Reason for disconnecting, or None when the client sent one this implementation
+    does not recognize."""
+    unrecognized_reason: str | None = None
+    """The reason as sent when it was not recognized, recorded for the server to log.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Set aside a reason this implementation does not recognize."""
+        reason = d.get("reason")
+        unrecognized = is_unknown_enum_value(reason, GoodbyeReason)
+        # Always overwrite so a client cannot spoof the record via the wire.
+        normalized = d | {"unrecognized_reason": reason if unrecognized else None}
+        if unrecognized:
+            normalized["reason"] = None
+        return normalized
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 @dataclass
@@ -655,6 +677,20 @@ class ServerActivatePayload(SendspinModel):
     server/activate messages that omit it."""
     pairing: ActivatePairing | None = None
     """Parameters of the admitted pairing attempt. Required when 'pairing' is in activities."""
+    ignored_activities: list[str] | None = None
+    """Activities this implementation does not recognize, dropped during parse and
+    recorded for the client to log. Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop activities this implementation does not recognize, recording them."""
+        activities, ignored = split_enum_values(d.get("activities"), Activity)
+        normalized = dict(d)
+        if "activities" in d:
+            normalized["activities"] = activities
+        # Always overwrite so a server cannot spoof the record via the wire.
+        normalized["ignored_activities"] = ignored or None
+        return normalized
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -766,6 +802,13 @@ class GroupUpdateServerPayload(SendspinModel):
     """Group identifier."""
     group_name: str | None = None
     """Friendly name of the group."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a playback state this implementation does not recognize."""
+        if is_unknown_enum_value(d.get("playback_state"), PlaybackStateType):
+            return {k: v for k, v in d.items() if k != "playback_state"}
+        return d
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

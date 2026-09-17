@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 from aiosendspin.models.artwork import (
@@ -24,7 +25,7 @@ from aiosendspin.models.core import (
 )
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
 from aiosendspin.models.player import PlayerStatePayload, StreamRequestFormatPlayer
-from aiosendspin.models.types import ArtworkSource, ManagementResult
+from aiosendspin.models.types import ArtworkSource, ManagementResult, PlayerCommand
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
@@ -33,6 +34,7 @@ from aiosendspin.models.visualizer import (
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.roles import PlayerV1Role
 from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
 
 
@@ -483,3 +485,57 @@ async def test_strict_rejection_of_artwork_request_format_skips_roles() -> None:
             timestamp_us=0,
         )
     role.on_stream_request_format.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_player_command_is_flagged_and_state_still_applies() -> None:
+    """An unrecognized player command is dropped and flagged; the rest of the state applies."""
+    conn, client = _conn_with_client()
+    conn._initial_state_received = True  # noqa: SLF001
+    client.available = True
+    client.handle_availability_change = AsyncMock()
+    role = _role("player")
+    role.client_state_deviations.side_effect = PlayerV1Role(
+        client=MagicMock()
+    ).client_state_deviations
+    client.active_roles = [role]
+    message = SendspinConnection._deserialize_client_message(  # noqa: SLF001
+        orjson.dumps(
+            {
+                "type": "client/state",
+                "payload": {
+                    "available": False,
+                    "player": {"volume": 40, "supported_commands": ["volume", "teleport"]},
+                },
+            }
+        ).decode()
+    )
+
+    await conn._handle_message(message, timestamp_us=0)  # noqa: SLF001
+
+    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
+    assert flagged == ["client/state declared unrecognized supported_commands: teleport"]
+    client.handle_availability_change.assert_awaited_once_with(available=False)
+    (applied,) = role.on_client_state.call_args.args
+    assert applied.player.volume == 40
+    assert applied.player.supported_commands == [PlayerCommand.VOLUME]
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_player_command_rejected_when_strict() -> None:
+    """A strict server rejects a client/state declaring an unrecognized player command."""
+    conn, client = _conn_with_client()
+    conn._initial_state_received = True  # noqa: SLF001
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    role = _role("player")
+    role.client_state_deviations.side_effect = PlayerV1Role(
+        client=MagicMock()
+    ).client_state_deviations
+    client.active_roles = [role]
+    payload = ClientStatePayload.from_dict({"player": {"supported_commands": ["teleport"]}})
+
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_message(  # noqa: SLF001
+            ClientStateMessage(payload=payload), timestamp_us=0
+        )
+    role.on_client_state.assert_not_called()

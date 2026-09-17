@@ -2,12 +2,15 @@
 
 The protocol types `int`-annotated wire fields as integers, but Python does not enforce
 annotations at runtime. This module keeps those fields integer-typed during serialization.
+It also provides the parse helpers that set aside unrecognized enum identifiers, and the
+hooks that carry application-specific role objects between the wire and the models.
 """
 
 from __future__ import annotations
 
 import math
 import operator
+from enum import Enum
 from typing import Any
 
 from mashumaro.config import BaseConfig
@@ -43,6 +46,25 @@ def int_to_wire(value: Any) -> int:
 
     msg = f"expected an integer, got {type(value).__name__}: {value!r}"
     raise TypeError(msg)
+
+
+def split_enum_values(values: Any, enum_type: type[Enum]) -> tuple[Any, list[str]]:
+    """Split a raw wire list into its entries and the identifiers ``enum_type`` lacks.
+
+    Returns the list without unrecognized string entries, and those entries. Tolerance
+    covers identifiers, not shape: a non-list value or a non-string entry is kept for the
+    parse to reject.
+    """
+    if not isinstance(values, list):
+        return values, []
+    known = {member.value for member in enum_type}
+    ignored = [v for v in values if isinstance(v, str) and v not in known]
+    return [v for v in values if not isinstance(v, str) or v in known], ignored
+
+
+def is_unknown_enum_value(value: Any, enum_type: type[Enum]) -> bool:
+    """Return whether ``value`` is an identifier that names no member of ``enum_type``."""
+    return isinstance(value, str) and value not in {member.value for member in enum_type}
 
 
 APPLICATION_OBJECTS_FIELD = "application_objects"

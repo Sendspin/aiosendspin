@@ -563,6 +563,12 @@ class SendspinConnection:
     async def _apply_activation(self, payload: ServerActivatePayload) -> GoodbyeReason | None:
         """Apply a ``server/activate``'s state, or return the goodbye reason that rejects it."""
         assert self._noise_psk is not None
+        if payload.ignored_activities:
+            # The server speaks a newer spec revision; the known activities still apply.
+            logger.info(
+                "Ignoring unrecognized server/activate activities: %s",
+                ", ".join(payload.ignored_activities),
+            )
         category = self._noise_psk.category
         activities = set(payload.activities)
         unpaired_access = await self._unpaired_access_enabled()
