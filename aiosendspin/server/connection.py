@@ -384,10 +384,10 @@ class SendspinConnection:
     def should_retry_server_initiated_connection(self) -> bool:
         """Whether the server should reconnect this URL after disconnect.
 
-        Per client/goodbye reason: only ``restart`` (will reconnect) and
-        ``concurrent_attempt`` (may retry later) warrant it. With no goodbye, assume a
-        ``restart`` when the connection was idle or carried playback, else treat the drop
-        as a session end.
+        Per client/goodbye reason: only ``restart`` warrants it; every other reason,
+        including ``concurrent_attempt``, leaves reconnecting to discovery or the caller.
+        With no goodbye, assume a ``restart`` when the connection was idle or carried
+        playback, else treat the drop as a session end.
         """
         if self._closing:
             return False
@@ -395,7 +395,7 @@ class SendspinConnection:
         if reason is None:
             activities = self._declared_activities or []
             return not activities or Activity.PLAYBACK in activities
-        return reason in (GoodbyeReason.RESTART, GoodbyeReason.CONCURRENT_ATTEMPT)
+        return reason is GoodbyeReason.RESTART
 
     @property
     def goodbye_reason(self) -> GoodbyeReason | None:
