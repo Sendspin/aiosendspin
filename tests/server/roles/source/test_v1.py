@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -569,3 +570,85 @@ def test_teardown_cancels_a_queued_start(teardown: str) -> None:
     role.on_client_state(_SOURCE_STATE)
 
     assert client.sent == []
+
+
+def _start_payload(
+    codec: AudioCodec, *, channels: int = 2, bit_depth: int = 16, sample_rate: int = 48000
+) -> ClientStreamStartPayload:
+    header = None
+    if codec is AudioCodec.FLAC:
+        fields = (sample_rate << 44) | ((channels - 1) << 41) | ((bit_depth - 1) << 36)
+        streaminfo = bytes([16, 0, 16, 0]) + bytes(6) + fields.to_bytes(8, "big") + bytes(16)
+        header = base64.b64encode(b"fLaC\x80\x00\x00\x22" + streaminfo).decode()
+    return ClientStreamStartPayload(
+        source=ClientStreamStartSource(
+            codec=codec,
+            channels=channels,
+            sample_rate=sample_rate,
+            bit_depth=bit_depth,
+            codec_header=header,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("codec", "channels", "bit_depth", "decoded_bit_depth"),
+    [
+        (AudioCodec.PCM, 9, 16, 16),
+        (AudioCodec.PCM, 11, 24, 24),
+        (AudioCodec.PCM, 12, 32, 32),
+        (AudioCodec.PCM, 2, 8, 16),
+        (AudioCodec.FLAC, 2, 8, 16),
+        (AudioCodec.FLAC, 2, 12, 16),
+        (AudioCodec.FLAC, 2, 20, 24),
+    ],
+)
+def test_any_decodable_format_opens_at_its_decoded_format(
+    codec: AudioCodec, channels: int, bit_depth: int, decoded_bit_depth: int
+) -> None:
+    """The stream opens for any channel count and announces the decoded PCM format."""
+    pytest.importorskip("av")
+    role, client = _make_role()
+
+    role.on_client_stream_start(_start_payload(codec, channels=channels, bit_depth=bit_depth))
+
+    assert role.stream_active
+    assert client.noncompliance == []
+    event = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent))
+    assert event.audio_format == AudioFormat(
+        sample_rate=48000, bit_depth=decoded_bit_depth, channels=channels
+    )
+    assert event.handle.audio_format == event.audio_format
+
+
+async def test_8_bit_pcm_is_streamed_as_16_bit() -> None:
+    """8-bit PCM chunks come out of the handle widened to 16-bit samples."""
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.PCM, channels=1, bit_depth=8))
+    handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 1, bytes([0x40, 0xC0]))
+    role.on_client_stream_end()
+
+    assert [chunk async for chunk, _ in handle] == [bytes([0x00, 0x40, 0x00, 0xC0])]
+
+
+@pytest.mark.parametrize(
+    ("codec", "bit_depth", "reason"),
+    [
+        (AudioCodec.PCM, 12, "pcm bit_depth 12, which is not a whole number of bytes"),
+        (AudioCodec.PCM, 0, "unsupported bit_depth 0"),
+        (AudioCodec.PCM, 40, "unsupported bit_depth 40"),
+        (AudioCodec.FLAC, 33, "unsupported bit_depth 33"),
+    ],
+)
+def test_bit_depth_the_codec_cannot_carry_is_flagged(
+    codec: AudioCodec, bit_depth: int, reason: str
+) -> None:
+    """A depth the codec cannot express is flagged and opens no stream."""
+    role, client = _make_role()
+
+    role.on_client_stream_start(_start_payload(codec, bit_depth=bit_depth))
+
+    assert not role.stream_active
+    assert client.noncompliance == [f"client-stream/start announced {reason}"]

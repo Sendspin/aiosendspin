@@ -7,7 +7,7 @@ import binascii
 import logging
 from typing import TYPE_CHECKING
 
-from aiosendspin.audio.codecs import create_decoder, opus_available
+from aiosendspin.audio.codecs import create_decoder, decoded_bit_depth, opus_available
 from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
 from aiosendspin.models.source import SourceCommandServerPayload
@@ -167,11 +167,21 @@ class SourceV1Role(Role):
                 "which server/hello did not list"
             )
             return
-        # The spec ignores bit_depth for opus, so decode at the canonical 16 bits.
-        bit_depth = 16 if source.codec is AudioCodec.OPUS else source.bit_depth
+        if source.codec is not AudioCodec.OPUS and not 1 <= source.bit_depth <= 32:
+            self._client.flag_noncompliance(
+                f"client-stream/start announced unsupported bit_depth {source.bit_depth}"
+            )
+            return
+        if source.codec is AudioCodec.PCM and source.bit_depth % 8:
+            # The PCM wire convention only packs whole-byte samples.
+            self._client.flag_noncompliance(
+                f"client-stream/start announced pcm bit_depth {source.bit_depth}, "
+                "which is not a whole number of bytes"
+            )
+            return
         audio_format = AudioFormat(
             sample_rate=source.sample_rate,
-            bit_depth=bit_depth,
+            bit_depth=decoded_bit_depth(source.codec.value, source.bit_depth),
             channels=source.channels,
         )
         header = None
@@ -203,7 +213,7 @@ class SourceV1Role(Role):
             self._decoder = create_decoder(
                 source.codec.value,
                 sample_rate=source.sample_rate,
-                bit_depth=bit_depth,
+                bit_depth=source.bit_depth,
                 channels=source.channels,
                 codec_header=header,
             )
