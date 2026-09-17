@@ -1311,6 +1311,23 @@ async def test_player_available_withheld_until_clock_synchronizes(
     assert sent[-1]["available"] is True
 
 
+async def test_player_and_source_states_carry_source_object() -> None:
+    """With player and source active, every client/state carries the source object."""
+    connection, sent = await _state_connection(
+        [Roles.PLAYER.value, Roles.SOURCE.value],
+        roles=[Roles.PLAYER, Roles.SOURCE],
+        source_support=ClientHelloSourceSupport(),
+    )
+
+    await connection.start()
+    await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
+
+    assert [(state["available"], "player" in state, state.get("source")) for state in sent] == [
+        (False, True, {}),
+        (True, True, {}),
+    ]
+
+
 @pytest.mark.parametrize("role", [Roles.CONTROLLER, Roles.METADATA])
 async def test_stateless_roles_send_initial_state(role: Roles) -> None:
     """A client with only stateless roles active still sends its initial client/state."""

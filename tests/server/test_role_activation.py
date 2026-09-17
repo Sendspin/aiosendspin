@@ -31,7 +31,7 @@ from aiosendspin.models.player import (
     PlayerStatePayload,
     SupportedAudioFormat,
 )
-from aiosendspin.models.source import ClientHelloSourceSupport
+from aiosendspin.models.source import ClientHelloSourceSupport, SourceStatePayload
 from aiosendspin.models.types import (
     ArtworkSource,
     AudioCodec,
@@ -44,11 +44,13 @@ from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, Visualiz
 from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, TrustedUnpairedClient
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
 from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 from aiosendspin.server.roles.player.v1 import PlayerV1Role
+from aiosendspin.server.roles.source.v1 import SourceV1Role
 from tests.server.test_multi_server import _FakeTransport, _MockServer
 
 if TYPE_CHECKING:
@@ -495,24 +497,158 @@ async def test_held_player_joins_with_the_timing_of_its_state() -> None:
     assert timing_at_join == [(40, 500, 2000)]
 
 
-@pytest.mark.asyncio
-async def test_reactivated_source_is_not_held() -> None:
-    """A source has no stream or binary to hold, so an availability-only state is enough."""
+async def _reactivated_source() -> tuple[SendspinConnection, SendspinClient, SourceV1Role]:
     conn, _fake = await _connect(
         _hello([Roles.PLAYER.value, "source@v1"]), category=PskCategory.LONG_TERM
     )
-    client = _client(conn)
     conn._send_activation([Roles.PLAYER.value])  # noqa: SLF001
     conn._send_activation([Roles.PLAYER.value, "source@v1"])  # noqa: SLF001
+    client = _client(conn)
+    source = client.role("source@v1")
+    assert isinstance(source, SourceV1Role)
+    assert client.awaits_role_state("source")
+    return conn, client, source
 
-    assert client.role("source@v1") is not None
-    assert not client.awaits_role_state("source")
-    with patch.object(conn, "_flag_noncompliance") as flag:
+
+@pytest.mark.asyncio
+async def test_reactivated_source_start_waits_for_its_client_state() -> None:
+    """A start requested for a held source is sent when client/state releases the hold."""
+    conn, client, source = await _reactivated_source()
+
+    with patch.object(source, "send_message") as send:
+        source.request_start()
         await conn._handle_client_state(  # noqa: SLF001
             ClientStatePayload(available=True, player=_PLAYER_STATE)
         )
-    flag.assert_not_called()
-    assert conn._activation_state_timeout_handle is None  # noqa: SLF001
+        assert client.awaits_role_state("source")
+        send.assert_not_called()
+
+        with patch.object(conn, "_flag_noncompliance") as flag:
+            await conn._handle_client_state(  # noqa: SLF001
+                ClientStatePayload(
+                    available=True, player=_PLAYER_STATE, source=SourceStatePayload()
+                )
+            )
+        flag.assert_not_called()
+        assert not client.awaits_role_state("source")
+        assert conn._activation_state_timeout_handle is None  # noqa: SLF001
+        send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_source_released_by_timeout_keeps_its_start_queued() -> None:
+    """The lenient timeout release does not stand in for the missing source object."""
+    conn, client, source = await _reactivated_source()
+    handle = conn._activation_state_timeout_handle  # noqa: SLF001
+    assert handle is not None
+    handle.cancel()
+
+    with patch.object(source, "send_message") as send:
+        source.request_start()
+        with patch.object(conn, "_flag_noncompliance") as flag:
+            conn._activation_state_timeout_callback()  # noqa: SLF001
+
+        flag.assert_called_once_with(
+            "did not send the source client/state object after server/activate in time"
+        )
+        assert not client.awaits_role_state("source")
+        send.assert_not_called()
+
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=True, source=SourceStatePayload())
+        )
+    send.assert_called_once()
+
+
+async def _source_awaiting_initial_state(
+    *, strict: bool
+) -> tuple[SendspinConnection, SourceV1Role]:
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value, "source@v1"]),
+        send_state=False,
+        category=PskCategory.LONG_TERM,
+    )
+    conn._server.allow_noncompliant_clients = not strict  # type: ignore[misc]  # noqa: SLF001
+    source = _client(conn).role("source@v1")
+    assert isinstance(source, SourceV1Role)
+    return conn, source
+
+
+@pytest.mark.asyncio
+async def test_start_requested_before_the_initial_state_is_sent_by_it() -> None:
+    """A start requested right after connecting goes out once the initial client/state lands."""
+    conn, source = await _source_awaiting_initial_state(strict=False)
+
+    with patch.object(source, "send_message") as send:
+        source.request_start()
+        send.assert_not_called()
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=True, player=_PLAYER_STATE, source=SourceStatePayload())
+        )
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=True, player=_PLAYER_STATE, source=SourceStatePayload())
+        )
+
+    send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_start_requested_on_connect_waits_for_initial_availability() -> None:
+    """A start requested as the client connects waits while its initial state is unavailable."""
+    conn, source = await _source_awaiting_initial_state(strict=False)
+
+    with (
+        patch.object(source, "send_message") as send,
+        patch.object(
+            conn._server,  # noqa: SLF001
+            "on_client_first_connect",
+            side_effect=lambda _client_id: source.request_start(),
+        ),
+    ):
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=False, player=_PLAYER_STATE, source=SourceStatePayload())
+        )
+        send.assert_not_called()
+
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=True, player=_PLAYER_STATE, source=SourceStatePayload())
+        )
+    send.assert_called_once()
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_lenient_server_starts_source_without_source_object() -> None:
+    """A tolerated client whose initial client/state lacks the source object is startable."""
+    conn, source = await _source_awaiting_initial_state(strict=False)
+
+    with (
+        patch.object(conn, "_flag_noncompliance") as flag,
+        patch.object(source, "send_message") as send,
+    ):
+        source.request_start()
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(available=True, player=_PLAYER_STATE)
+        )
+
+    flag.assert_any_call("initial client/state has an active source role but no source state")
+    send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_strict_server_rejects_initial_state_without_source_object() -> None:
+    """A strict server rejects the client instead of starting it without its source object."""
+    conn, source = await _source_awaiting_initial_state(strict=True)
+
+    with patch.object(source, "send_message") as send:
+        source.request_start()
+        with pytest.raises(ClientComplianceError, match="no source state"):
+            await conn._handle_client_state(  # noqa: SLF001
+                ClientStatePayload(available=True, player=_PLAYER_STATE)
+            )
+
+    assert not source.can_start
+    send.assert_not_called()
 
 
 @pytest.mark.asyncio

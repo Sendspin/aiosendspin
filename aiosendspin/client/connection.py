@@ -621,9 +621,10 @@ class SendspinConnection:
         player_active = Roles.PLAYER in self._client.roles and self._is_role_active("player")
         source_active = self._is_role_active("source")
         if player_active:
+            # The player state carries the source object too.
             await self.send_full_player_state()
             self._initial_state_sent = True
-        if source_active and self.is_time_synchronized():
+        elif source_active and self.is_time_synchronized():
             await self._send_source_state()
             self._initial_state_sent = True
         if player_active or source_active or not self._active_roles:
@@ -1059,10 +1060,7 @@ class SendspinConnection:
             await self.send_available(available=self._reported_available)
 
     def _client_state_message(
-        self,
-        *,
-        player: PlayerStatePayload | None = None,
-        source: SourceStatePayload | None = None,
+        self, *, player: PlayerStatePayload | None = None
     ) -> ClientStateMessage:
         """Build a client/state with availability and the objects of the active roles."""
         visualizer = self._client.visualizer_state if self._is_role_active("visualizer") else None
@@ -1070,11 +1068,17 @@ class SendspinConnection:
             payload=ClientStatePayload(
                 available=self._wire_available(),
                 player=player,
-                source=source,
+                source=self._active_source_state(),
                 artwork=self._active_artwork_state(),
                 visualizer=visualizer,
             )
         )
+
+    def _active_source_state(self) -> SourceStatePayload | None:
+        """Return the source object every client/state carries while the role is active."""
+        if not self._is_role_active("source"):
+            return None
+        return SourceStatePayload(signal=self._reported_source_signal)
 
     def _active_artwork_state(self) -> ClientStateArtwork | None:
         """Return the artwork object every client/state carries while the role is active."""
@@ -1198,10 +1202,7 @@ class SendspinConnection:
 
     async def _send_source_state(self) -> None:
         """Send current source state."""
-        message = self._client_state_message(
-            source=SourceStatePayload(signal=self._reported_source_signal)
-        )
-        await self._send_message(message.to_json())
+        await self._send_message(self._client_state_message().to_json())
 
     def _ensure_source_authorized(self, *, require_stream: bool = False) -> None:
         if not self.connected:
