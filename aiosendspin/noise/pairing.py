@@ -45,6 +45,7 @@ from .trust_store import ServerPairingRecord
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import Set as AbstractSet
 
     from .trust_store import ClientPairingStore, ServerPairingStore
     from .wire import EncryptedWebSocket
@@ -187,10 +188,13 @@ async def run_pairing_psk_client(
     server_id: str,
     store: ClientPairingStore,
     on_finalize: Callable[[], None] | None = None,
+    protected_psk_ids: Callable[[], AbstractSet[str]] = frozenset,
 ) -> None:
     """Run the client side of the Pairing PSK flow through finalize.
 
     ``on_finalize`` is called just before ``client/pair-finalize`` is sent.
+    ``protected_psk_ids`` returns the records backing open connections, which persisting
+    the new record never evicts.
     """
     async with _client_timeout(ws):
         await ws.send_str(
@@ -198,7 +202,13 @@ async def run_pairing_psk_client(
                 payload=ClientPairInitPayload(pairing_index=pairing_index),
             ).to_json(),
         )
-        await _finalize_client(ws, server_id=server_id, store=store, on_finalize=on_finalize)
+        await _finalize_client(
+            ws,
+            server_id=server_id,
+            store=store,
+            on_finalize=on_finalize,
+            protected_psk_ids=protected_psk_ids,
+        )
 
 
 async def run_pairing_psk_server(
@@ -288,10 +298,13 @@ async def run_dynamic_pairing_code_client(
     server_id: str,
     store: ClientPairingStore,
     on_finalize: Callable[[], None] | None = None,
+    protected_psk_ids: Callable[[], AbstractSet[str]] = frozenset,
 ) -> None:
     """Run the client side of the dynamic-pairing-code flow through finalize.
 
     ``on_finalize`` is called just before ``client/pair-finalize`` is sent.
+    ``protected_psk_ids`` returns the records backing open connections, which persisting
+    the new record never evicts.
     """
     nonce_b = pairing_code_mod.generate_nonce()
     async with _client_timeout(ws):
@@ -351,6 +364,7 @@ async def run_dynamic_pairing_code_client(
             store=store,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             on_finalize=on_finalize,
+            protected_psk_ids=protected_psk_ids,
         )
 
 
@@ -455,10 +469,13 @@ async def run_static_pairing_code_client(
     server_id: str,
     store: ClientPairingStore,
     on_finalize: Callable[[], None] | None = None,
+    protected_psk_ids: Callable[[], AbstractSet[str]] = frozenset,
 ) -> None:
     """Run the client side of the static-pairing-code flow through finalize.
 
     ``on_finalize`` is called just before ``client/pair-finalize`` is sent.
+    ``protected_psk_ids`` returns the records backing open connections, which persisting
+    the new record never evicts.
 
     The caller has opened the pairing window.
     """
@@ -484,6 +501,7 @@ async def run_static_pairing_code_client(
             store=store,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             on_finalize=on_finalize,
+            protected_psk_ids=protected_psk_ids,
         )
 
 
@@ -616,6 +634,7 @@ async def _finalize_client(
     store: ClientPairingStore,
     wrap_key: bytes | None = None,
     on_finalize: Callable[[], None] | None = None,
+    protected_psk_ids: Callable[[], AbstractSet[str]] = frozenset,
 ) -> None:
     """Send ``client/pair-finalize``, wrapping the PSK when ``wrap_key`` is set.
 
@@ -633,7 +652,7 @@ async def _finalize_client(
     await ws.send_str(ClientPairFinalizeMessage(payload=payload).to_json())
     await _receive_pairing(ws, ServerPairFinalizeMessage)
     if record is not None:
-        await store.replace_record_for_server_id(record)
+        await store.replace_record_for_server_id(record, protected=protected_psk_ids())
 
 
 async def _finalize_server(

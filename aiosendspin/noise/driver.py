@@ -445,6 +445,8 @@ async def _exchange_as_responder(
         credential_mismatch = True
     # Stored-pubkey post-match check: the record's bound server_id must be the
     # server we actually reached. A misbinding is not a miss, and never falls back.
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+    # A shared record (no counterparty) skips the check.
     if resolved.counterparty_id is not None and resolved.counterparty_id != expected_peer_id:
         raise HandshakeAbortedError(
             f"PSK bound to server_id {resolved.counterparty_id!r}, "

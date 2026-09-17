@@ -102,7 +102,7 @@ async def test_unsolicited_management_result_is_flagged() -> None:
         ManagementResultMessage(payload=ManagementResultPayload(result=ManagementResult.OK)),
         timestamp_us=0,
     )
-    client.flag_noncompliance.assert_called_once()
+    client.flag_noncompliance.assert_called_once_with("sent an unsolicited management/result")
 
 
 @pytest.mark.asyncio

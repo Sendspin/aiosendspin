@@ -1,4 +1,8 @@
-"""Management command messages."""
+"""Management command messages.
+
+Deprecated: the Sendspin spec no longer defines the management activity; only
+``server/unpair`` remains spec.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,9 @@ from .types import (
     ManagementResult,
     ServerMessage,
 )
+
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+MANAGEMENT_DEPRECATION = "the Sendspin spec no longer defines the management activity"
 
 
 # Server -> Client: server/unpair
@@ -28,6 +35,7 @@ class ServerUnpairMessage(ServerMessage):
     type: Literal["server/unpair"] = "server/unpair"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Server -> Client: management/list-records
 @dataclass
 class ManagementListRecordsPayload(SendspinModel):
@@ -42,6 +50,7 @@ class ManagementListRecordsMessage(ServerMessage):
     type: Literal["management/list-records"] = "management/list-records"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Server -> Client: management/add-record
 @dataclass
 class ManagementAddRecordPayload(SendspinModel):
@@ -66,6 +75,7 @@ class ManagementAddRecordMessage(ServerMessage):
     type: Literal["management/add-record"] = "management/add-record"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Server -> Client: management/remove-record
 @dataclass
 class ManagementRemoveRecordPayload(SendspinModel):
@@ -82,6 +92,7 @@ class ManagementRemoveRecordMessage(ServerMessage):
     type: Literal["management/remove-record"] = "management/remove-record"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Pairing config (shared wire shapes for get/set-pairing-config)
 @dataclass
 class RecordModeConfig(SendspinModel):
@@ -91,6 +102,7 @@ class RecordModeConfig(SendspinModel):
     """Shared-PSK record used as the storage-exhaustion fallback when pairing."""
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Server -> Client: management/get-pairing-config
 @dataclass
 class ManagementGetPairingConfigPayload(SendspinModel):
@@ -107,6 +119,7 @@ class ManagementGetPairingConfigMessage(ServerMessage):
     type: Literal["management/get-pairing-config"] = "management/get-pairing-config"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Server -> Client: management/set-pairing-config
 @dataclass
 class SetPairingPskConfig(SendspinModel):
@@ -184,6 +197,7 @@ class ManagementSetPairingConfigMessage(ServerMessage):
     type: Literal["management/set-pairing-config"] = "management/set-pairing-config"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Server -> Client: management/open-pairing-window
 @dataclass
 class ManagementOpenPairingWindowPayload(SendspinModel):
@@ -200,6 +214,7 @@ class ManagementOpenPairingWindowMessage(ServerMessage):
     type: Literal["management/open-pairing-window"] = "management/open-pairing-window"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # Client -> Server: management/result
 @dataclass(kw_only=True)
 class RecordSummary(SendspinModel):

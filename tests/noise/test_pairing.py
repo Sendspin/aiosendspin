@@ -61,7 +61,7 @@ from aiosendspin.noise.trust_store import (
 )
 from aiosendspin.noise.wire import EncryptedWebSocket
 from tests.noise.conftest import make_paired_encrypted_ws
-from tests.pairing_stores import ExhaustedClientStore
+from tests.pairing_stores import ExhaustedClientStore, seed_used_client_records
 
 
 def _added_records(records: Sequence[ClientPairingRecord]) -> list[ClientPairingRecord]:
@@ -178,6 +178,38 @@ async def test_pairing_psk_finalize_round_trip() -> None:
     assert await server_store.record_by_client_id("client-A") == server_record
     # A first pairing records the establishing method.
     assert server_record.pair_methods == [PairMethod.PAIRING_PSK]
+
+
+async def test_pairing_at_capacity_spares_records_of_open_connections() -> None:
+    """At capacity the new record persists by evicting the oldest record no connection uses."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore(record_capacity=5)
+    server_store = InMemoryServerPairingStore()
+    seeded = await seed_used_client_records(client_store, 5)
+    protected_reads: list[bool] = []
+
+    def protected_psk_ids() -> set[str]:
+        protected_reads.append(True)
+        return {seeded[0].psk_id}
+
+    await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews,
+            pairing_index=0,
+            server_id="server-X",
+            store=client_store,
+            protected_psk_ids=protected_psk_ids,
+        ),
+        run_pairing_psk_server(
+            server_ews, pairing_index=0, client_id="client-A", store=server_store
+        ),
+    )
+
+    new = await client_store.record_by_server_id("server-X")
+    assert new is not None
+    remaining = {r.psk_id for r in _added_records(await client_store.list_records())}
+    assert remaining == {new.psk_id, seeded[0].psk_id, *(r.psk_id for r in seeded[2:])}
+    assert protected_reads == [True]
 
 
 async def test_pairing_psk_client_sends_pair_init_then_finalize() -> None:
@@ -2110,6 +2142,7 @@ async def test_dynamic_pairing_code_missing_wrapped_nonce_is_protocol_error() ->
     assert await server_store.record_by_client_id("client-A") is None
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_pairing_psk_falls_back_to_shared_when_storage_exhausted() -> None:
     """On storage exhaustion the client hands the server its configured shared PSK.
 

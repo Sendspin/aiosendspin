@@ -193,6 +193,8 @@ class SendspinClient:
     """The currently-admitted connection (at most one), if any."""
     _provisional_connections: set[SendspinConnection]
     """Incoming connections still being brought up / awaiting admission."""
+    _open_connections: set[SendspinConnection]
+    """Open connections, capped below the pairing store's record capacity."""
     _admission_lock: asyncio.Lock
     """Serializes the admit/displace decision across concurrent connections."""
 
@@ -347,6 +349,7 @@ class SendspinClient:
         )
 
         self._provisional_connections = set()
+        self._open_connections = set()
         self._admission_lock = asyncio.Lock()
         self._last_playback_loaded = False
         self._pairing_window_opened = asyncio.Event()
@@ -587,8 +590,7 @@ class SendspinClient:
     def open_pairing_window(self) -> None:
         """Open a pairing window admitting gesture-gated pairing attempts until it closes.
 
-        Called on an operator gesture, or by a paired server through
-        ``management/open-pairing-window``. A no-op while a window is already open.
+        Called on an operator gesture. A no-op while a window is already open.
         """
         if self.pairing_window_open:
             return
@@ -814,22 +816,26 @@ class SendspinClient:
 
         The user explicitly chose this server, so the new connection is admitted
         unconditionally — an explicit switch — unless it relies on unpaired access the
-        client no longer admits, which raises ``RuntimeError``. Returns once admitted; the
-        reader and time-sync loops, and any pairing attempt the server requests, then run in
-        the background.
+        client no longer admits, which raises ``RuntimeError``. Also raises ``RuntimeError``,
+        before dialing, when the open connections already fill every slot below the pairing
+        store's record capacity. Returns once admitted; the reader and time-sync loops, and
+        any pairing attempt the server requests, then run in the background.
         """
         if self._session is None:
             self._session = ClientSession()
 
+        connection = SendspinConnection(self)
+        if not self._claim_connection_slot(connection):
+            raise RuntimeError("open connection limit reached")
+
         logger.info("Connecting to Sendspin server at %s", url)
 
-        raw_ws = await self._session.ws_connect(url, heartbeat=30)
-        connection = SendspinConnection(self)
         self._provisional_connections.add(connection)
         try:
+            raw_ws = await self._session.ws_connect(url, heartbeat=30)
             await connection.connect(raw_ws, expected_server_id=expected_server_id)
         finally:
-            self._provisional_connections.discard(connection)
+            self._end_bring_up(connection)
 
         # Hold the lock only for the admit decision, not for start()/pairing.
         try:
@@ -861,12 +867,13 @@ class SendspinClient:
                 match or the handshake is aborted.
         """
         connection = SendspinConnection(self)
+        # Over the limit, bring-up rejects the connection once its handshake completes.
+        self._claim_connection_slot(connection)
         self._provisional_connections.add(connection)
         try:
             await connection.attach_websocket(ws, expected_server_id=expected_server_id)
         except (HandshakeAbortedError, OSError, RuntimeError, TimeoutError) as exc:
             # Bring-up failed; the connection/socket is already torn down.
-            self._provisional_connections.discard(connection)
             logger.debug("Incoming connection failed bring-up: %s", exc)
             return
         except BaseException:
@@ -874,7 +881,7 @@ class SendspinClient:
             await connection.disconnect()
             raise
         finally:
-            self._provisional_connections.discard(connection)
+            self._end_bring_up(connection)
 
         # Hold the lock only for the admit/reject decision, not for start()/pairing.
         try:
@@ -913,11 +920,34 @@ class SendspinClient:
 
     # --- Connection admission ---
 
+    def has_connection_slot(self, connection: SendspinConnection) -> bool:
+        """Whether ``connection`` holds one of the capped open-connection slots."""
+        return connection in self._open_connections
+
+    def protected_psk_ids(self) -> set[str]:
+        """Return the ``psk_id``s of the pairing records backing open connections."""
+        return {psk_id for c in self._open_connections for psk_id in c.record_psk_ids}
+
+    def _claim_connection_slot(self, connection: SendspinConnection) -> bool:
+        """Claim an open-connection slot for ``connection``; False when none is free.
+
+        Open connections stay below the record capacity, so a completing pairing always
+        finds a record it may evict.
+        """
+        if len(self._open_connections) >= self._pairing_store.record_capacity - 1:
+            return False
+        self._open_connections.add(connection)
+        return True
+
+    def _end_bring_up(self, connection: SendspinConnection) -> None:
+        """Drop ``connection`` from bring-up, releasing its slot if bring-up closed it."""
+        self._provisional_connections.discard(connection)
+        if not connection.connected:
+            self._open_connections.discard(connection)
+
     @staticmethod
     def _activity_rank(activities: list[Activity]) -> int:
-        """Rank a connection by its highest activity: management > playback > pairing > none."""
-        if Activity.MANAGEMENT in activities:
-            return 3
+        """Rank a connection by its highest activity: playback > pairing > none."""
         if Activity.PLAYBACK in activities:
             return 2
         if Activity.PAIRING in activities:
@@ -1007,6 +1037,7 @@ class SendspinClient:
     def on_connection_closed(self, connection: SendspinConnection) -> None:
         """Report a disconnect only when the admitted connection (not a provisional one) closes."""
         self._provisional_connections.discard(connection)
+        self._open_connections.discard(connection)
         if self._pairing_window_connection is connection:
             self.close_pairing_window()
         if self._admitted_connection is connection:

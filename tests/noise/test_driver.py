@@ -544,6 +544,7 @@ async def test_client_post_match_check_rejects_wrong_bound_server_id() -> None:
     server_task.cancel()
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_shared_psk_record_admits_any_server() -> None:
     """A shared-PSK record (counterparty_id=None) skips the post-match check.
 

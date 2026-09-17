@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -2300,10 +2301,15 @@ async def _legacy_pairing_psk_client(
     server_id: str,
     store: ClientPairingStore,
     on_finalize: Callable[[], None] | None = None,
+    protected_psk_ids: Callable[[], AbstractSet[str]] = frozenset,
 ) -> None:
     """Pairing PSK client that goes straight to client/pair-finalize."""
     await pairing_module._finalize_client(  # noqa: SLF001
-        ws, server_id=server_id, store=store, on_finalize=on_finalize
+        ws,
+        server_id=server_id,
+        store=store,
+        on_finalize=on_finalize,
+        protected_psk_ids=protected_psk_ids,
     )
 
 
@@ -2531,6 +2537,7 @@ class _AbandonedPairingPskClient:
         server_id: str,  # noqa: ARG002
         store: ClientPairingStore,  # noqa: ARG002
         on_finalize: Callable[[], None] | None = None,  # noqa: ARG002
+        protected_psk_ids: Callable[[], AbstractSet[str]] = frozenset,  # noqa: ARG002
     ) -> None:
         if self._stale is None:
             self._stale = asyncio.create_task(self._send_stale(ws, pairing_index))

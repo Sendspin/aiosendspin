@@ -6,6 +6,7 @@ import asyncio
 import logging
 import socket
 import sys
+import warnings
 from collections.abc import Coroutine
 from typing import Any
 
@@ -15,6 +16,9 @@ _LOGGER = logging.getLogger(__name__)
 _SUPPORTS_EAGER_START = sys.version_info >= (3, 12)
 
 TASKS: set[asyncio.Task[Any]] = set()
+
+# APIs whose deprecation this process has already reported.
+_WARNED_DEPRECATIONS: set[str] = set()
 
 
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
@@ -86,3 +90,17 @@ def get_local_ip() -> str | None:
             return result
     except OSError:
         return None
+
+
+def warn_deprecated(api: str, reason: str) -> None:
+    """Report once per process that ``api`` is deprecated.
+
+    The first call for ``api`` emits a ``DeprecationWarning`` attributed to the caller of
+    ``api`` and logs a warning; later calls are silent.
+    """
+    if api in _WARNED_DEPRECATIONS:
+        return
+    _WARNED_DEPRECATIONS.add(api)
+    message = f"{api} is deprecated: {reason}"
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+    _LOGGER.warning(message)

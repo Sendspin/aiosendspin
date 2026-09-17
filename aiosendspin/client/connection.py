@@ -64,6 +64,7 @@ from aiosendspin.models.core import (
     UnpairedAccess,
 )
 from aiosendspin.models.management import (
+    MANAGEMENT_DEPRECATION,
     ManagementAddRecordMessage,
     ManagementGetPairingConfigMessage,
     ManagementListRecordsMessage,
@@ -134,6 +135,7 @@ from aiosendspin.noise.pairing import (
 from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
+from aiosendspin.util import warn_deprecated
 
 from .management import (
     ManagementEffect,
@@ -276,6 +278,7 @@ def _activities_allowed(
         # ['pairing'] alone carries a server's re-verification of the existing pairing.
         return activities == {Activity.PAIRING} or activities <= {
             Activity.PLAYBACK,
+            # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
             Activity.MANAGEMENT,
         }
     if unpaired_access:
@@ -305,6 +308,8 @@ class SendspinConnection:
     """The server's ``server_id`` (static public key) learned during the handshake."""
     _noise_psk: ResolvedPsk | None = None
     """The PSK that admitted the current connection, with its trust metadata."""
+    _resolving_psk_id: str | None = None
+    """The long-term ``psk_id`` a handshake in progress resolved, until it keys the session."""
     _handshake_hash: bytes | None = None
     """The Noise handshake hash of the current connection (set during the handshake)."""
     _connected: bool = False
@@ -405,6 +410,14 @@ class SendspinConnection:
         """The PSK that admitted the current connection, or ``None`` if not connected."""
         return self._noise_psk
 
+    @property
+    def record_psk_ids(self) -> set[str]:
+        """The ``psk_id``s of the pairing records backing this connection."""
+        psk_ids = {self._resolving_psk_id} if self._resolving_psk_id is not None else set()
+        if self._noise_psk is not None and self._noise_psk.category is PskCategory.LONG_TERM:
+            psk_ids.add(self._noise_psk.psk_id)
+        return psk_ids
+
     async def wait_closed(self) -> None:
         """Block until this connection has fully disconnected."""
         await self._closed.wait()
@@ -455,6 +468,10 @@ class SendspinConnection:
         try:
             async with asyncio.timeout(PROVISIONAL_CONNECTION_TIMEOUT_S):
                 await self._run_noise_handshake(ws, expected_server_id=expected_server_id)
+                if not self._client.has_connection_slot(self):
+                    # Rejected as if lower priority, before it can back a pairing record.
+                    await self.goodbye_and_disconnect(GoodbyeReason.CONCURRENT_ATTEMPT)
+                    raise RuntimeError("open connection limit reached")
                 await self._run_inner_handshake()
         except TimeoutError:
             # Close whatever transport bring-up reached: encrypted if up, else the raw socket.
@@ -493,6 +510,7 @@ class SendspinConnection:
         self._ws = result.encrypted_ws
         self._server_id = result.peer_id
         self._noise_psk = result.psk
+        self._resolving_psk_id = None
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         self._connected = True
@@ -514,7 +532,10 @@ class SendspinConnection:
             return ResolvedPsk(psk_id, SENTINEL_PSK, PskCategory.SENTINEL)
         if category is PskCategory.LONG_TERM:
             record = await store.record_by_psk_id(psk_id)
-            return record.as_resolved() if record is not None else None
+            if record is None:
+                return None
+            self._resolving_psk_id = psk_id
+            return record.as_resolved()
         pairing = await store.pairing_psk()
         if pairing is None or pairing.psk_id != psk_id:
             return None
@@ -733,6 +754,7 @@ class SendspinConnection:
                     server_id=self._server_id,
                     store=store,
                     on_finalize=self._end_cancellability,
+                    protected_psk_ids=self._client.protected_psk_ids,
                 )
             return
         assert self._handshake_hash is not None
@@ -751,6 +773,7 @@ class SendspinConnection:
                         server_id=self._server_id,
                         store=store,
                         on_finalize=self._end_cancellability,
+                        protected_psk_ids=self._client.protected_psk_ids,
                     )
             except LocalPairingAbortError as err:
                 # The client aborts with pairing_code_mismatch only when server_kc fails.
@@ -779,6 +802,7 @@ class SendspinConnection:
                     server_id=self._server_id,
                     store=store,
                     on_finalize=self._end_cancellability,
+                    protected_psk_ids=self._client.protected_psk_ids,
                 )
         finally:
             self._end_cancellability()
@@ -967,6 +991,7 @@ class SendspinConnection:
             hs1_text=hs1_text,
         )
         self._noise_psk = result.psk
+        self._resolving_psk_id = None
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
 
@@ -1063,6 +1088,7 @@ class SendspinConnection:
         self._server_info = None
         self._server_id = None
         self._noise_psk = None
+        self._resolving_psk_id = None
         self._group_state = None
         self._server_state = None
         self._stream_active = False
@@ -1889,8 +1915,13 @@ class SendspinConnection:
         await handle_unpair(self._client.pairing_store, matched_psk_id=self._noise_psk.psk_id)
         await self.goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def _handle_management_request(self, message: _ManagementRequest) -> None:
-        """Handle a management/* request, gating on the management activity."""
+        """Handle a management/* request, gating on the management activity.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("management/* request handling", MANAGEMENT_DEPRECATION)
         if Activity.MANAGEMENT not in self._activities:
             await self._send_message(
                 ManagementResultMessage(

@@ -6,6 +6,8 @@ import json
 import logging
 import stat
 import sys
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -27,7 +29,7 @@ from aiosendspin.noise.trust_store import (
     StagedPairingPsk,
     TrustedUnpairedClient,
 )
-from tests.pairing_stores import ExhaustedClientStore
+from tests.pairing_stores import ExhaustedClientStore, seed_used_client_records
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,11 +42,15 @@ def _server_record(client_id: str = "client-A") -> ServerPairingRecord:
     )
 
 
+_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
+
+
 def _client_record(server_id: str = "server-X") -> ClientPairingRecord:
     psk = generate_psk()
     return ClientPairingRecord(psk_id=psk_id_for(psk), psk=psk, server_id=server_id)
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 def _shared_record() -> ClientPairingRecord:
     psk = generate_psk()
     return ClientPairingRecord(psk_id=psk_id_for(psk), psk=psk, server_id=None)
@@ -421,6 +427,7 @@ async def test_file_server_store_rejects_malformed_file(tmp_path: Path) -> None:
         await FileServerPairingStore.open(bad_entry)
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_file_client_store_seeds_shared_record_on_first_open(tmp_path: Path) -> None:
     """First open provisions a shared-PSK fallback record referenced by record_mode."""
     path = tmp_path / "client.json"
@@ -576,8 +583,8 @@ async def test_client_store_record_takes_precedence_over_pairing_psk(
 
 
 async def test_client_store_mark_record_used(client_store: ClientPairingStore) -> None:
-    """mark_record_used flips the flag once; absent or already-used calls are no-ops."""
-    record = _client_record(server_id="server-X")
+    """mark_record_used flags the record and refreshes its last use; absent is a no-op."""
+    record = replace(_client_record(server_id="server-X"), last_used_at=_EPOCH)
     await client_store.store_record(record)
     stored = await client_store.record_by_psk_id(record.psk_id)
     assert stored is not None
@@ -587,8 +594,12 @@ async def test_client_store_mark_record_used(client_store: ClientPairingStore) -
     used = await client_store.record_by_psk_id(record.psk_id)
     assert used is not None
     assert used.used is True
+    assert used.last_used_at > _EPOCH
 
-    await client_store.mark_record_used(record.psk_id)  # already used, no-op
+    await client_store.mark_record_used(record.psk_id)
+    reused = await client_store.record_by_psk_id(record.psk_id)
+    assert reused is not None
+    assert reused.last_used_at >= used.last_used_at
     await client_store.mark_record_used("absent")  # no-op
 
 
@@ -621,6 +632,7 @@ async def test_client_store_replace_record_drops_prior_for_server(
     assert await client_store.record_by_psk_id(old.psk_id) is None
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_client_store_replace_record_keeps_shared_records(
     client_store: ClientPairingStore,
 ) -> None:
@@ -633,6 +645,7 @@ async def test_client_store_replace_record_keeps_shared_records(
     assert await client_store.record_by_psk_id(existing.psk_id) == existing
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_client_store_reports_no_storage_accounting_by_default(
     client_store: ClientPairingStore,
 ) -> None:
@@ -665,9 +678,11 @@ async def test_pairing_round_limit_is_reached_at_20_and_clears_on_reset(
     assert not await client_store.is_pairing_round_limit_reached()
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 # --- shared-PSK records --------------------------------------------------
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 def test_shared_record_round_trips_and_resolves() -> None:
     """A shared-PSK record omits server_id; as_resolved carries no counterparty."""
     record = _shared_record()
@@ -680,6 +695,7 @@ def test_shared_record_round_trips_and_resolves() -> None:
     assert resolved.counterparty_id is None
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_shared_record_excluded_from_server_id_lookup(
     client_store: ClientPairingStore,
 ) -> None:
@@ -690,6 +706,7 @@ async def test_shared_record_excluded_from_server_id_lookup(
     assert await client_store.record_by_server_id("any-server") is None
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_set_record_mode_psk_id_validates_reference(
     client_store: ClientPairingStore,
 ) -> None:
@@ -725,6 +742,7 @@ async def test_resolve_outcome_mints_stored_pubkey_record(
     assert record.server_id == "server-X"
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 async def test_resolve_outcome_falls_back_to_shared_on_exhaustion() -> None:
     """A configured shared fallback admits under the shared record when full."""
     store = ExhaustedClientStore()
@@ -734,3 +752,140 @@ async def test_resolve_outcome_falls_back_to_shared_on_exhaustion() -> None:
     psk, record = await store.resolve_pairing_outcome(server_id="server-X")
     assert psk == shared.psk
     assert record is None
+
+
+# --- record capacity and eviction -----------------------------------------
+
+
+async def _client_store_with_capacity(
+    kind: str, tmp_path: Path, record_capacity: int
+) -> ClientPairingStore:
+    if kind == "file":
+        return await FileClientPairingStore.open(
+            tmp_path / "client.json", record_capacity=record_capacity
+        )
+    return InMemoryClientPairingStore(record_capacity=record_capacity)
+
+
+async def _per_server_psk_ids(store: ClientPairingStore) -> set[str]:
+    return {r.psk_id for r in await store.list_records() if r.server_id is not None}
+
+
+async def test_client_store_record_capacity_defaults_to_16(
+    client_store: ClientPairingStore,
+) -> None:
+    """A client store holds 16 per-server records unless configured otherwise."""
+    assert client_store.record_capacity == 16
+
+
+@pytest.mark.parametrize("kind", ["memory", "file"])
+async def test_client_store_record_capacity_is_configurable(kind: str, tmp_path: Path) -> None:
+    """The record capacity is set at construction, down to the spec minimum of 5."""
+    store = await _client_store_with_capacity(kind, tmp_path, 5)
+    assert store.record_capacity == 5
+
+
+@pytest.mark.parametrize("kind", ["memory", "file"])
+async def test_client_store_rejects_capacity_below_5(kind: str, tmp_path: Path) -> None:
+    """A record capacity below the spec minimum of 5 is rejected."""
+    with pytest.raises(ValueError, match="at least 5"):
+        await _client_store_with_capacity(kind, tmp_path, 4)
+
+
+@pytest.mark.parametrize("kind", ["memory", "file"])
+async def test_pairing_at_capacity_evicts_least_recently_used(kind: str, tmp_path: Path) -> None:
+    """At capacity, persisting a new server's record evicts the least recently used one."""
+    store = await _client_store_with_capacity(kind, tmp_path, 5)
+    oldest, *rest = await seed_used_client_records(store, 5)
+    new = _client_record(server_id="server-new")
+
+    await store.replace_record_for_server_id(new)
+
+    assert await _per_server_psk_ids(store) == {new.psk_id, *(r.psk_id for r in rest)}
+    assert await store.record_by_psk_id(oldest.psk_id) is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "file"])
+async def test_eviction_skips_records_backing_open_connections(kind: str, tmp_path: Path) -> None:
+    """A protected record is never evicted, even when it is the least recently used."""
+    store = await _client_store_with_capacity(kind, tmp_path, 5)
+    oldest, second, *_ = await seed_used_client_records(store, 5)
+    new = _client_record(server_id="server-new")
+
+    await store.replace_record_for_server_id(new, protected={oldest.psk_id})
+
+    assert await store.record_by_psk_id(oldest.psk_id) is not None
+    assert await store.record_by_psk_id(second.psk_id) is None
+    assert await store.record_by_psk_id(new.psk_id) == new
+
+
+async def test_eviction_never_touches_shared_records(tmp_path: Path) -> None:
+    """Shared records neither count toward the capacity nor get evicted."""
+    store = await _client_store_with_capacity("memory", tmp_path, 5)
+    shared = [r for r in await store.list_records() if r.server_id is None]
+    assert shared
+    oldest, *rest = await seed_used_client_records(store, 5)
+    new = _client_record(server_id="server-new")
+
+    await store.replace_record_for_server_id(new)
+
+    remaining = await store.list_records()
+    assert all(r in remaining for r in shared)
+    assert await _per_server_psk_ids(store) == {new.psk_id, *(r.psk_id for r in rest)}
+    assert await store.record_by_psk_id(oldest.psk_id) is None
+
+
+async def test_repairing_a_known_server_at_capacity_evicts_nothing(tmp_path: Path) -> None:
+    """Re-pairing a stored server replaces its record without evicting another."""
+    store = await _client_store_with_capacity("memory", tmp_path, 5)
+    seeded = await seed_used_client_records(store, 5)
+    renewed = _client_record(server_id="server-2")
+
+    await store.replace_record_for_server_id(renewed)
+
+    expected = {r.psk_id for r in seeded if r is not seeded[2]} | {renewed.psk_id}
+    assert await _per_server_psk_ids(store) == expected
+
+
+async def test_pairing_persists_when_every_other_record_is_protected(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With nothing evictable the new record still persists, over capacity, with a warning."""
+    store = await _client_store_with_capacity("memory", tmp_path, 5)
+    seeded = await seed_used_client_records(store, 5)
+    new = _client_record(server_id="server-new")
+
+    with caplog.at_level(logging.WARNING):
+        await store.replace_record_for_server_id(new, protected={r.psk_id for r in seeded})
+
+    assert await _per_server_psk_ids(store) == {new.psk_id, *(r.psk_id for r in seeded)}
+    assert any("exceed the capacity" in r.message for r in caplog.records)
+
+
+def test_client_record_without_last_used_at_falls_back_to_created_at() -> None:
+    """A record written before last_used_at existed loads with its creation time."""
+    record = _client_record()
+    data = record.to_dict()
+    del data["last_used_at"]
+
+    restored = ClientPairingRecord.from_dict(data)
+
+    assert restored.last_used_at == record.created_at
+
+
+async def test_file_client_store_loads_records_without_last_used_at(tmp_path: Path) -> None:
+    """A pairing store file written before last_used_at existed still loads."""
+    path = tmp_path / "client.json"
+    store = await FileClientPairingStore.open(path)
+    record = _client_record()
+    await store.store_record(record)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for entry in data["records"].values():
+        del entry["last_used_at"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    reopened = await FileClientPairingStore.open(path)
+
+    restored = await reopened.record_by_psk_id(record.psk_id)
+    assert restored is not None
+    assert restored.last_used_at == record.created_at

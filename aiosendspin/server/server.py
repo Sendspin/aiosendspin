@@ -30,6 +30,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
+from aiosendspin.models.management import MANAGEMENT_DEPRECATION
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import (
@@ -39,7 +40,7 @@ from aiosendspin.noise.pairing import (
     PairingTimeoutError,
 )
 from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedClient
-from aiosendspin.util import create_task, get_local_ip
+from aiosendspin.util import create_task, get_local_ip, warn_deprecated
 
 from .client import SendspinClient
 from .connection import SendspinConnection
@@ -141,6 +142,13 @@ class ExternalStreamStartRequest:
 
 
 ExternalStreamStartCallback = Callable[[ExternalStreamStartRequest], None]
+
+
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+def _warn_if_management_reason(connection_reason: ConnectionReason) -> None:
+    """Report the deprecated management dial reason once per process."""
+    if connection_reason is ConnectionReason.MANAGEMENT:
+        warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
 
 
 def _get_first_valid_ip(addresses: list[str]) -> str | None:
@@ -520,6 +528,7 @@ class SendspinServer:
         when a dial task already exists it is queued for that task's next dial.
         """
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
+        _warn_if_management_reason(connection_reason)
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
@@ -559,6 +568,7 @@ class SendspinServer:
             Exception: Other unexpected errors during the initial connection attempt.
         """
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
+        _warn_if_management_reason(connection_reason)
         self._connection_reasons[url] = connection_reason
         if url in self._initial_connect_succeeded:
             return
@@ -610,15 +620,25 @@ class SendspinServer:
         """
         await self._connection_for(client_id).end_pairing()
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     def enable_management(self, client_id: str) -> SendspinConnection:
-        """Enable a management session on a connected client and return its connection."""
+        """Enable a management session on a connected client and return its connection.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinServer.enable_management", MANAGEMENT_DEPRECATION)
         connection = self._connection_for(client_id)
-        connection.enable_management()
+        connection._set_management(active=True)  # noqa: SLF001
         return connection
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     def disable_management(self, client_id: str) -> None:
-        """End a client's management session, leaving any playback on the connection intact."""
-        self._connection_for(client_id).disable_management()
+        """End a client's management session, leaving any playback on the connection intact.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinServer.disable_management", MANAGEMENT_DEPRECATION)
+        self._connection_for(client_id)._set_management(active=False)  # noqa: SLF001
 
     async def unpair(self, client_id: str) -> None:
         """Drop the pairing with a connected client: remove our record and tell it to drop its own.

@@ -10,9 +10,10 @@ import pytest
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.types import Activity, GoodbyeReason, PairAbortReason, Roles
-from aiosendspin.noise.trust_store import InMemoryClientPairingStore
+from aiosendspin.noise.trust_store import InMemoryClientPairingStore, PskCategory, ResolvedPsk
 
 from .conftest import make_sdk_client
+from .pairing_stores import seed_used_client_records
 
 
 class _FakeConnection:
@@ -64,13 +65,20 @@ def _client() -> SendspinClient:
 # --- _activity_rank ---
 
 
-def test_activity_rank_orders_management_over_playback_over_pairing() -> None:
-    """Management > playback > pairing > none."""
+def test_activity_rank_orders_playback_over_pairing() -> None:
+    """Playback > pairing > none."""
     rank = SendspinClient._activity_rank
-    assert rank([Activity.MANAGEMENT, Activity.PLAYBACK]) == 3
     assert rank([Activity.PLAYBACK]) == 2
     assert rank([Activity.PAIRING]) == 1
     assert rank([]) == 0
+
+
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+def test_activity_rank_ignores_management() -> None:
+    """Management adds nothing to a connection's rank."""
+    rank = SendspinClient._activity_rank
+    assert rank([Activity.MANAGEMENT, Activity.PLAYBACK]) == 2
+    assert rank([Activity.MANAGEMENT]) == 0
 
 
 # --- _should_admit_connection ---
@@ -92,23 +100,45 @@ async def test_admits_when_current_connection_disconnected() -> None:
 
 
 async def test_higher_rank_displaces_lower() -> None:
-    """A management connection displaces an admitted playback connection."""
+    """A playback connection displaces an admitted pairing connection."""
+    client = _client()
+    client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
+        activities=[Activity.PAIRING]
+    )
+    incoming = _FakeConnection(activities=[Activity.PLAYBACK])
+    assert client._should_admit_connection(incoming) is True
+
+
+async def test_lower_rank_rejected() -> None:
+    """A pairing connection does not displace an admitted playback connection."""
+    client = _client()
+    client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
+        activities=[Activity.PLAYBACK]
+    )
+    incoming = _FakeConnection(activities=[Activity.PAIRING])
+    assert client._should_admit_connection(incoming) is False
+
+
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+async def test_management_does_not_outrank_playback() -> None:
+    """A management-only connection does not displace an admitted playback connection."""
     client = _client()
     client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
         activities=[Activity.PLAYBACK]
     )
     incoming = _FakeConnection(activities=[Activity.MANAGEMENT])
-    assert client._should_admit_connection(incoming) is True
+    assert client._should_admit_connection(incoming) is False
 
 
-async def test_lower_rank_rejected() -> None:
-    """A playback connection does not displace an admitted management connection."""
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+async def test_management_ranks_with_its_other_activities() -> None:
+    """Management alongside playback ranks as playback against an admitted playback holder."""
     client = _client()
     client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
-        activities=[Activity.MANAGEMENT]
+        activities=[Activity.PLAYBACK]
     )
-    incoming = _FakeConnection(activities=[Activity.PLAYBACK])
-    assert client._should_admit_connection(incoming) is False
+    incoming = _FakeConnection(activities=[Activity.PLAYBACK, Activity.MANAGEMENT])
+    assert client._should_admit_connection(incoming) is True
 
 
 async def test_equal_nonempty_rank_admitted() -> None:
@@ -141,14 +171,19 @@ async def test_inflight_pairing_not_displaced_by_playback() -> None:
     assert client._should_admit_connection(incoming) is False
 
 
-async def test_inflight_pairing_displaced_by_management() -> None:
-    """Management still outranks an in-flight pairing attempt."""
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+@pytest.mark.parametrize(
+    "activities",
+    [[Activity.MANAGEMENT], [Activity.PLAYBACK, Activity.MANAGEMENT]],
+)
+async def test_inflight_pairing_not_displaced_by_management(activities: list[Activity]) -> None:
+    """Management never displaces an in-flight pairing attempt."""
     client = _client()
     client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
         activities=[Activity.PAIRING], pairing_attempt_in_progress=True
     )
-    incoming = _FakeConnection(activities=[Activity.MANAGEMENT])
-    assert client._should_admit_connection(incoming) is True
+    incoming = _FakeConnection(activities=activities)
+    assert client._should_admit_connection(incoming) is False
 
 
 async def test_idle_pairing_displaced_by_playback() -> None:
@@ -199,7 +234,7 @@ async def test_admit_displaces_previous_with_another_server() -> None:
     client = _client()
     previous = _FakeConnection(activities=[Activity.PLAYBACK], client=client)
     client._admitted_connection = previous  # type: ignore[assignment]
-    incoming = _FakeConnection(activities=[Activity.MANAGEMENT], client=client)
+    incoming = _FakeConnection(activities=[Activity.PLAYBACK], client=client)
 
     await client._admit_connection(incoming)  # type: ignore[arg-type]
 
@@ -226,7 +261,7 @@ async def test_admit_displaces_previous_pairing_with_pair_abort() -> None:
     client = _client()
     previous = _FakeConnection(activities=[Activity.PAIRING], client=client)
     client._admitted_connection = previous  # type: ignore[assignment]
-    incoming = _FakeConnection(activities=[Activity.MANAGEMENT], client=client)
+    incoming = _FakeConnection(activities=[Activity.PLAYBACK], client=client)
 
     await client._admit_connection(incoming)  # type: ignore[arg-type]
 
@@ -453,6 +488,7 @@ async def test_provisional_connection_times_out_during_bringup(
     monkeypatch.setattr("aiosendspin.client.connection.PROVISIONAL_CONNECTION_TIMEOUT_S", 0.02)
     client = _client()
     connection = SendspinConnection(client)
+    assert client._claim_connection_slot(connection)
 
     async def fake_handshake(ws: object, **_: object) -> None:
         connection._connected = True
@@ -476,6 +512,7 @@ async def test_client_initiated_connection_times_out_during_bringup(
     monkeypatch.setattr("aiosendspin.client.connection.PROVISIONAL_CONNECTION_TIMEOUT_S", 0.02)
     client = _client()
     connection = SendspinConnection(client)
+    assert client._claim_connection_slot(connection)
 
     async def fake_handshake(raw_ws: object, **_: object) -> None:
         connection._connected = True
@@ -501,3 +538,133 @@ async def test_client_seeds_last_playback_server_from_store() -> None:
     await sdk._ensure_last_playback_loaded()
 
     assert sdk.last_playback_server_id == "server-Z"
+
+
+# --- open-connection limit ---
+
+
+class _OpenConnection:
+    """Stand-in for an open connection backed by the given pairing records."""
+
+    def __init__(self, *record_psk_ids: str) -> None:
+        self.record_psk_ids = set(record_psk_ids)
+        self.connected = True
+
+
+def _client_with_capacity(record_capacity: int) -> SendspinClient:
+    return make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.CONTROLLER],
+        pairing_store=InMemoryClientPairingStore(record_capacity=record_capacity),
+    )
+
+
+async def test_open_connections_stay_below_record_capacity() -> None:
+    """Slots run out one below the record capacity and free up when a connection closes."""
+    client = _client_with_capacity(5)
+    connections = [_OpenConnection() for _ in range(5)]
+
+    claimed = [client._claim_connection_slot(c) for c in connections]  # type: ignore[arg-type]
+
+    assert claimed == [True, True, True, True, False]
+    assert not client.has_connection_slot(connections[4])  # type: ignore[arg-type]
+    client.on_connection_closed(connections[0])  # type: ignore[arg-type]
+    assert client._claim_connection_slot(connections[4])  # type: ignore[arg-type]
+
+
+async def test_protected_psk_ids_cover_every_open_connection() -> None:
+    """Records backing any open connection, provisional or admitted, are protected."""
+    client = _client_with_capacity(5)
+    provisional = _OpenConnection("psk-a")
+    admitted = _OpenConnection("psk-b", "psk-c")
+    unpaired = _OpenConnection()
+    for connection in (provisional, admitted, unpaired):
+        assert client._claim_connection_slot(connection)  # type: ignore[arg-type]
+    client._admitted_connection = admitted  # type: ignore[assignment]
+
+    assert client.protected_psk_ids() == {"psk-a", "psk-b", "psk-c"}
+
+
+async def test_connect_over_the_open_connection_limit_raises() -> None:
+    """An explicit connect fails before dialing when no connection slot is free."""
+    client = _client_with_capacity(5)
+    for _ in range(4):
+        assert client._claim_connection_slot(_OpenConnection())  # type: ignore[arg-type]
+    try:
+        with pytest.raises(RuntimeError, match="open connection limit reached"):
+            await client.connect("ws://127.0.0.1:9/sendspin")
+        assert not client._provisional_connections
+    finally:
+        await client.disconnect()
+
+
+async def test_failed_bring_up_releases_its_connection_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An incoming connection whose bring-up fails gives its slot back."""
+    client = _client_with_capacity(5)
+
+    async def fail(
+        self: SendspinConnection,  # noqa: ARG001
+        ws: object,  # noqa: ARG001
+        *,
+        expected_server_id: str | None = None,  # noqa: ARG001
+    ) -> None:
+        raise OSError("handshake failed")
+
+    monkeypatch.setattr(SendspinConnection, "attach_websocket", fail)
+
+    await client.attach_websocket(None)  # type: ignore[arg-type]
+
+    assert not client._open_connections
+
+
+async def test_incoming_connection_without_a_slot_is_rejected_after_the_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a slot, bring-up sends client/goodbye concurrent_attempt and stops."""
+    client = _client()
+    connection = SendspinConnection(client)
+    goodbyes: list[GoodbyeReason] = []
+
+    async def fake_handshake(ws: object, **_: object) -> None:
+        connection._connected = True
+        connection._ws = ws  # type: ignore[assignment]
+
+    async def record_goodbye(reason: GoodbyeReason) -> None:
+        goodbyes.append(reason)
+        await connection.disconnect()
+
+    async def fail_inner() -> None:
+        raise AssertionError  # pragma: no cover - the hello exchange must not start
+
+    monkeypatch.setattr(connection, "_run_noise_handshake", fake_handshake)
+    monkeypatch.setattr(connection, "goodbye_and_disconnect", record_goodbye)
+    monkeypatch.setattr(connection, "_run_inner_handshake", fail_inner)
+
+    with pytest.raises(RuntimeError, match="open connection limit reached"):
+        await connection.attach_websocket(_BlockingWebSocket(), expected_server_id=None)  # type: ignore[arg-type]
+    assert goodbyes == [GoodbyeReason.CONCURRENT_ATTEMPT]
+    assert connection._closed.is_set()
+
+
+async def test_connection_protects_the_record_its_handshake_resolved() -> None:
+    """A connection's long-term record is protected from resolution until it closes."""
+    store = InMemoryClientPairingStore(record_capacity=5)
+    (record,) = await seed_used_client_records(store, 1)
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    connection = SendspinConnection(client)
+    assert client._claim_connection_slot(connection)
+    assert client.protected_psk_ids() == set()
+
+    await connection._resolve_psk(record.psk_id, PskCategory.LONG_TERM)
+    assert client.protected_psk_ids() == {record.psk_id}
+
+    connection._noise_psk = record.as_resolved()
+    connection._resolving_psk_id = None
+    assert client.protected_psk_ids() == {record.psk_id}
+
+    connection._noise_psk = ResolvedPsk("sentinel", bytes(32), PskCategory.SENTINEL)
+    assert client.protected_psk_ids() == set()
+    client.on_connection_closed(connection)
+    assert not client._open_connections

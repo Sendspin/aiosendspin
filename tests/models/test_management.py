@@ -1,4 +1,5 @@
 """Round-trip and discriminator tests for the management command messages."""
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 
 from __future__ import annotations
 

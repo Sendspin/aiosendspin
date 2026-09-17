@@ -73,6 +73,7 @@ from aiosendspin.models.core import (
     StreamStartMessage,
 )
 from aiosendspin.models.management import (
+    MANAGEMENT_DEPRECATION,
     ManagementAddRecordMessage,
     ManagementAddRecordPayload,
     ManagementGetPairingConfigMessage,
@@ -140,7 +141,7 @@ from aiosendspin.noise.pairing import (
 )
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import create_task
+from aiosendspin.util import create_task, warn_deprecated
 
 from .client import SendspinClient
 from .compliance import ClientComplianceError
@@ -371,6 +372,7 @@ class SendspinConnection:
         self._client_event_unsub: Callable[[], None] | None = None
         self._group_event_unsub: Callable[[], None] | None = None
 
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         self._management_active = (
             url is not None and server.get_connection_reason(url) is ConnectionReason.MANAGEMENT
         )
@@ -1497,6 +1499,7 @@ class SendspinConnection:
         activities: list[Activity] = []
         if self._playback_capable and self._client_in_playback:
             activities.append(Activity.PLAYBACK)
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if self._management_active and self._management_capable:
             activities.append(Activity.MANAGEMENT)
         return activities
@@ -1511,6 +1514,7 @@ class SendspinConnection:
         )
         if self._playback_capable and (dialed_playback or self._client_in_playback):
             activities.append(Activity.PLAYBACK)
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if self._management_active and self._management_capable:
             activities.append(Activity.MANAGEMENT)
         return activities
@@ -2009,39 +2013,56 @@ class SendspinConnection:
             await self._server.pairing_store.trusted_unpaired(self._client_id) is not None
         )
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     def enable_management(self) -> None:
-        """Add ``management`` to this connection's activities; requires a paired connection."""
-        if not self._management_capable:
+        """Add ``management`` to this connection's activities; requires a paired connection.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.enable_management", MANAGEMENT_DEPRECATION)
+        self._set_management(active=True)
+
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+    def disable_management(self) -> None:
+        """Drop ``management`` from this connection's activities, leaving playback intact.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.disable_management", MANAGEMENT_DEPRECATION)
+        self._set_management(active=False)
+
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+    def _set_management(self, *, active: bool) -> None:
+        """Add or drop ``management``; adding it requires a paired connection."""
+        if active and not self._management_capable:
             msg = "management requires a paired (long-term Sendspin PSK) connection"
             raise RuntimeError(msg)
-        if self._management_active:
+        if active == self._management_active:
             return
-        self._management_active = True
+        self._management_active = active
         self._refresh_activities()
 
-    def disable_management(self) -> None:
-        """Drop ``management`` from this connection's activities, leaving playback intact."""
-        if not self._management_active:
-            return
-        self._management_active = False
-        self._refresh_activities()
-
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     def _resolve_management(self, payload: ManagementResultPayload) -> None:
         """Deliver a management reply, draining the waiter slot."""
         waiter = self._management_waiter
         if waiter is None:
             self._flag_noncompliance("sent an unsolicited management/result")
             return
+        self._flag_noncompliance("sent management/result (deprecated management activity)")
         # Clear even an abandoned waiter, so its late reply can't match the next request.
         self._management_waiter = None
         if not waiter.done():
             waiter.set_result(payload)
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def _management_request[T: ManagementResultPayload](
         self, message: ServerMessage, expected: type[T]
     ) -> T:
         """Send a management request and await its single reply of type ``expected``."""
         # No timeout: replies are matched to requests by order, not id (one in flight).
+        if not (self._management_active and self._management_capable):
+            raise RuntimeError("management is not enabled on this connection")
         if self._management_waiter is not None:
             raise RuntimeError("a management request is already in flight")
         if self._transport is None or self._disconnecting:
@@ -2074,18 +2095,28 @@ class SendspinConnection:
         self._credential_mismatch = False
         self._moved_off_record = False
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def list_records(
         self,
     ) -> tuple[ManagementResult, list[RecordSummary], StorageAccounting | None]:
-        """Return the result code, the client's pairing records, and its storage accounting."""
+        """Return the result code, the client's pairing records, and its storage accounting.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.list_records", MANAGEMENT_DEPRECATION)
         payload = await self._management_request(
             ManagementListRecordsMessage(), ManagementResultPayload
         )
         records = payload.data.records if payload.data and payload.data.records else []
         return payload.result, records, payload.storage
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def add_record(self, *, psk: bytes, server_id: str | None) -> ManagementResult:
-        """Add a pairing record on the client."""
+        """Add a pairing record on the client.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.add_record", MANAGEMENT_DEPRECATION)
         payload = await self._management_request(
             ManagementAddRecordMessage(
                 payload=ManagementAddRecordPayload(psk=b64url_encode(psk), server_id=server_id)
@@ -2094,35 +2125,55 @@ class SendspinConnection:
         )
         return payload.result
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def remove_record(self, *, psk_id: str) -> ManagementResult:
-        """Remove a pairing record from the client."""
+        """Remove a pairing record from the client.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.remove_record", MANAGEMENT_DEPRECATION)
         payload = await self._management_request(
             ManagementRemoveRecordMessage(payload=ManagementRemoveRecordPayload(psk_id=psk_id)),
             ManagementResultPayload,
         )
         return payload.result
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def get_pairing_config(
         self,
     ) -> tuple[ManagementResult, ManagementResultData, StorageAccounting | None]:
-        """Return the result code, the client's pairing configuration (no secrets), and storage."""
+        """Return the result code, the client's pairing configuration (no secrets), and storage.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.get_pairing_config", MANAGEMENT_DEPRECATION)
         payload = await self._management_request(
             ManagementGetPairingConfigMessage(), ManagementResultPayload
         )
         data = payload.data if payload.data is not None else ManagementResultData()
         return payload.result, data, payload.storage
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def set_pairing_config(
         self, patch: ManagementSetPairingConfigPayload
     ) -> ManagementResult:
-        """Apply a pairing-config patch on the client."""
+        """Apply a pairing-config patch on the client.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.set_pairing_config", MANAGEMENT_DEPRECATION)
         payload = await self._management_request(
             ManagementSetPairingConfigMessage(payload=patch), ManagementResultPayload
         )
         return payload.result
 
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     async def open_pairing_window(self) -> ManagementResult:
-        """Open a pairing window on the client in place of the operator gesture."""
+        """Open a pairing window on the client in place of the operator gesture.
+
+        Deprecated: the Sendspin spec no longer defines the management activity.
+        """
+        warn_deprecated("SendspinConnection.open_pairing_window", MANAGEMENT_DEPRECATION)
         payload = await self._management_request(
             ManagementOpenPairingWindowMessage(), ManagementResultPayload
         )
@@ -2397,6 +2448,7 @@ class SendspinConnection:
             await self._client.handle_leave()
             return
 
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if isinstance(message, ManagementResultMessage):
             self._resolve_management(message.payload)
             return

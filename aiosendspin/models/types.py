@@ -245,8 +245,9 @@ class ConnectionReason(Enum):
     """Server is performing a pairing handshake."""
     PLAYBACK = "playback"
     """Server needs client for active or upcoming playback."""
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     MANAGEMENT = "management"
-    """Server is opening a dedicated management session."""
+    """Server is opening a dedicated management session (deprecated)."""
 
 
 class Activity(Enum):
@@ -256,8 +257,9 @@ class Activity(Enum):
     """Active or upcoming playback."""
     PAIRING = "pairing"
     """A pairing exchange."""
+    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     MANAGEMENT = "management"
-    """A dedicated management session."""
+    """A dedicated management session (deprecated)."""
 
 
 class GoodbyeReason(Enum):
@@ -325,6 +327,7 @@ class ServerErrorReason(Enum):
 CLOSING_ABORT_REASONS: frozenset[PairAbortReason] = frozenset({PairAbortReason.CONCURRENT_ATTEMPT})
 
 
+# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
 class ManagementResult(Enum):
     """Result code carried by management/result."""
 
