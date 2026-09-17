@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal, NoReturn, assert_never
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, assert_never
 
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -1766,7 +1766,8 @@ class SendspinConnection:
                     state.timestamp, partial(self._apply_pending_state, name)
                 ),
             )
-            current = replace(current, **{name: undefined_field()})
+            undefined: dict[str, Any] = {name: undefined_field()}
+            current = replace(current, **undefined)
             if name == "metadata":
                 self._client.notify_scheduled_metadata(payload)
             else:
@@ -1806,7 +1807,8 @@ class SendspinConnection:
             self._discard_pending_state(name)
             current = None if self._server_state is None else getattr(self._server_state, name)
             if had_pending or not isinstance(current, UndefinedField | None):
-                cleared = ServerStatePayload(**{name: None})
+                null_object: dict[str, Any] = {name: None}
+                cleared = ServerStatePayload(**null_object)
                 self._apply_server_state(cleared, cleared)
 
     def _local_delay_us(self, server_timestamp_us: int) -> int:
