@@ -1542,7 +1542,7 @@ class SendspinConnection:
         await self._cancel_pairing_attempt()
         async with self._exchange(), asyncio.timeout(REHANDSHAKE_TIMEOUT_S):
             await self._rehandshake(data)
-            activate = await self._exchange_hellos()
+            activate = await self._receive_server_activate()
         await self._handle_server_activate(activate, resync=True)
 
     async def _handle_server_activate(

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from collections import Counter
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -127,6 +128,51 @@ def _legacy_hello() -> str:
             supported_roles=[Roles.CONTROLLER.value],
         )
     ).to_json()
+
+
+# DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+async def _rehandshake_with_hellos(self: SdkConnection, data: str) -> None:
+    """Run a server-initiated re-handshake that re-exchanges hellos, as pre-#287 clients do."""
+    await self._cancel_pairing_attempt()
+    async with (
+        self._exchange(),
+        asyncio.timeout(client_connection_module.REHANDSHAKE_TIMEOUT_S),
+    ):
+        await self._rehandshake(data)
+        activate = await self._exchange_hellos()
+    await self._handle_server_activate(activate, resync=True)
+
+
+# DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+def _pre_spec_287_rehandshake() -> Any:
+    """Patch the SDK client to re-exchange hellos after every re-handshake."""
+    return patch.object(SdkConnection, "_handle_handshake", _rehandshake_with_hellos)
+
+
+@contextmanager
+def _count_hellos() -> Iterator[Counter[str]]:
+    """Count every server/hello the server sends and every client/hello it receives."""
+    counts: Counter[str] = Counter()
+    server_hello = SendspinConnection._server_hello  # noqa: SLF001
+    deserialize = SendspinConnection._deserialize_client_message  # noqa: SLF001
+
+    def counting_server_hello(self: SendspinConnection) -> Any:
+        counts["server/hello"] += 1
+        return server_hello(self)
+
+    def counting_deserialize(_cls: type[SendspinConnection], raw: str) -> ClientMessage:
+        message = deserialize(raw)
+        if isinstance(message, ClientHelloMessage):
+            counts["client/hello"] += 1
+        return message
+
+    with (
+        patch.object(SendspinConnection, "_server_hello", counting_server_hello),
+        patch.object(
+            SendspinConnection, "_deserialize_client_message", classmethod(counting_deserialize)
+        ),
+    ):
+        yield counts
 
 
 async def test_pairing_psk_flow_then_paired_playback() -> None:
@@ -684,7 +730,10 @@ async def test_live_pairing_language_hint_on_activation_for_pre_spec_177_hello()
         ],
         buffer_capacity=1_000_000,
     )
-    with patch.object(SdkConnection, "_build_client_hello", pre_spec_177_hello):
+    with (
+        patch.object(SdkConnection, "_build_client_hello", pre_spec_177_hello),
+        _pre_spec_287_rehandshake(),
+    ):
         activation, spoken = await _pair_via_spoken_dynamic_code(
             server, player_support=player_support
         )
@@ -1575,6 +1624,7 @@ async def test_list_form_client_pairs_under_the_pre_round_sid(
         try:
             with (
                 patch.object(SdkConnection, "_send_client_hello", _send_list_form_hello),
+                _pre_spec_287_rehandshake(),
                 patch.object(pairing_module, "_pake_sid", client_sid),
                 patch.object(pairing_module, "_legacy_pake_sid", server_sid),
             ):
@@ -3044,7 +3094,10 @@ async def test_live_pairing_quiesces_a_legacy_generation_client() -> None:
             pairing_support=PairingSupport(pairing_code_display=display),
         )
         try:
-            with patch.object(SdkConnection, "_build_client_hello", pre_spec_177_hello):
+            with (
+                patch.object(SdkConnection, "_build_client_hello", pre_spec_177_hello),
+                _pre_spec_287_rehandshake(),
+            ):
                 await client.connect(url)
                 during = await _pair_while_playing(
                     server,
@@ -4124,5 +4177,329 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
             assert conn._roles_to_activate == []  # noqa: SLF001
             assert _server_active_role_count(server, identity.peer_id) == 0
             assert conn._credential_mismatch is True  # noqa: SLF001
+        finally:
+            await client.disconnect()
+
+
+async def test_pairing_psk_switch_exchanges_hellos_once() -> None:
+    """Re-keying onto the Pairing PSK and then the long-term PSK carries one hello pair."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            with _count_hellos() as hellos:
+                await client.connect(url)
+                conn = await _find_connection_by_client_id(server, identity.peer_id)
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=identity.peer_id,
+                    )
+                )
+                await _await_paired_session(client)
+            assert hellos == {"server/hello": 1, "client/hello": 1}
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_sentinel_switch_exchanges_hellos_once() -> None:
+    """Moving a Pairing PSK session to the Sentinel, then long-term, keeps one hello pair."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    identity = Identity.generate()
+    # Holds the Pairing PSK, so the first attempt lands on it, but refuses that method.
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(config, pairing_psk_enabled=False))
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        if pairing_code is not None and not shown.done():
+            shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            with _count_hellos() as hellos:
+                await client.connect(url)
+                conn = await _find_connection_by_client_id(server, identity.peer_id)
+                with pytest.raises(PairingAbortError):
+                    await conn.initiate_pairing(
+                        PairingAttempt(
+                            method=PairMethod.PAIRING_PSK,
+                            pairing_psk=pairing,
+                            client_id=identity.peer_id,
+                        )
+                    )
+                assert conn.psk_category is PskCategory.PAIRING
+
+                sentinel_rehandshakes: list[PskCategory] = []
+                rehandshake = conn._rehandshake_to  # noqa: SLF001
+
+                async def tracking_rehandshake(transport: Any, psk: Any) -> bool:
+                    sentinel_rehandshakes.append(psk.category)
+                    return await rehandshake(transport, psk)
+
+                conn._rehandshake_to = tracking_rehandshake  # type: ignore[method-assign]  # noqa: SLF001
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+                await _await_paired_session(client)
+            assert sentinel_rehandshakes == [PskCategory.SENTINEL, PskCategory.LONG_TERM]
+            assert hellos == {"server/hello": 1, "client/hello": 1}
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_long_term_adoption_exchanges_hellos_once_and_activates_roles() -> None:
+    """Adopting the long-term PSK after pairing activates the roles with no repeated hellos."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        if pairing_code is not None and not shown.done():
+            shown.set_result(pairing_code)
+
+    async def provide() -> str:
+        return await shown
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.PLAYER],
+            player_support=_player_support(),
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            with _count_hellos() as hellos:
+                await client.connect(url)
+                conn = await _find_connection_by_client_id(server, identity.peer_id)
+                assert _server_active_role_count(server, identity.peer_id) == 0
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+                await _await_paired_session(client)
+            assert hellos == {"server/hello": 1, "client/hello": 1}
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert client.activities == []
+            server_client = server.get_client(identity.peer_id)
+            assert server_client is not None
+            assert [role.role_id for role in server_client.active_roles] == ["player@v1"]
+            assert client._admitted_connection is not None  # noqa: SLF001
+            assert client._admitted_connection._active_roles == ["player@v1"]  # noqa: SLF001
+        finally:
+            await client.disconnect()
+
+
+# DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+# The list-form wire is used because a pre-#177 hello on this path receives a queued
+# server/time between the repeated client/hello and server/activate.
+async def test_pre_spec_287_client_gets_hellos_after_each_rehandshake() -> None:
+    """A client whose hello uses a pre-#287 wire gets a hello pair after every re-handshake."""
+    server = _make_server(InMemoryServerPairingStore())
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.PLAYER],
+            player_support=_player_support(),
+        )
+        try:
+            with (
+                patch.object(SdkConnection, "_send_client_hello", _send_list_form_hello),
+                _pre_spec_287_rehandshake(),
+                _count_hellos() as hellos,
+            ):
+                await client.connect(url)
+                conn = await _find_connection_by_client_id(server, identity.peer_id)
+                assert conn._expects_rehandshake_hellos is True  # noqa: SLF001
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=identity.peer_id,
+                    )
+                )
+                await _await_paired_session(client)
+            # The initial pair, then one for each of the Pairing PSK and long-term re-handshakes.
+            assert hellos == {"server/hello": 3, "client/hello": 3}
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert conn._writer_paused is False  # noqa: SLF001
+            assert conn._writer_task is not None  # noqa: SLF001
+            assert not conn._writer_task.done()  # noqa: SLF001
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+async def test_repeated_client_hello_is_flagged(
+    caplog: pytest.LogCaptureFixture,
+    strict: bool,  # noqa: FBT001
+) -> None:
+    """A current client's second client/hello is a compliance violation, not a new exchange."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=not strict)
+    identity = Identity.generate()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=InMemoryClientPairingStore(),
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            sdk_conn = client._admitted_connection  # noqa: SLF001
+            assert sdk_conn is not None
+            assert sdk_conn._ws is not None  # noqa: SLF001
+            hello = await sdk_conn._build_client_hello()  # noqa: SLF001
+            await sdk_conn._ws.send_str(hello.to_json())  # noqa: SLF001
+            reason = "sent a second client/hello after the hello exchange"
+            if strict:
+                await _wait_until(lambda: not client.connected)
+                assert f"rejecting non-compliant client: {reason}" in caplog.messages
+            else:
+                await _wait_until(lambda: f"non-compliant client: {reason}" in caplog.messages)
+                assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_repeated_client_hello_during_pairing_is_flagged_not_routed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A current client's second client/hello mid-attempt is flagged and never reaches pairing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async with _serve(server) as url:
+        client, attempt, release = await _paired_client_with_stalled_success_tail(
+            server, url, client_identity, client_store
+        )
+        try:
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            routed = _track_routed_types(conn)
+            sdk_conn = client._admitted_connection  # noqa: SLF001
+            assert sdk_conn is not None
+            assert sdk_conn._ws is not None  # noqa: SLF001
+            hello = await sdk_conn._build_client_hello()  # noqa: SLF001
+            await sdk_conn._ws.send_str(hello.to_json())  # noqa: SLF001
+            await _wait_until(
+                lambda: (
+                    "non-compliant client: sent a second client/hello after the hello exchange"
+                    in caplog.messages
+                )
+            )
+            assert "client/hello" not in routed
+            release.set()
+
+            await attempt
+            await _await_paired_session(client)
+            assert conn.psk_category is PskCategory.LONG_TERM
+        finally:
+            release.set()
+            await client.disconnect()
+
+
+async def test_rehandshake_reloads_trusted_unpaired_for_the_new_psk() -> None:
+    """Leaving the long-term PSK re-reads the unpaired-access grant the session now runs under."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    await server_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=identity.peer_id))
+    # Admits unpaired access and holds the Pairing PSK, but refuses to pair with it.
+    client_store = await _unpaired_enabled_store()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(config, pairing_psk_enabled=False))
+    long_term = generate_psk()
+    long_term_id = psk_id_for(long_term)
+    await server_store.store_record(
+        ServerPairingRecord(
+            psk_id=long_term_id, psk=long_term, client_id=identity.peer_id, pair_methods=[]
+        )
+    )
+    await client_store.store_record(
+        ClientPairingRecord(psk_id=long_term_id, psk=long_term, server_id=server.id)
+    )
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.PLAYER],
+            player_support=_player_support(),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            # A long-term session never reads the grant.
+            assert conn._trusted_unpaired is False  # noqa: SLF001
+
+            with pytest.raises(PairingAbortError):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=identity.peer_id,
+                    )
+                )
+            assert conn.psk_category is PskCategory.PAIRING
+            assert conn._trusted_unpaired is True  # noqa: SLF001
+
+            # Once the record is gone, the grant alone admits playback on the Pairing PSK.
+            await server_store.remove_record(identity.peer_id)
+            conn.forget_credential_mismatch()
+            await conn.end_pairing()
+            assert conn._playback_capable is True  # noqa: SLF001
+            assert _server_active_role_count(server, identity.peer_id) == 1
         finally:
             await client.disconnect()

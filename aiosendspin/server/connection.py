@@ -334,6 +334,11 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
         # Set when the client/hello tripped the spec-pr-177 player commands tolerance.
         self._legacy_hello = False
+        # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+        # Set when the client/hello tripped a tolerance for a wire that predates spec-pr-287.
+        # Such a client awaits server/hello and sends client/hello again after a re-handshake.
+        # The hello carries no revision, so a pre-#287 client on the current wire is not caught.
+        self._expects_rehandshake_hellos = False
 
         self._declared_activities: list[Activity] | None = None
         # Source start commands sent that no client-stream/start has opened a stream for yet.
@@ -1236,14 +1241,12 @@ class SendspinConnection:
                 "Client offered roles/versions this server does not implement: %s", unimplemented
             )
 
-        if self._noise_psk is not None and self._noise_psk.category is not PskCategory.LONG_TERM:
-            self._trusted_unpaired = (
-                await self._server.pairing_store.trusted_unpaired(client_id) is not None
-            )
+        await self._reload_trusted_unpaired()
 
         if self._client is None:
             self._attach_new_client(client_id, client_info)
         else:
+            # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             # Hello re-sent over the same connection after an in-band re-handshake.
             self._client.refresh_identity_from_hello(
                 client_info, negotiated_roles=self._negotiated_roles
@@ -1300,6 +1303,8 @@ class SendspinConnection:
                 "client/hello used unversioned support keys: "
                 + ", ".join(client_info.legacy_support_keys_used)
             )
+            # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+            self._expects_rehandshake_hellos = True
         if client_info.unlisted_support_roles:
             self._flag_noncompliance(
                 "client/hello sent support objects for unlisted roles: "
@@ -1319,12 +1324,16 @@ class SendspinConnection:
                 "superseded by the client/state artwork object"
             )
             self._flag_legacy_artwork_wire(client_info.artwork_support)
+            # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+            self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
         visualizer_support = client_info.visualizer_support
         if visualizer_support is not None and visualizer_support.has_stream_config:
             self._flag_noncompliance(
                 "client/hello declared visualizer stream configuration, superseded by client/state"
             )
+            # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+            self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         player_support = client_info.player_support
         if player_support is not None and player_support.supported_commands is not None:
@@ -1334,6 +1343,8 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
             # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
             self._legacy_hello = True
+            # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+            self._expects_rehandshake_hellos = True
             # A pre-#177 client also predates the type 1 fragment framing.
             # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
             if isinstance(self._transport, EncryptedWebSocket):
@@ -1345,6 +1356,8 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
         if client_info.legacy_pair_methods_list_used:
             self._flag_noncompliance("client/hello sent supported_pair_methods as a list")
+            # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+            self._expects_rehandshake_hellos = True
         methods = client_info.supported_pair_methods
         if methods is None:
             return
@@ -1791,7 +1804,7 @@ class SendspinConnection:
         return requested
 
     async def _rehandshake_for_pairing_if_needed(self, transport: Transport) -> bool:
-        """If the attempt needs a PSK other than the current one, rehandshake and redo hellos."""
+        """If the attempt needs a PSK other than the current one, re-handshake onto it."""
         attempt = self._pairing_attempt
         if attempt is None:
             return True
@@ -1816,10 +1829,10 @@ class SendspinConnection:
         return await self._rehandshake_to(transport, target)
 
     async def _rehandshake_to(self, transport: EncryptedWebSocket, psk: ResolvedPsk) -> bool:
-        """Re-handshake onto ``psk`` and redo the hello dance.
+        """Re-handshake onto ``psk``; False if the connection was rejected.
 
         The writer stays paused until the caller resumes it after the next ``server/activate``,
-        which the client awaits right after the hellos.
+        which the client awaits right after the handshake.
         """
         assert self._client_id is not None
         assert self._handshake_hash is not None
@@ -1837,7 +1850,11 @@ class SendspinConnection:
         self._noise_psk = result.psk
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
-        return await self._send_server_hello_and_recv(transport)
+        await self._reload_trusted_unpaired()
+        # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+        if self._expects_rehandshake_hellos:
+            return await self._send_server_hello_and_recv(transport)
+        return True
 
     async def _activate(self) -> None:
         """Send ``server/activate``, reconcile the client's active roles, and resume the writer."""
@@ -1932,11 +1949,8 @@ class SendspinConnection:
             return
         if self._client is None or self._declared_activities is None:
             return
-        assert self._client_id is not None
         was_trusted = self._trusted_unpaired
-        self._trusted_unpaired = (
-            await self._server.pairing_store.trusted_unpaired(self._client_id) is not None
-        )
+        await self._reload_trusted_unpaired()
         if self._in_pairing:
             # A server/activate would cancel the attempt; the one ending pairing carries the change.
             if was_trusted and not self._trusted_unpaired:
@@ -1944,6 +1958,15 @@ class SendspinConnection:
             return
         self._declared_activities = self._desired_activities
         self._send_activation(self._roles_to_activate)
+
+    async def _reload_trusted_unpaired(self) -> None:
+        """Re-read the client's trusted-unpaired approval; a long-term PSK leaves it unchanged."""
+        if self._noise_psk is None or self._noise_psk.category is PskCategory.LONG_TERM:
+            return
+        assert self._client_id is not None
+        self._trusted_unpaired = (
+            await self._server.pairing_store.trusted_unpaired(self._client_id) is not None
+        )
 
     def enable_management(self) -> None:
         """Add ``management`` to this connection's activities; requires a paired connection."""
@@ -2112,6 +2135,10 @@ class SendspinConnection:
         message_type = self._peek_message_type(cast("str", msg.data))
         self._note_pairing_frame(message_type)
         if message_type not in _PAIR_TRANSITION_TYPES:
+            return False
+        # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+        # Only a pre-#287 client's repeated hello belongs to the attempt; any other is flagged.
+        if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
         self._pairing_message_queue.put_nowait(msg)
         return True
