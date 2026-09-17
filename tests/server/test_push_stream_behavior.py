@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass
 from itertools import pairwise
@@ -853,6 +854,102 @@ async def test_clear_during_inflight_commit_suppresses_audio_delivery(mock_loop:
 
     assert any(isinstance(m, StreamClearMessage) for m in conn.sent_json)
     assert not conn.sent_binary
+
+
+class _BlockingTransformer:
+    """Transformer whose process() parks its thread until `release` is set."""
+
+    pending_timestamp_us: int | None = None
+    frame_duration_us = 25_000
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.process_thread: int | None = None
+        self.in_process = False
+        self.reset_calls = 0
+        self.reset_overlapped_process = False
+
+    def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+        self.process_thread = threading.get_ident()
+        self.in_process = True
+        self.entered.set()
+        self.release.wait()
+        self.in_process = False
+        return [(pcm, 25_000)]
+
+    def flush(self) -> list[tuple[bytes, int]]:
+        return []
+
+    def get_header(self) -> bytes | None:
+        return None
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+        self.reset_overlapped_process |= self.in_process
+        # Unblock process() so an overlapping reset fails the test instead of hanging it.
+        self.release.set()
+
+
+class _ReleaseBeforeAcquire:
+    """Lock proxy that releases a parked transformer right before waiting for the lock."""
+
+    def __init__(self, lock: threading.Lock, release: threading.Event) -> None:
+        self._lock = lock
+        self._release = release
+
+    def __enter__(self) -> None:
+        self._release.set()
+        self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
+
+
+def _blocking_transformer_stream(
+    mock_loop: Any,
+) -> tuple[PushStream, _DummyRole, _BlockingTransformer]:
+    transformer = _BlockingTransformer()
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,  # type: ignore[arg-type]
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group = _DummyGroup(clients=[])
+    group.clients.append(_DummyClient([role]))  # type: ignore[arg-type]
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)  # type: ignore[arg-type]
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    return stream, role, transformer
+
+
+@pytest.mark.asyncio
+async def test_encode_runs_off_loop_and_stop_reset_waits_for_it(mock_loop: Any) -> None:
+    """Encoding runs on a worker thread, and stop() never resets a transformer mid-process()."""
+    stream, role, transformer = _blocking_transformer_stream(mock_loop)
+    commit_task = asyncio.create_task(stream.commit_audio())
+
+    # The loop keeps running while the worker is parked inside process().
+    assert await asyncio.to_thread(transformer.entered.wait, 5.0)
+    assert transformer.in_process
+    assert transformer.process_thread != threading.get_ident()
+
+    # The worker already holds the real lock; stop() goes through the proxy,
+    # which lets process() finish only once stop() is about to wait for it.
+    stream._transformer_lock = _ReleaseBeforeAcquire(  # type: ignore[assignment]  # noqa: SLF001
+        stream._transformer_lock,  # noqa: SLF001
+        transformer.release,
+    )
+    stream.stop()
+    await commit_task
+
+    assert transformer.reset_calls == 1
+    assert not transformer.reset_overlapped_process
+    assert role.received == []
 
 
 @pytest.mark.asyncio
