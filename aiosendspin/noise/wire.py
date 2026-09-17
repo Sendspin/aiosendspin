@@ -72,7 +72,7 @@ class EncryptedWebSocket:
 
     - ``on_legacy_fragment``: when set, legacy fragment types ``2``/``3`` are
       accepted and the callback runs once per such message. When unset they are
-      a protocol error.
+      delivered as ordinary binary messages, for the owner to ignore.
     - ``legacy_fragment_framing``: when true, oversized messages are sent with
       the legacy type ``2``/``3`` framing.
     """
@@ -189,7 +189,10 @@ class EncryptedWebSocket:
             if type_byte == MSG_TYPE_FRAGMENT:
                 return self._on_fragment(plaintext)
             # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
-            if type_byte in (MSG_TYPE_FRAGMENT_MORE, MSG_TYPE_FRAGMENT_END):
+            if (
+                type_byte in (MSG_TYPE_FRAGMENT_MORE, MSG_TYPE_FRAGMENT_END)
+                and self.on_legacy_fragment is not None
+            ):
                 return self._on_legacy_fragment(plaintext)
             if self._reasm_buf is not None:
                 return self._error("non-fragment frame while a fragmented message is in flight")
@@ -224,9 +227,8 @@ class EncryptedWebSocket:
 
     # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
     def _on_legacy_fragment(self, plaintext: bytes) -> WSMessage | None:
-        """Handle a legacy type ``2``/``3`` fragment frame, if the owner opted in."""
-        if self.on_legacy_fragment is None:
-            return self._error(f"reserved binary message type {plaintext[0]}")
+        """Handle a legacy type ``2``/``3`` fragment frame; the owner has opted in."""
+        assert self.on_legacy_fragment is not None
         last = plaintext[0] == MSG_TYPE_FRAGMENT_END
         if self._reasm_buf is None:
             if last:
