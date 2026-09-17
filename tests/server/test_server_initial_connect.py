@@ -659,7 +659,9 @@ async def test_pairing_attempt_queued_for_existing_dial_task(
     session = _PersistentSuccessfulSession()
     server = _make_server(session)
     url = "ws://127.0.0.1:9999/sendspin"
-    attempt = PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk())
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id="client-A"
+    )
     received: list[object] = []
 
     class _FakeConnection:

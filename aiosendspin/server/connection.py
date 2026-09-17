@@ -1003,11 +1003,13 @@ class SendspinConnection:
         return decoded.get("type") if isinstance(decoded, dict) else None
 
     async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
-        """Pick the PSK to admit ``client_id`` with."""
+        """Pick the PSK to admit ``client_id`` with, or ``None`` to refuse it."""
         if self._pairing_attempt is not None:
             attempt = self._pairing_attempt
             if attempt.method is PairMethod.PAIRING_PSK:
                 assert attempt.pairing_psk is not None
+                if client_id != attempt.client_id:
+                    return None
                 return ResolvedPsk(
                     psk_id_for(attempt.pairing_psk),
                     attempt.pairing_psk,
@@ -1475,11 +1477,14 @@ class SendspinConnection:
 
         A pair abort raises and leaves the connection for a retry or ``end_pairing``.
         A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
-        after leaving pairing, also keeping the connection.
+        after leaving pairing, also keeping the connection; so does a Pairing PSK attempt whose
+        ``client_id`` is not this connection's, before entering pairing.
         Any other failure propagates for the caller to disconnect.
         """
         if self._pairing_attempt is not None:
             raise PairingError("connection is already in a pairing attempt")
+        if attempt.method is PairMethod.PAIRING_PSK and attempt.client_id != self._client_id:
+            raise InvalidPairingCodeError("pairing token is for another client")
         transport = self._transport
         if not isinstance(transport, EncryptedWebSocket):
             raise PairingError("cannot pair over an unencrypted connection")

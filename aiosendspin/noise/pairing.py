@@ -79,7 +79,10 @@ class PairingTimeoutError(PairingError):
 
 
 class InvalidPairingCodeError(PairingError):
-    """The operator-entered pairing code or token is malformed; nothing was sent for it."""
+    """The operator-entered pairing code or token is malformed or names another client.
+
+    Nothing was sent for it.
+    """
 
 
 class PairingAbortError(PairingError):
@@ -120,6 +123,11 @@ class PairingAttempt:
     """Emission format for the dynamic pairing code; absent for the other methods."""
     pairing_psk: bytes | None = None
     """Required for the Pairing PSK method; the live PSK pasted from a token."""
+    client_id: str | None = None
+    """Required for the Pairing PSK method; the ``client_id`` decoded from the same token.
+
+    The attempt runs only on a connection presenting this ``client_id``.
+    """
     verify: bool = False
     """Re-verify an already-paired client instead of pairing anew."""
     on_pair_pending: Callable[[str | None], None] | None = None
@@ -149,12 +157,15 @@ class PairingAttempt:
             if self.on_pair_pending is not None:
                 msg = "PAIRING_PSK does not use on_pair_pending"
                 raise ValueError(msg)
+            if self.client_id is None:
+                msg = "PAIRING_PSK requires client_id"
+                raise ValueError(msg)
         else:  # Pairing-code methods
             if self.pairing_code_provider is None:
                 msg = f"{self.method.value} requires pairing_code_provider"
                 raise ValueError(msg)
-            if self.pairing_psk is not None:
-                msg = f"{self.method.value} does not use pairing_psk"
+            if self.pairing_psk is not None or self.client_id is not None:
+                msg = f"{self.method.value} does not use pairing_psk or client_id"
                 raise ValueError(msg)
             if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
                 if self.pairing_format is None:

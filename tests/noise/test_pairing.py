@@ -89,7 +89,7 @@ def test_pairing_attempt_verify_is_code_only() -> None:
 
 
 def test_pairing_attempt_pairing_psk_requires_material() -> None:
-    """PAIRING_PSK must carry a 32-byte pairing_psk and no pairing-code flow hooks."""
+    """PAIRING_PSK must carry a 32-byte pairing_psk, its client_id, and no code flow hooks."""
     with pytest.raises(ValueError, match="requires pairing_psk"):
         PairingAttempt(method=PairMethod.PAIRING_PSK)
     with pytest.raises(ValueError, match="must be 32 bytes"):
@@ -104,17 +104,27 @@ def test_pairing_attempt_pairing_psk_requires_material() -> None:
             pairing_psk=generate_psk(),
             on_pair_pending=lambda _message: None,
         )
+    with pytest.raises(ValueError, match="requires client_id"):
+        PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk())
+    assert (
+        PairingAttempt(
+            method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id="client-A"
+        ).client_id
+        == "client-A"
+    )
 
 
 @pytest.mark.parametrize(
     "method", [PairMethod.DYNAMIC_PAIRING_CODE, PairMethod.STATIC_PAIRING_CODE]
 )
 def test_pairing_attempt_code_methods_require_pairing_code_provider(method: PairMethod) -> None:
-    """pairing-code methods must carry a pairing_code_provider and must not carry a pairing_psk."""
+    """Pairing-code methods carry a pairing_code_provider and no Pairing PSK token material."""
     with pytest.raises(ValueError, match="requires pairing_code_provider"):
         PairingAttempt(method=method)
-    with pytest.raises(ValueError, match="does not use pairing_psk"):
+    with pytest.raises(ValueError, match="does not use pairing_psk or client_id"):
         PairingAttempt(method=method, pairing_code_provider=_code, pairing_psk=generate_psk())
+    with pytest.raises(ValueError, match="does not use pairing_psk or client_id"):
+        PairingAttempt(method=method, pairing_code_provider=_code, client_id="client-A")
 
 
 def test_pairing_attempt_pairing_format_is_dynamic_only() -> None:

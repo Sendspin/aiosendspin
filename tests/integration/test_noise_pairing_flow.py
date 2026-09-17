@@ -367,7 +367,9 @@ async def test_pairing_dial_refuses_legacy_client(allow_unencrypted: bool) -> No
                     wsock_client=wsock,
                     url=url,
                     pairing_attempt=PairingAttempt(
-                        method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk()
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=generate_psk(),
+                        client_id="legacy-client",
                     ),
                 )
                 await asyncio.wait_for(conn.handle_client(), timeout=5)
@@ -412,7 +414,11 @@ async def test_initiate_pairing_refuses_legacy_connection() -> None:
         conn = await _find_connection_by_client_id(server, "legacy-client")
         with pytest.raises(PairingError, match="unencrypted"):
             await conn.initiate_pairing(
-                PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk())
+                PairingAttempt(
+                    method=PairMethod.PAIRING_PSK,
+                    pairing_psk=generate_psk(),
+                    client_id="legacy-client",
+                )
             )
 
 
@@ -2209,7 +2215,11 @@ async def test_live_pairing_pairing_psk() -> None:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
             await conn.initiate_pairing(
-                PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                PairingAttempt(
+                    method=PairMethod.PAIRING_PSK,
+                    pairing_psk=pairing,
+                    client_id=client_identity.peer_id,
+                )
             )
             await _await_long_term_record(client_store, server.id)
             assert client.noise_psk is not None
@@ -2361,7 +2371,11 @@ async def test_strict_server_rejects_legacy_pairing_psk_client_live() -> None:
             ):
                 await server.initiate_pairing(
                     client_identity.peer_id,
-                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing),
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=client_identity.peer_id,
+                    ),
                 )
             assert await server_store.record_by_client_id(client_identity.peer_id) is None
             async with asyncio.timeout(5):
@@ -2383,7 +2397,9 @@ async def test_finalize_first_is_discarded_after_a_pairing_psk_pair_init(
     client_store = InMemoryClientPairingStore()
     pairing = generate_psk()
     await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
-    attempt = PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=client_identity.peer_id
+    )
 
     async with _serve(server) as url:
         client = make_sdk_client(
@@ -2493,7 +2509,9 @@ async def test_unconsumed_pair_init_of_a_cancelled_attempt_blocks_the_legacy_fal
     client_store = InMemoryClientPairingStore()
     pairing = generate_psk()
     await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
-    attempt = PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=client_identity.peer_id
+    )
     client_exchange = _AbandonedPairingPskClient()
     release_init = client_exchange.release_init
     second_attempt_started = asyncio.Event()
@@ -2806,7 +2824,11 @@ async def test_live_pairing_psk_pauses_writer_across_rehandshakes() -> None:
             conn_holder.append(conn)
             with patch.object(connection_module, "run_rehandshake_server", observing_rehandshake):
                 await conn.initiate_pairing(
-                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=client_identity.peer_id,
+                    )
                 )
             # Paused for the first re-handshake, running for the exchange, paused for the last.
             assert writer_running == [False, True, False]
@@ -3075,7 +3097,9 @@ async def test_pairing_on_a_long_term_session_quiesces_first() -> None:
 
             def attempt(provide: Callable[[], Any]) -> PairingAttempt:
                 snapshots.append(provide)
-                return PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                return PairingAttempt(
+                    method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+                )
 
             with patch.object(connection_module, "run_pairing_psk_server", observe_then_run):
                 during = await _pair_while_playing(server, client, attempt, code)
@@ -3369,6 +3393,106 @@ async def test_reverification_at_round_limit_is_held_back() -> None:
             await client.disconnect()
 
 
+async def test_initiate_pairing_refuses_a_pairing_psk_token_for_another_client() -> None:
+    """A Pairing PSK token naming another client raises before pairing, keeping the connection."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with pytest.raises(InvalidPairingCodeError, match="another client"):
+                await server.initiate_pairing(
+                    client_identity.peer_id,
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=Identity.generate().peer_id,
+                    ),
+                )
+            assert not conn._in_pairing  # noqa: SLF001
+            assert client.connected
+            assert Activity.PAIRING not in client.activities
+            assert client.noise_psk is not None
+            assert client.noise_psk.category is PskCategory.SENTINEL
+            assert await server_store.record_by_client_id(client_identity.peer_id) is None
+        finally:
+            await client.disconnect()
+
+
+@pytest.mark.parametrize("already_paired", [False, True])
+async def test_pairing_psk_dial_refuses_a_token_for_another_client(
+    already_paired: bool,  # noqa: FBT001
+) -> None:
+    """A Pairing PSK dial reaching a client other than the token's aborts the handshake."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    if already_paired:
+        await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    records_before = await server_store.list_records()
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=Identity.generate().peer_id
+    )
+
+    sdk = make_sdk_client(
+        identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+    )
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            ClientSession() as session,
+            session.ws_connect(url) as wsock,
+        ):
+            conn = SendspinConnection(server, wsock_client=wsock, url=url, pairing_attempt=attempt)
+            await asyncio.wait_for(conn.handle_client(), timeout=5)
+        assert not sdk.connected
+        assert server.get_client(identity.peer_id) is None
+        assert await server_store.list_records() == records_before
+        assert (await client_store.record_by_server_id(server.id) is not None) is already_paired
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
+async def test_pairing_psk_dial_pairs_the_token_client() -> None:
+    """A Pairing PSK dial reaching the token's client pairs it."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+    )
+
+    sdk = make_sdk_client(
+        identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+    )
+    try:
+        async with _host_incoming_client(sdk) as url, _dial(server, url, pairing_attempt=attempt):
+            await _await_paired_session(sdk)
+            assert await server_store.record_by_client_id(identity.peer_id) is not None
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_initiate_pairing_raises_when_client_not_connected() -> None:
     """The server-level wrapper rejects a presence/pairing request for an absent client."""
     server = _make_server(InMemoryServerPairingStore())
@@ -3376,7 +3500,11 @@ async def test_initiate_pairing_raises_when_client_not_connected() -> None:
         with pytest.raises(ValueError, match="not connected"):
             await server.initiate_pairing(
                 "unknown-client",
-                PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk()),
+                PairingAttempt(
+                    method=PairMethod.PAIRING_PSK,
+                    pairing_psk=generate_psk(),
+                    client_id="unknown-client",
+                ),
             )
 
 
@@ -3825,7 +3953,11 @@ async def test_moving_onto_a_pairing_psk_keeps_the_playback_hold() -> None:
 
             with patch.object(connection_module, "run_pairing_psk_server", _observe_then_run):
                 await conn.initiate_pairing(
-                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=identity.peer_id,
+                    )
                 )
 
             # Mid-attempt: off the Sentinel, but nothing agreed and the old record intact.
@@ -3879,7 +4011,11 @@ async def test_an_aborted_attempt_off_a_long_term_session_admits_no_playback() -
 
             with pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
-                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=identity.peer_id,
+                    )
                 )
             await conn.end_pairing()
 
@@ -3949,7 +4085,11 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
 
             with pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
-                    PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=pairing)
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=identity.peer_id,
+                    )
                 )
             assert conn._noise_psk is not None  # noqa: SLF001
             assert conn._noise_psk.category is PskCategory.PAIRING  # noqa: SLF001
