@@ -264,12 +264,11 @@ def test_player_partial_format_request_preserves_unchanged_fields(
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-def test_format_request_resets_buffer_tracker(mock_server: MagicMock) -> None:
-    """A mid-stream format change resets buffer tracking and binary timing.
+def test_format_request_keeps_buffer_count(mock_server: MagicMock) -> None:
+    """A mid-stream format change keeps the buffer count.
 
-    The client flushes its buffer at the new stream/start, so the writer must
-    not pace the replacement audio against the old-format audio still
-    registered in the buffer tracker.
+    The client keeps its buffered chunks across an in-place stream/start, so
+    they still count toward its buffer capacity.
     """
     client, _conn = _make_player_client(mock_server, "p1")
     client.group.start_stream()
@@ -281,9 +280,11 @@ def test_format_request_resets_buffer_tracker(mock_server: MagicMock) -> None:
 
     clock = mock_server.clock
     now_us = clock.now_us()
-    tracker.register(now_us + 10_000_000, 100_000, 10_000_000)
+    chunk = tracker.register(now_us + 10_000_000, 100_000, 10_000_000)
+    assert chunk is not None
+    tracker.finish_transmission(chunk)
     tracker.prune_consumed(now_us)
-    assert tracker.buffered_duration_us > 0
+    assert tracker.buffered_bytes == 100_000
 
     # Request a genuinely different format (FLAC); an identical-format request
     # must be ignored entirely.
@@ -298,7 +299,8 @@ def test_format_request_resets_buffer_tracker(mock_server: MagicMock) -> None:
         )
     )
 
-    assert tracker.buffered_duration_us == 0
+    assert player_role._pending_stream_start  # noqa: SLF001
+    assert tracker.buffered_bytes == 100_000
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>

@@ -30,6 +30,8 @@ from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
+    from collections.abc import Set as AbstractSet
+
     import av
 
     from aiosendspin.clock import Clock
@@ -1815,10 +1817,10 @@ class PushStream:
         cached_chunks: list[CachedChunk],
         now_us: int,
     ) -> None:
-        """Send cached chunks to a role, skipping chunks that are already late."""
+        """Send cached chunks to a role, skipping chunks whose start is not in the future."""
         skipped_late = 0
         for cached_chunk in cached_chunks:
-            if cached_chunk.timestamp_us + cached_chunk.duration_us <= now_us:
+            if cached_chunk.timestamp_us <= now_us:
                 skipped_late += 1
                 continue
 
@@ -2026,9 +2028,11 @@ class PushStream:
             align_to_channel_tail=False,
         )
 
+        # Late joiners get chunks that start at or after the target only; a chunk
+        # straddling it is skipped rather than sent partly in the past.
         start_index = 0
         for chunk in cached:
-            if chunk.timestamp_us + chunk.duration_us > min_timestamp_us:
+            if chunk.timestamp_us >= min_timestamp_us:
                 break
             start_index += 1
 
@@ -2599,12 +2603,13 @@ class PushStream:
         self._transform_last_input_end_us.clear()
         self._channels_with_committed_audio.clear()
 
-    def clear(self) -> None:
+    def clear(self, *, end_roles: AbstractSet[Role] = frozenset()) -> None:
         """
         Clear all pending audio and reset timing.
 
         This is used for seek operations or track changes where buffered
-        audio is discarded. Sends stream/clear to all roles via hooks.
+        audio is discarded. Sends stream/clear to all roles via hooks, except
+        that roles in ``end_roles`` get stream/end instead.
         """
         # Bump the stream generation so any in-flight commit_audio()
         # coroutine bails out before delivering chunks under the new epoch.
@@ -2648,4 +2653,7 @@ class PushStream:
 
         # Send stream/clear to all roles with audio requirements via hooks
         for _client, role in self._get_audio_roles():
-            role.on_stream_clear()
+            if role in end_roles:
+                role.on_stream_end()
+            else:
+                role.on_stream_clear()

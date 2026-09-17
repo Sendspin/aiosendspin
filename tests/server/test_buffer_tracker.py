@@ -1,4 +1,4 @@
-"""Tests for BufferTracker duration tracking."""
+"""Tests for BufferTracker byte and duration accounting."""
 
 from __future__ import annotations
 
@@ -240,53 +240,129 @@ def test_buffered_horizon_us_tracks_furthest_end_from_now() -> None:
     assert tracker.buffered_horizon_us() == 250_000
 
 
-def test_has_capacity_now_oversize_blocks_while_buffered() -> None:
-    """Oversize chunk must wait for the buffer to drain before being admitted."""
-    clock = _FakeClock(now_us=0)
-    tracker = BufferTracker(
-        clock=clock,
-        client_id="test",
-        capacity_bytes=1000,
-    )
+def _tracker(clock: _FakeClock, capacity_bytes: int = 1000) -> BufferTracker:
+    return BufferTracker(clock=clock, client_id="test", capacity_bytes=capacity_bytes)
 
+
+def _send(tracker: BufferTracker, end_time_us: int, byte_count: int) -> None:
+    chunk = tracker.register(end_time_us=end_time_us, byte_count=byte_count, duration_us=100_000)
+    assert chunk is not None
+    tracker.finish_transmission(chunk)
+
+
+def test_count_starts_empty() -> None:
+    """A new tracker counts nothing and admits a chunk up to the full capacity."""
+    tracker = _tracker(_FakeClock())
+
+    assert tracker.buffered_bytes == 0
+    assert tracker.has_capacity_now(1000) is True
+
+
+def test_chunk_may_not_start_if_it_would_exceed_capacity() -> None:
+    """A chunk fits only while its size plus the current count stays within capacity."""
+    tracker = _tracker(_FakeClock())
+    _send(tracker, end_time_us=100_000, byte_count=600)
+
+    assert tracker.has_capacity_now(400) is True
+    assert tracker.has_capacity_now(401) is False
+    assert tracker.time_until_capacity(401) == 100_000
+
+
+def test_chunk_counts_while_transmission_is_unfinished() -> None:
+    """A chunk past its completion time still counts until its transmission finishes."""
+    clock = _FakeClock()
+    tracker = _tracker(clock)
+    chunk = tracker.register(end_time_us=100_000, byte_count=500, duration_us=100_000)
+    assert chunk is not None
+
+    clock.set_now(200_000)
+    assert tracker.has_capacity_now(600) is False
+    assert tracker.time_until_capacity(600) > 0
+
+    tracker.finish_transmission(chunk)
+    assert tracker.has_capacity_now(600) is True
+    assert tracker.time_until_capacity(600) == 0
+
+
+def test_finishing_a_reset_chunk_leaves_a_newer_transmission_counted() -> None:
+    """A chunk from before a reset cannot end the transmission of a newer chunk."""
+    clock = _FakeClock()
+    tracker = _tracker(clock)
+    stale = tracker.register(end_time_us=100_000, byte_count=100, duration_us=100_000)
+    assert stale is not None
+    tracker.reset()
     tracker.register(end_time_us=100_000, byte_count=500, duration_us=100_000)
 
-    assert tracker.has_capacity_now(1500) is False
+    tracker.finish_transmission(stale)
+    clock.set_now(200_000)
+
+    assert tracker.has_capacity_now(600) is False
 
 
-def test_has_capacity_now_oversize_passes_when_empty() -> None:
-    """Oversize chunk is admitted alone when the buffer is empty."""
-    clock = _FakeClock(now_us=0)
-    tracker = BufferTracker(
-        clock=clock,
-        client_id="test",
-        capacity_bytes=1000,
-    )
+def test_completion_time_subtracts_output_delay() -> None:
+    """A chunk stops counting at its end time minus the output delay."""
+    clock = _FakeClock()
+    tracker = _tracker(clock)
+    tracker.output_delay_us = 200_000
+    _send(tracker, end_time_us=500_000, byte_count=500)
 
-    assert tracker.has_capacity_now(1500) is True
+    clock.set_now(299_999)
+    assert tracker.buffered_horizon_us() == 1
+    assert tracker.time_until_capacity(600) == 1
 
-
-def test_time_until_capacity_oversize_returns_wait_while_buffered() -> None:
-    """Oversize chunk reports the wait until existing buffered audio fully drains."""
-    clock = _FakeClock(now_us=0)
-    tracker = BufferTracker(
-        clock=clock,
-        client_id="test",
-        capacity_bytes=1000,
-    )
-
-    tracker.register(end_time_us=100_000, byte_count=500, duration_us=100_000)
-
-    assert tracker.time_until_capacity(1500) == 100_000
+    clock.set_now(300_000)
+    tracker.prune_consumed()
+    assert tracker.buffered_bytes == 0
 
 
-def test_time_until_capacity_oversize_zero_when_empty() -> None:
-    """Oversize chunk waits no time when the buffer is already empty."""
-    clock = _FakeClock(now_us=0)
-    tracker = BufferTracker(
-        clock=clock,
-        client_id="test",
-        capacity_bytes=1000,
-    )
+def test_output_delay_update_recounts_completed_chunks() -> None:
+    """Lowering the delay counts a chunk again when its new completion time is in the future."""
+    clock = _FakeClock()
+    tracker = _tracker(clock)
+    tracker.output_delay_us = 200_000
+    _send(tracker, end_time_us=400_000, byte_count=300)
+    _send(tracker, end_time_us=500_000, byte_count=400)
 
-    assert tracker.time_until_capacity(1500) == 0
+    clock.set_now(350_000)
+    tracker.prune_consumed()
+    assert tracker.buffered_bytes == 0
+
+    tracker.output_delay_us = 100_000
+    assert tracker.buffered_bytes == 400
+
+    tracker.output_delay_us = 0
+    assert tracker.buffered_bytes == 700
+
+    # An end time in the past cannot come back under any delay.
+    clock.set_now(450_000)
+    tracker.output_delay_us = 200_000
+    tracker.output_delay_us = 0
+    assert tracker.buffered_bytes == 400
+
+
+def test_raising_output_delay_releases_chunks() -> None:
+    """Raising the delay moves completion times earlier."""
+    clock = _FakeClock(now_us=150_000)
+    tracker = _tracker(clock)
+    _send(tracker, end_time_us=200_000, byte_count=500)
+
+    tracker.output_delay_us = 100_000
+
+    assert tracker.buffered_bytes == 0
+
+
+def test_reset_empties_count_and_retained_chunks() -> None:
+    """reset() drops every chunk, including ones a later delay change would count again."""
+    clock = _FakeClock()
+    tracker = _tracker(clock)
+    tracker.output_delay_us = 200_000
+    _send(tracker, end_time_us=300_000, byte_count=500)
+    clock.set_now(150_000)
+    tracker.prune_consumed()
+    tracker.oversize_logged = True
+
+    tracker.reset()
+    tracker.output_delay_us = 0
+
+    assert tracker.buffered_bytes == 0
+    assert tracker.oversize_logged is False

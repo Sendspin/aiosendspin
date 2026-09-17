@@ -611,30 +611,32 @@ def test_player_role_on_audio_chunk_passes_buffer_metadata() -> None:
 
     call_kwargs = client.send_binary.call_args.kwargs
     assert call_kwargs["buffer_end_time_us"] == 1000 + 25000
-    assert call_kwargs["buffer_byte_count"] == 100
+    # The 13-byte audio chunk header counts with the payload.
+    assert call_kwargs["buffer_byte_count"] == 13 + 100
     assert call_kwargs["duration_us"] == 25000
 
 
-def test_player_role_on_audio_chunk_applies_output_delay_to_buffer_end() -> None:
-    """Buffer tracking end time should account for the player's output delay."""
+def test_player_role_output_delay_reaches_the_buffer_tracker() -> None:
+    """The buffer end time stays raw; the tracker applies the latest reported output delay."""
     client = _make_client_stub()
     client.send_binary.return_value = True
-
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16),
+    )
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
+    role.on_connect()
     role._stream_started = True  # noqa: SLF001
-    role.output_delay_ms = 500
+    tracker = role.get_buffer_tracker()
+    assert tracker is not None
 
-    chunk = AudioChunk(
-        data=b"audio",
-        timestamp_us=1_000_000,
-        duration_us=25_000,
-        byte_count=100,
+    role.on_client_state(ClientStatePayload(player=PlayerStatePayload(output_delay_ms=500)))
+    role.on_audio_chunk(
+        AudioChunk(data=b"audio", timestamp_us=1_000_000, duration_us=25_000, byte_count=100)
     )
-    role.on_audio_chunk(chunk)
 
-    call_kwargs = client.send_binary.call_args.kwargs
-    assert call_kwargs["buffer_end_time_us"] == 525_000
+    assert client.send_binary.call_args.kwargs["buffer_end_time_us"] == 1_025_000
+    assert tracker.output_delay_us == 500_000
 
 
 def test_player_role_on_audio_chunk_ignores_send_return_value() -> None:
@@ -1097,6 +1099,22 @@ def test_on_client_state_updates_min_buffer() -> None:
     event = client._signal_event.call_args[0][0]  # noqa: SLF001
     assert isinstance(event, MinBufferChangedEvent)
     assert event.min_buffer_ms == 1500
+
+
+def test_timing_fields_above_server_maximum_are_clamped() -> None:
+    """Timing values above 30 s are stored as reported but honoured at 30 s."""
+    client = _make_client_stub()
+    role = PlayerV1Role(client=client)
+    role.on_client_state(
+        ClientStatePayload(
+            player=PlayerStatePayload(required_lead_time_ms=45_000, min_buffer_ms=60_000)
+        )
+    )
+    assert role.required_lead_time_ms == 45_000
+    assert role.min_buffer_ms == 60_000
+    assert role.get_required_lead_time_us() == 30_000_000
+    assert role.get_min_buffer_us() == 30_000_000
+    client.flag_noncompliance.assert_not_called()
 
 
 def test_partial_client_state_does_not_reset_timing_fields() -> None:

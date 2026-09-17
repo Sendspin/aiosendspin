@@ -82,10 +82,19 @@ def test_player_state_timing_serializes() -> None:
     assert data["min_buffer_ms"] == 1200
 
 
-def test_player_state_required_lead_time_out_of_range() -> None:
-    """required_lead_time_ms above 30000 is rejected."""
+def test_player_state_timing_has_no_upper_bound() -> None:
+    """Timing fields above 30000 parse; the spec only requires them to be non-negative."""
+    payload = PlayerStatePayload.from_json(
+        '{"required_lead_time_ms": 30001, "min_buffer_ms": 120000}'
+    )
+    assert payload.required_lead_time_ms == 30001
+    assert payload.min_buffer_ms == 120000
+
+
+def test_player_state_required_lead_time_negative_invalid() -> None:
+    """Negative required_lead_time_ms is rejected."""
     with pytest.raises(ValueError, match="required_lead_time_ms"):
-        PlayerStatePayload(required_lead_time_ms=30001)
+        PlayerStatePayload(required_lead_time_ms=-1)
 
 
 def test_player_state_min_buffer_negative_invalid() -> None:

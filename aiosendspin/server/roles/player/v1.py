@@ -28,6 +28,7 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.player import (
+    PLAYER_AUDIO_HEADER_SIZE,
     PlayerCommandPayload,
     PlayerStatePayload,
     StreamStartPlayer,
@@ -61,6 +62,8 @@ if TYPE_CHECKING:
 
 
 BUFFER_TRACKER_RESET_DELAY_S = 2.0
+# Largest required_lead_time_ms / min_buffer_ms the server honours; larger values are clamped.
+MAX_TIMING_PARAMETER_MS = 30_000
 
 
 @dataclass
@@ -351,6 +354,10 @@ class PlayerV1Role(Role):
         """Send binary audio; the connection adds the header. Late audio is discarded there."""
         # Send deferred stream/start on first chunk (ensures encoder header is available)
         if self._pending_stream_start:
+            if not self._client.available:
+                # No stream/start, and so no audio, until the latest client/state
+                # reports the client available.
+                return
             self._send_stream_start_message()
             self._pending_stream_start = False
 
@@ -363,19 +370,14 @@ class PlayerV1Role(Role):
                 )
             return
 
-        message_type = BinaryMessageType.AUDIO_CHUNK.value
-        # Compute the wall-clock buffer horizon (effective play time) by shifting
-        # the chunk's end time earlier by the configured output delay.
-        output_delay_us = self.output_delay_ms * 1_000
-        chunk_end_us = chunk.timestamp_us + chunk.duration_us - output_delay_us
-
         self._client.send_binary(
             chunk.data,
             role_family=self.role_family,
             timestamp_us=chunk.timestamp_us,
-            message_type=message_type,
-            buffer_end_time_us=chunk_end_us,
-            buffer_byte_count=chunk.byte_count,
+            message_type=BinaryMessageType.AUDIO_CHUNK.value,
+            buffer_end_time_us=chunk.timestamp_us + chunk.duration_us,
+            # The buffer accounting counts the audio chunk header with the payload.
+            buffer_byte_count=PLAYER_AUDIO_HEADER_SIZE + chunk.byte_count,
             duration_us=chunk.duration_us,
             player_audio_header=True,
         )
@@ -494,12 +496,12 @@ class PlayerV1Role(Role):
         return max(self.output_delay_ms, 0) * 1_000
 
     def get_required_lead_time_us(self) -> int:
-        """Return reported startup lead time in microseconds."""
-        return max(self.required_lead_time_ms, 0) * 1_000
+        """Return reported startup lead time in microseconds, clamped to the server maximum."""
+        return min(max(self.required_lead_time_ms, 0), MAX_TIMING_PARAMETER_MS) * 1_000
 
     def get_min_buffer_us(self) -> int:
-        """Return reported minimum ongoing buffer duration in microseconds."""
-        return max(self.min_buffer_ms, 0) * 1_000
+        """Return reported minimum buffer in microseconds, clamped to the server maximum."""
+        return min(max(self.min_buffer_ms, 0), MAX_TIMING_PARAMETER_MS) * 1_000
 
     def get_output_delay_ms(self) -> int:
         """Return output delay for protocol API."""
@@ -730,28 +732,13 @@ class PlayerV1Role(Role):
         if changed or group_values != (self.get_player_volume(), self.get_player_muted()):
             self.emit_client_event(VolumeChangedEvent(volume=self.volume, muted=self.muted))
 
-        if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
-            self.output_delay_ms = state.output_delay_ms
-            self.emit_client_event(OutputDelayChangedEvent(output_delay_ms=state.output_delay_ms))
-
-        if (
-            state.required_lead_time_ms is not None
-            and self.required_lead_time_ms != state.required_lead_time_ms
-        ):
-            self.required_lead_time_ms = state.required_lead_time_ms
-            self.emit_client_event(
-                RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
-            )
-
-        if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
-            self.min_buffer_ms = state.min_buffer_ms
-            self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
-
+        self._apply_state_timing(state)
         self._apply_state_format(state)
 
     def on_initial_client_state(self, payload: ClientStatePayload) -> None:
-        """Apply the preferred format so the stream join announces it from the start."""
+        """Apply the timing and preferred format the stream join schedules and announces with."""
         if payload.player is not None:
+            self._apply_state_timing(payload.player)
             self._apply_state_format(payload.player)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
@@ -844,12 +831,9 @@ class PlayerV1Role(Role):
         chunk so it can carry the new codec header.
         """
         self._client.drop_pending_binary([self.role_family])
-        # Everything the buffer tracker and binary timing know about was just
-        # invalidated with the old format; without resetting them the writer
-        # paces the replacement audio against a buffer the client flushed.
+        # The binary timing belongs to the old format. An in-place stream/start does not
+        # reset the buffer accounting, so the tracker keeps counting chunks already sent.
         self.reset_binary_timing()
-        if self._buffer_tracker is not None:
-            self._buffer_tracker.reset()
         self._pending_stream_start = True
         # The client flushes its invalidated buffer only on a stream/start, so a
         # flip-flop back to the announced format must not suppress one.
@@ -864,6 +848,29 @@ class PlayerV1Role(Role):
         return support is not None and any(
             audio_format.matches(fmt) for fmt in support.supported_formats
         )
+
+    def _apply_state_timing(self, state: PlayerStatePayload) -> None:
+        """Store the timing fields of a client/state player object, emitting their changes."""
+        if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
+            self.output_delay_ms = state.output_delay_ms
+            if self._buffer_tracker is not None:
+                self._buffer_tracker.output_delay_us = self.get_output_delay_us()
+            self.emit_client_event(OutputDelayChangedEvent(output_delay_ms=state.output_delay_ms))
+
+        if (
+            state.required_lead_time_ms is not None
+            and self.required_lead_time_ms != state.required_lead_time_ms
+        ):
+            self.required_lead_time_ms = state.required_lead_time_ms
+            self._log_if_clamped("required_lead_time_ms", state.required_lead_time_ms)
+            self.emit_client_event(
+                RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
+            )
+
+        if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
+            self.min_buffer_ms = state.min_buffer_ms
+            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms)
+            self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
     def _apply_state_format(self, state: PlayerStatePayload) -> None:
         """Store the `format` of a client/state player object as the client's preference."""
@@ -905,6 +912,12 @@ class PlayerV1Role(Role):
         ):
             self._begin_format_transition()
 
+    def _log_if_clamped(self, name: str, value: int) -> None:
+        if value > MAX_TIMING_PARAMETER_MS:
+            self._client._logger.debug(  # noqa: SLF001
+                "Clamping %s=%s to %s ms", name, value, MAX_TIMING_PARAMETER_MS
+            )
+
     def _legacy_hello_commands(self) -> list[PlayerCommand] | None:
         """Return the commands a pre-#177 hello declared, or None when it declared none."""
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
@@ -938,6 +951,7 @@ class PlayerV1Role(Role):
         else:
             state.buffer_tracker.capacity_bytes = capacity
             state.buffer_tracker.max_duration_us = max_duration_us
+        state.buffer_tracker.output_delay_us = self.get_output_delay_us()
         self._buffer_tracker = state.buffer_tracker
 
     def _ensure_preferred_format(self) -> None:

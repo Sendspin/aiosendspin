@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
 
+from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.models.types import PlaybackStateType
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.clock import LoopClock
@@ -16,6 +20,10 @@ from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream, StreamStoppedError
 from aiosendspin.server.roles.metadata import Metadata
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
+from tests.server.test_group_add_client import _DummyConnection, _DummyServer, _make_player
+
+if TYPE_CHECKING:
+    from aiosendspin.server.client import SendspinClient
 
 
 class TestGroupStartStream:
@@ -177,47 +185,6 @@ class TestGroupStartStream:
 
         assert stream1 is not stream2
 
-    def test_start_stream_ends_previous_stream_for_noncompliant_clients(
-        self,
-        mock_server: MagicMock,
-        mock_client: MagicMock,
-    ) -> None:
-        """Compatibility mode should end the previous active stream."""
-        group = SendspinGroup(mock_server, mock_client)
-        stream1 = group.start_stream()
-
-        assert not stream1.is_stopped
-
-        with (
-            patch.object(stream1, "clear", wraps=stream1.clear) as clear,
-            patch.object(stream1, "stop", wraps=stream1.stop) as stop,
-        ):
-            stream2 = group.start_stream()
-
-        assert stream2 is not stream1
-        assert stream1.is_stopped
-        clear.assert_not_called()
-        stop.assert_called_once_with()
-
-    def test_start_stream_keeps_protocol_stream_in_strict_mode(
-        self,
-        mock_server: MagicMock,
-        mock_client: MagicMock,
-    ) -> None:
-        """Strict mode should clear buffered audio without ending the protocol stream."""
-        mock_server.allow_noncompliant_clients = False
-        group = SendspinGroup(mock_server, mock_client)
-        stream1 = group.start_stream()
-
-        with (
-            patch.object(stream1, "clear", wraps=stream1.clear) as clear,
-            patch.object(stream1, "stop", wraps=stream1.stop) as stop,
-        ):
-            group.start_stream()
-
-        clear.assert_called_once_with()
-        stop.assert_called_once_with(keep_stream=True)
-
     @pytest.mark.asyncio
     async def test_replaced_stream_cannot_commit_audio(
         self,
@@ -301,6 +268,66 @@ class TestGroupStartStream:
 
         assert group.state == PlaybackStateType.PLAYING
         assert state_events == [PlaybackStateType.PLAYING]
+
+
+class _ReplacementConnection(_DummyConnection):
+    def __init__(self, *, legacy: bool) -> None:
+        super().__init__()
+        self.uses_pre_spec_177_wire = legacy
+
+
+def _replacement_player(
+    server: _DummyServer, client_id: str, *, legacy: bool
+) -> tuple[SendspinClient, _ReplacementConnection]:
+    client = _make_player(server, client_id)
+    connection = _ReplacementConnection(legacy=legacy)
+    client._connection = connection  # type: ignore[assignment]  # noqa: SLF001
+    return client, connection
+
+
+def _lifecycle_types(connection: _DummyConnection) -> list[type]:
+    return [
+        type(message)
+        for _, message in connection.role_messages
+        if isinstance(message, StreamStartMessage | StreamClearMessage | StreamEndMessage)
+    ]
+
+
+async def _start_and_replace(*clients: SendspinClient) -> None:
+    group = clients[0].group
+    for client in clients[1:]:
+        await group.add_client(client)
+    stream = group.start_stream()
+    stream.prepare_audio(bytes(4800 * 4), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    group.start_stream().stop(keep_stream=True)
+
+
+@pytest.mark.asyncio
+async def test_start_stream_replacement_clears_and_keeps_the_stream() -> None:
+    """Replacing an active stream sends stream/clear and never stream/end."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    player, connection = _replacement_player(server, "player", legacy=False)
+
+    await _start_and_replace(player)
+
+    assert _lifecycle_types(connection) == [StreamStartMessage, StreamClearMessage]
+
+
+# DEPRECATED(spec-pr-218): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_start_stream_replacement_ends_the_stream_only_for_legacy_clients() -> None:
+    """A pre-#177 client gets stream/end on replacement; a current one in the group does not."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    current, current_connection = _replacement_player(server, "current", legacy=False)
+    legacy, legacy_connection = _replacement_player(server, "legacy", legacy=True)
+
+    await _start_and_replace(current, legacy)
+
+    assert _lifecycle_types(current_connection) == [StreamStartMessage, StreamClearMessage]
+    assert _lifecycle_types(legacy_connection) == [StreamStartMessage, StreamEndMessage]
 
 
 class TestRoleJoinWithActiveStream:

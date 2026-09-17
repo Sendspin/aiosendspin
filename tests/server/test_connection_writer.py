@@ -137,15 +137,20 @@ async def test_send_binary_accepts_buffer_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_writer_registers_buffer_after_send() -> None:
-    """Writer should call role's buffer_tracker.register() after successful send_bytes."""
+async def test_writer_counts_buffer_while_transmitting() -> None:
+    """Writer registers the chunk before send_bytes and finishes it once the send returns."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
 
     wsock = MagicMock()
     wsock.closed = False
     wsock.send_str = AsyncMock()
-    wsock.send_bytes = AsyncMock()
+    calls: list[str] = []
+
+    async def send_bytes(_data: bytes) -> None:
+        calls.append("send_bytes")
+
+    wsock.send_bytes = AsyncMock(side_effect=send_bytes)
 
     conn = SendspinConnection(server, wsock_client=wsock)
     conn._transport = wsock  # noqa: SLF001
@@ -157,7 +162,21 @@ async def test_writer_registers_buffer_after_send() -> None:
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_buffer_tracker.time_until_ready.return_value = 0
+    chunk = object()
+
+    def register(*_args: object) -> object:
+        calls.append("register")
+        return chunk
+
+    def finish_transmission(finished: object) -> None:
+        assert finished is chunk
+        calls.append("finish")
+
+    mock_buffer_tracker.register.side_effect = register
+    mock_buffer_tracker.finish_transmission.side_effect = finish_transmission
+    mock_buffer_tracker.capacity_bytes = 100_000
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
+    mock_role.get_output_delay_us.return_value = 0
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
@@ -193,6 +212,7 @@ async def test_writer_registers_buffer_after_send() -> None:
     assert wsock.send_bytes.call_count == 1
     mock_buffer_tracker.time_until_ready.assert_called()
     mock_buffer_tracker.register.assert_called_once_with(1_000_000, 100, 50_000)
+    assert calls == ["register", "send_bytes", "finish"]
 
     await conn.disconnect(retry_connection=False)
 
@@ -218,7 +238,9 @@ async def test_writer_does_not_register_without_metadata() -> None:
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_duration_capacity.return_value = 0
     mock_buffer_tracker.time_until_ready.return_value = 0
+    mock_buffer_tracker.capacity_bytes = 100_000
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
+    mock_role.get_output_delay_us.return_value = 0
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
@@ -266,7 +288,9 @@ async def test_writer_blocks_on_buffer_tracker_capacity() -> None:
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_ready.return_value = 1_000_000
+    mock_buffer_tracker.capacity_bytes = 100_000
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
+    mock_role.get_output_delay_us.return_value = 0
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
@@ -328,7 +352,9 @@ async def test_drop_pending_binary_unblocks_backpressured_role() -> None:
     mock_role = MagicMock()
     mock_buffer_tracker = MagicMock()
     mock_buffer_tracker.time_until_ready.return_value = 1_000_000
+    mock_buffer_tracker.capacity_bytes = 100_000
     mock_role.get_buffer_tracker.return_value = mock_buffer_tracker
+    mock_role.get_output_delay_us.return_value = 0
     mock_role._stream_start_time_us = None  # noqa: SLF001
     mock_role._last_late_log_s = 0.0  # noqa: SLF001
     mock_role._late_skips_since_log = 0  # noqa: SLF001
@@ -379,6 +405,114 @@ async def test_drop_pending_binary_unblocks_backpressured_role() -> None:
     assert "player" not in conn._blocked_until_us  # noqa: SLF001
 
     await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "message_type"),
+    [
+        ("player", BinaryMessageType.AUDIO_CHUNK.value),
+        ("visualizer", BinaryMessageType.VISUALIZATION_LOUDNESS.value),
+    ],
+)
+async def test_writer_drops_chunk_larger_than_buffer_capacity(
+    role: str, message_type: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A chunk that can never fit is dropped, warned about once per stream, and not sent."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock()
+    wsock.send_bytes = AsyncMock()
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+
+    tracker = BufferTracker(clock=server.clock, client_id="c", capacity_bytes=100)
+    mock_role = MagicMock()
+    mock_role.get_buffer_tracker.return_value = tracker
+    mock_role.get_output_delay_us.return_value = 0
+    mock_client = MagicMock()
+    binary_handling = BinaryHandling(drop_late=False, buffer_track=True)
+    mock_client.get_binary_handling_cached.return_value = (binary_handling, mock_role)
+    mock_client.awaits_role_state.return_value = False
+    conn._client = mock_client  # noqa: SLF001
+
+    end_time_us = server.clock.now_us() + 10_000_000
+
+    def send(payload: bytes) -> None:
+        conn.send_binary(
+            pack_binary_header_raw(message_type, 0) + payload,
+            role=role,
+            timestamp_us=0,
+            message_type=message_type,
+            buffer_end_time_us=end_time_us,
+            buffer_byte_count=len(payload),
+        )
+
+    async def settle() -> None:
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    def oversize_warnings() -> int:
+        return sum("larger than the client's buffer capacity" in r.message for r in caplog.records)
+
+    with caplog.at_level(logging.WARNING):
+        send(b"x" * 101)
+        send(b"x" * 101)
+        send(b"y" * 100)
+        await settle()
+
+        # The oversized chunks are gone; the one that exactly fills the buffer is sent.
+        assert [call.args[0][-1:] for call in wsock.send_bytes.call_args_list] == [b"y"]
+        assert tracker.buffered_bytes == 100
+        assert oversize_warnings() == 1
+
+        tracker.reset()
+        send(b"x" * 101)
+        await settle()
+
+    assert wsock.send_bytes.call_count == 1
+    assert oversize_warnings() == 2
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_warns_when_output_delay_makes_chunk_late(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A chunk whose end is still ahead but earlier than the output delay is late at enqueue."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    conn = SendspinConnection(server, wsock_client=MagicMock())
+    mock_role = MagicMock()
+    mock_role.get_output_delay_us.return_value = 500_000
+    mock_client = MagicMock()
+    mock_client.get_binary_handling_cached.return_value = (
+        BinaryHandling(drop_late=True),
+        mock_role,
+    )
+    mock_client.awaits_role_state.return_value = False
+    conn._client = mock_client  # noqa: SLF001
+    now_us = server.clock.now_us()
+
+    with caplog.at_level(logging.WARNING):
+        conn.send_binary(
+            b"audio",
+            role="player",
+            timestamp_us=now_us + 200_000,
+            message_type=BinaryMessageType.AUDIO_CHUNK.value,
+            buffer_end_time_us=now_us + 300_000,
+            buffer_byte_count=5,
+            duration_us=100_000,
+        )
+
+    assert any("Enqueued already-late binary" in r.message for r in caplog.records)
 
 
 def test_check_late_binary_uses_player_effective_timestamp() -> None:

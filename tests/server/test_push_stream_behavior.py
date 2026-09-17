@@ -1919,8 +1919,8 @@ async def test_late_join_uses_cached_chunks_across_role_recreation(mock_loop: An
 
 
 @pytest.mark.asyncio
-async def test_send_cached_chunks_keeps_chunk_overlapping_now(mock_loop: Any) -> None:
-    """Cached replay should keep/send chunks that overlap now, not only future chunks."""
+async def test_send_cached_chunks_skips_chunk_starting_in_the_past(mock_loop: Any) -> None:
+    """Cached replay sends only chunks whose start timestamp is still in the future."""
     group = _DummyGroup(clients=[])
     role = _DummyRole(
         AudioRequirements(
@@ -1952,8 +1952,7 @@ async def test_send_cached_chunks_keeps_chunk_overlapping_now(mock_loop: Any) ->
     stream._send_cached_chunks_to_role(  # noqa: SLF001
         role, [overlapping, future], now_us
     )
-    assert len(role.received) == 2
-    assert role.received[0].timestamp_us == overlapping.timestamp_us
+    assert [chunk.timestamp_us for chunk in role.received] == [future.timestamp_us]
 
 
 @pytest.mark.asyncio

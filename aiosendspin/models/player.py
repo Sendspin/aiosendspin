@@ -182,7 +182,7 @@ class PlayerStatePayload(SendspinModel):
     """Output delay in milliseconds (0-5000). Required on the initial state message;
     omitted in incremental updates means unchanged."""
     required_lead_time_ms: int | None = None
-    """Minimum startup lead time in milliseconds (0-30000). Required on the initial state
+    """Minimum startup lead time in milliseconds (non-negative). Required on the initial state
     message; omitted in incremental updates means unchanged.
 
     Measured from the server transmit time of the start/restart trigger (stream/start
@@ -190,7 +190,7 @@ class PlayerStatePayload(SendspinModel):
     init, decode warmup, audio backend buffering, and DAC latency. Excludes output_delay_ms.
     """
     min_buffer_ms: int | None = None
-    """Requested minimum ongoing buffer duration in milliseconds (0-30000). Required on
+    """Requested minimum ongoing buffer duration in milliseconds (non-negative). Required on
     the initial state message; omitted in incremental updates means unchanged.
 
     Maintained during playback (primarily for live streams) to absorb network jitter and
@@ -225,12 +225,12 @@ class PlayerStatePayload(SendspinModel):
             raise ValueError(f"Volume must be in range 0-100, got {self.volume}")
         if self.output_delay_ms is not None and not 0 <= self.output_delay_ms <= 5000:
             raise ValueError(f"output_delay_ms must be in range 0-5000, got {self.output_delay_ms}")
-        if self.required_lead_time_ms is not None and not 0 <= self.required_lead_time_ms <= 30000:
+        if self.required_lead_time_ms is not None and self.required_lead_time_ms < 0:
             raise ValueError(
-                f"required_lead_time_ms must be in range 0-30000, got {self.required_lead_time_ms}"
+                f"required_lead_time_ms must be non-negative, got {self.required_lead_time_ms}"
             )
-        if self.min_buffer_ms is not None and not 0 <= self.min_buffer_ms <= 30000:
-            raise ValueError(f"min_buffer_ms must be in range 0-30000, got {self.min_buffer_ms}")
+        if self.min_buffer_ms is not None and self.min_buffer_ms < 0:
+            raise ValueError(f"min_buffer_ms must be non-negative, got {self.min_buffer_ms}")
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
