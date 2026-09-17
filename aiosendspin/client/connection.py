@@ -1763,7 +1763,7 @@ class SendspinConnection:
 
     def _handle_visualization_frame(self, message_type: BinaryMessageType, payload: bytes) -> None:
         """Parse a single-type visualization binary and notify callbacks."""
-        if self._current_visualizer_config is None:
+        if self._current_visualizer_config is None or not self._reported_available:
             return
         try:
             frame = self._parse_visualization_frame(
@@ -1820,7 +1820,7 @@ class SendspinConnection:
 
     def _handle_visualization_beat(self, payload: bytes) -> None:
         """Dispatch a `beat` binary (`[ts:8][flags:1]`) as a timestamp + is_downbeat frame."""
-        if len(payload) != 9:
+        if len(payload) != 9 or not self._reported_available:
             return
         try:
             (ts,) = struct.unpack_from(">q", payload, 0)

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -292,6 +293,30 @@ async def test_frames_are_delivered_before_time_sync() -> None:
     connection._handle_visualization_beat(_beat_body(0))  # noqa: SLF001
 
     assert [frame.timestamp_us for frame in received] == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_client_discards_frames_and_beats() -> None:
+    """While unavailable, frames and beats are discarded without closing the connection."""
+    connection, received = _connection_with_visualizer_callback(synced=True)
+    connection.disconnect = AsyncMock()  # type: ignore[method-assign]
+    connection._reported_available = False  # noqa: SLF001
+
+    connection._handle_visualization_frame(  # noqa: SLF001
+        BinaryMessageType.VISUALIZATION_LOUDNESS, _loudness_body(_NOW_US + 1)
+    )
+    connection._handle_visualization_beat(_beat_body(_NOW_US + 1))  # noqa: SLF001
+    assert received == []
+
+    connection._reported_available = True  # noqa: SLF001
+    connection._handle_visualization_frame(  # noqa: SLF001
+        BinaryMessageType.VISUALIZATION_LOUDNESS, _loudness_body(_NOW_US + 2)
+    )
+    connection._handle_visualization_beat(_beat_body(_NOW_US + 2))  # noqa: SLF001
+
+    assert [frame.timestamp_us for frame in received] == [_NOW_US + 2, _NOW_US + 2]
+    await asyncio.sleep(0)
+    connection.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
