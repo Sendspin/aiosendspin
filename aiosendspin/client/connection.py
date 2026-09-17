@@ -1574,11 +1574,9 @@ class SendspinConnection:
         was_source_active = self._is_role_active("source")
         was_artwork_active = self._is_role_active("artwork")
         was_visualizer_active = self._is_role_active("visualizer")
-        previous_roles = self._active_roles
         if (reason := await self._apply_activation(payload)) is not None:
             await self.goodbye_and_disconnect(reason)
             return
-        self._discard_removed_role_state(previous_roles)
         if self.is_pairing:
             self._start_pairing_attempt()
         self._resume_time_sync()
@@ -1725,7 +1723,7 @@ class SendspinConnection:
         self._client.notify_group_callback(payload)
 
     def _discard_removed_role_state(self, active_roles: list[str]) -> None:
-        """Discard the server/state object of every active role missing from `active_roles`."""
+        """Discard current and scheduled server/state of every role missing from `active_roles`."""
         state = self._server_state
         removed = {role_family(role_id) for role_id in set(self._active_roles) - set(active_roles)}
         if state is None or not removed:
@@ -1735,10 +1733,14 @@ class SendspinConnection:
             "controller": self._client.notify_controller_callback,
             "color": self._client.notify_color_callback,
         }
+        scheduled = [family for family in removed if family in self._pending_state]
+        for family in scheduled:
+            self._discard_pending_state(family)
         discarded = [
             family
             for family in notifiers
-            if family in removed and not isinstance(getattr(state, family), UndefinedField)
+            if family in removed
+            and (family in scheduled or not isinstance(getattr(state, family), UndefinedField))
         ]
         self._server_state = replace(
             state,
@@ -1757,7 +1759,7 @@ class SendspinConnection:
             if isinstance(state, UndefinedField):
                 continue
             self._discard_pending_state(name)
-            if state is None or self._local_delay_us(state.timestamp) <= 0:
+            if self._local_delay_us(state.timestamp) <= 0:
                 continue
             self._pending_state[name] = _PendingState(
                 payload=payload,
@@ -1796,20 +1798,6 @@ class SendspinConnection:
         """Discard the scheduled update of role object `name`, if any."""
         if (pending := self._pending_state.pop(name, None)) is not None:
             pending.apply_handle.cancel()
-
-    def _discard_removed_role_state(self, previous_roles: list[str]) -> None:
-        """Discard current and scheduled state of role objects whose role was removed."""
-        for role_id in previous_roles:
-            name = role_family(role_id)
-            if name not in _SCHEDULABLE_ROLE_OBJECTS or role_id in self._active_roles:
-                continue
-            had_pending = name in self._pending_state
-            self._discard_pending_state(name)
-            current = None if self._server_state is None else getattr(self._server_state, name)
-            if had_pending or not isinstance(current, UndefinedField | None):
-                null_object: dict[str, Any] = {name: None}
-                cleared = ServerStatePayload(**null_object)
-                self._apply_server_state(cleared, cleared)
 
     def _local_delay_us(self, server_timestamp_us: int) -> int:
         """Return how long until `server_timestamp_us` on the local clock, 0 when unsynced."""

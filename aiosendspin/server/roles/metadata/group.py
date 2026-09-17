@@ -4,13 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from aiosendspin.models.core import (
-    LegacyServerStateClearMessage,
-    ServerStateMessage,
-    ServerStatePayload,
-)
+from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.metadata import SessionUpdateMetadata
-from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.state import Metadata
 from aiosendspin.server.roles.scheduled_state import ScheduledStateGroupRole
@@ -30,32 +25,6 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
     def metadata(self) -> Metadata | None:
         """Return current metadata."""
         return self._state.current(self._now_us())
-
-    def on_member_join(self, role: Role) -> None:
-        """Send current metadata to newly joined member."""
-        self._send_state_to_role(role)
-
-    def _send_state_to_role(self, role: Role) -> None:
-        """
-        Send the complete current metadata state to a single role.
-
-        Without metadata the state is a timestamp-only object.
-        """
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-        if self._current_metadata is None:
-            self._send_metadata(role, SessionUpdateMetadata(timestamp=timestamp), cleared=True)
-            return
-
-        current = replace(self._current_metadata, track_progress=self.track_progress)
-        self._send_metadata(role, current.snapshot_update(timestamp), cleared=False)
-
-    def _send_metadata(self, role: Role, update: SessionUpdateMetadata, *, cleared: bool) -> None:
-        """Send a metadata object to a role; `cleared` marks the object for no metadata."""
-        # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
-        if cleared and role.clears_state_with_null():
-            role.send_message(LegacyServerStateClearMessage(self.role_family))
-            return
-        role.send_message(ServerStateMessage(ServerStatePayload(metadata=update)))
 
     @property
     def track_progress(self) -> int | None:
@@ -205,25 +174,15 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
             else:
                 timestamp = metadata.timestamp_us
 
-        if metadata is None and self._current_metadata is None:
-            return
-        if not force and metadata is not None and metadata.equals(self._current_metadata):
-            return
-
-        last_metadata = self._current_metadata
-        metadata_update = (
-            SessionUpdateMetadata(timestamp=timestamp)
-            if metadata is None
-            else metadata.snapshot_update(timestamp)
-        )
-
-        self._current_metadata = metadata
-
-        if metadata is not None and metadata.track_progress is not None:
-            self._track_progress_timestamp_us = timestamp
-
-        for role in self._members:
-            self._send_metadata(role, metadata_update, cleared=metadata is None)
+        if metadata is not None and timestamp > now_us:
+            self._schedule(metadata, timestamp)
+        else:
+            if self._state.pending_timestamp_us is None and not force:
+                if metadata is None and last_metadata is None:
+                    return
+                if metadata is not None and metadata.equals(last_metadata):
+                    return
+            self._apply(metadata, timestamp)
 
         if metadata is None:
             self.emit_group_event(
@@ -239,7 +198,11 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         )
 
     def _state_message(self, state: Metadata | None, timestamp_us: int) -> ServerStateMessage:
-        metadata_update = None if state is None else state.snapshot_update(timestamp_us)
+        metadata_update = (
+            SessionUpdateMetadata(timestamp=timestamp_us)
+            if state is None
+            else state.snapshot_update(timestamp_us)
+        )
         return ServerStateMessage(ServerStatePayload(metadata=metadata_update))
 
     def _current_state(self, now_us: int) -> Metadata | None:

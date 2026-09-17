@@ -217,10 +217,9 @@ def _schedules_over_current(
     ):
         if (
             not isinstance(old, UndefinedField)
-            and new is not None
             and not isinstance(new, UndefinedField)
             and new.timestamp > now_us
-            and (old is None or old.timestamp <= now_us)
+            and old.timestamp <= now_us
         ):
             return True
     return False

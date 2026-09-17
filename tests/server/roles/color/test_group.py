@@ -211,7 +211,7 @@ def test_scheduled_color_is_sent_and_takes_effect_later() -> None:
     """A future palette is sent with its timestamp and becomes current once due."""
     group, clock = _make_scheduling_group()
     cgr = ColorGroupRole(group)
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr._members = [member]  # noqa: SLF001
     cgr.set_color(Color(primary=(1, 2, 3)))
 
@@ -234,7 +234,7 @@ def test_late_join_gets_current_then_scheduled_color() -> None:
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)
     clock.advance_us(100_000)
 
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr.on_member_join(member)
 
     assert _sent_colors(member) == [
@@ -250,7 +250,7 @@ def test_late_join_after_scheduled_color_took_effect() -> None:
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)
     clock.advance_us(600_000)
 
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr.on_member_join(member)
 
     assert _sent_colors(member) == [{"timestamp": 1_600_000, "primary": [4, 5, 6]}]
@@ -260,7 +260,7 @@ def test_unchanged_present_color_cancels_scheduled_one() -> None:
     """Re-setting the current palette now is sent, since it cancels the scheduled one."""
     group, _clock = _make_scheduling_group()
     cgr = ColorGroupRole(group)
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr._members = [member]  # noqa: SLF001
     cgr.set_color(Color(primary=(1, 2, 3)))
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)
@@ -275,7 +275,7 @@ def test_cancel_scheduled_color_resends_current() -> None:
     """cancel_scheduled() re-sends the current palette now; without a schedule it does nothing."""
     group, _clock = _make_scheduling_group()
     cgr = ColorGroupRole(group)
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr._members = [member]  # noqa: SLF001
     cgr.set_color(Color(primary=(1, 2, 3)))
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)
@@ -313,7 +313,7 @@ def test_color_beyond_lead_limit_is_sent_20s_ahead() -> None:
     """A palette more than 20 s ahead is sent, also to joining members, only 20 s ahead."""
     group, clock = _make_scheduling_group()
     cgr = ColorGroupRole(group)
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr._members = [member]  # noqa: SLF001
 
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=26_000_000)
@@ -321,9 +321,9 @@ def test_color_beyond_lead_limit_is_sent_20s_ahead() -> None:
     member.send_message.assert_not_called()
     (delay_s, send), _kwargs = group._server.loop.call_later.call_args  # noqa: SLF001
     assert delay_s == 5.0
-    joiner = MagicMock()
+    joiner = _member(legacy=False)
     cgr.on_member_join(joiner)
-    assert _sent_colors(joiner) == [None]
+    assert _sent_colors(joiner) == [{"timestamp": 1_000_000}]
 
     clock.advance_us(5_000_000)
     send()
@@ -334,7 +334,7 @@ def test_cancel_before_deferred_send_sends_nothing() -> None:
     """Cancelling a palette not yet sent stops its send and sends nothing else."""
     group, _clock = _make_scheduling_group()
     cgr = ColorGroupRole(group)
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr._members = [member]  # noqa: SLF001
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=26_000_000)
 
@@ -349,10 +349,28 @@ def test_sent_color_replaced_by_deferred_one_is_cancelled() -> None:
     """Replacing a sent palette with one sent only later restates the current palette now."""
     group, _clock = _make_scheduling_group()
     cgr = ColorGroupRole(group)
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr._members = [member]  # noqa: SLF001
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)
 
     cgr.set_color(Color(primary=(7, 8, 9)), timestamp_us=26_000_000)
 
-    assert _sent_colors(member) == [{"timestamp": 1_500_000, "primary": [4, 5, 6]}, None]
+    assert _sent_colors(member) == [
+        {"timestamp": 1_500_000, "primary": [4, 5, 6]},
+        {"timestamp": 1_000_000},
+    ]
+
+
+def test_legacy_member_gets_scheduled_color_as_object_and_clear_as_null() -> None:
+    """A null-clearing client gets a scheduled palette in full and a clear as null."""
+    group, _clock = _make_scheduling_group()
+    cgr = ColorGroupRole(group)
+    member = _member(legacy=True)
+    cgr._members = [member]  # noqa: SLF001
+
+    cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)
+    cgr.clear()
+
+    first, second = (call.args[0] for call in member.send_message.call_args_list)
+    assert first.to_dict()["payload"] == {"color": {"timestamp": 1_500_000, "primary": [4, 5, 6]}}
+    assert second.to_dict() == {"type": "server/state", "payload": {"color": None}}

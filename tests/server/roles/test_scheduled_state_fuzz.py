@@ -12,9 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 from aiosendspin.clock import ManualClock
 from aiosendspin.models.artwork import ArtworkChannel, ClientStateArtwork
 from aiosendspin.models.color import SessionUpdateColor
-from aiosendspin.models.core import ClientStatePayload, ServerStateMessage
+from aiosendspin.models.core import (
+    ClientStatePayload,
+    LegacyServerStateClearMessage,
+    ServerStateMessage,
+)
 from aiosendspin.models.metadata import SessionUpdateMetadata
-from aiosendspin.models.types import ArtworkSource, PictureFormat, UndefinedField
+from aiosendspin.models.types import ArtworkSource, PictureFormat, ServerMessage, UndefinedField
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.roles.artwork.v1 import MAX_ANNOUNCE_LEAD_US, ArtworkV1Role
 from aiosendspin.server.roles.color.group import ColorGroupRole
@@ -94,12 +98,17 @@ class _SpecClient:
 
 
 class _Member:
-    def __init__(self, client: _SpecClient) -> None:
+    def __init__(self, client: _SpecClient, *, legacy: bool) -> None:
         self.client = client
-        self.outbox: list[ServerStateMessage] = []
+        self.legacy = legacy
+        self.outbox: list[ServerMessage] = []
 
-    def send_message(self, message: ServerStateMessage) -> None:
+    def send_message(self, message: ServerMessage) -> None:
         self.outbox.append(message)
+
+    # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+    def clears_state_with_null(self) -> bool:
+        return self.legacy
 
 
 class _Harness:
@@ -117,7 +126,9 @@ class _Harness:
         self.connection._server.clock = clock  # noqa: SLF001
 
     def join(self) -> None:
-        member = _Member(_SpecClient(self.rng.randint(0, _CLOCK_ERROR_US)))
+        member = _Member(
+            _SpecClient(self.rng.randint(0, _CLOCK_ERROR_US)), legacy=self.rng.random() < 0.3
+        )
         self.members.append(member)
         self.role.subscribe(member)
 
@@ -133,9 +144,13 @@ class _Harness:
                     merged = self.connection._merge_state_messages(message, outbox[0])  # noqa: SLF001
                     if merged is None:
                         break
-                    assert isinstance(merged, ServerStateMessage)
                     message = merged
                     outbox.pop(0)
+                if isinstance(message, LegacyServerStateClearMessage):
+                    assert member.legacy
+                    member.client.receive(None, now_us)
+                    continue
+                assert isinstance(message, ServerStateMessage)
                 state = getattr(message.payload, self.name)
                 assert not isinstance(state, UndefinedField)
                 member.client.receive(state, now_us)
@@ -179,7 +194,10 @@ class _Harness:
 
 
 def _state_fields(state: _StateObject | None, now_us: int | None) -> dict[str, Any] | None:
-    """Return a state object's fields, progress extrapolated to `now_us` when given."""
+    """Return a state object's fields, progress extrapolated to `now_us` when given.
+
+    A timestamp-only object, like a missing one, has no state.
+    """
     if state is None:
         return None
     fields = state.to_dict()
@@ -193,7 +211,7 @@ def _state_fields(state: _StateObject | None, now_us: int | None) -> dict[str, A
         progress = {**progress, "track_progress": position}
     if progress is not None:
         fields["progress"] = progress
-    return fields
+    return fields or None
 
 
 def _make_group(clock: ManualClock) -> MagicMock:

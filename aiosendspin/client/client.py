@@ -74,9 +74,12 @@ def _validate_decodable_formats(player_support: ClientHelloPlayerSupport) -> Non
         )
 
 
-# Callback invoked when server state metadata updates are received, or with None when
+# Callback invoked when server state metadata becomes current, or with None when
 # a server/activate removed the metadata role and its state was discarded.
 MetadataCallback = Callable[[ServerStatePayload | None], None]
+
+# Callback invoked when server state metadata is scheduled.
+ScheduledMetadataCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
@@ -85,9 +88,12 @@ GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
 # a server/activate removed the controller role and its state was discarded.
 ControllerStateCallback = Callable[[ServerStatePayload | None], None]
 
-# Callback invoked when server state color updates are received, or with None when
+# Callback invoked when server state color becomes current, or with None when
 # a server/activate removed the color role and its state was discarded.
 ColorCallback = Callable[[ServerStatePayload | None], None]
+
+# Callback invoked when server state color is scheduled.
+ScheduledColorCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
@@ -1120,10 +1126,8 @@ class SendspinClient:
         """Add a listener for server/state metadata becoming current.
 
         A scheduled update is passed once its timestamp is reached, with the message that
-        carried it. A metadata object of None clears the metadata.
-
-        The callback receives None when a server/activate removes the metadata role and its
-        state is discarded.
+        carried it. The callback receives None when a server/activate removes the metadata
+        role and its current and scheduled state are discarded.
 
         Returns:
             A function that removes this listener when called.
@@ -1187,10 +1191,8 @@ class SendspinClient:
         """Add a listener for server/state color becoming current.
 
         A scheduled update is passed once its timestamp is reached, with the message that
-        carried it. A color object of None clears the palette.
-
-        The callback receives None when a server/activate removes the color role and its
-        state is discarded.
+        carried it. The callback receives None when a server/activate removes the color role
+        and its current and scheduled state are discarded.
 
         Returns:
             A function that removes this listener when called.
@@ -1396,7 +1398,7 @@ class SendspinClient:
     # --- Listener dispatch ---
 
     def notify_metadata_callback(self, payload: ServerStatePayload | None) -> None:
-        """Dispatch a server/state with metadata, or None on discard, to the listeners."""
+        """Dispatch current metadata, or None on discard, to the listeners."""
         for callback in list(self._metadata_callbacks):
             try:
                 callback(payload)
@@ -1428,7 +1430,7 @@ class SendspinClient:
                 logger.exception("Error in controller callback %s", callback)
 
     def notify_color_callback(self, payload: ServerStatePayload | None) -> None:
-        """Dispatch a server/state with color, or None on discard, to the listeners."""
+        """Dispatch current color, or None on discard, to the listeners."""
         for callback in list(self._color_callbacks):
             try:
                 callback(payload)
