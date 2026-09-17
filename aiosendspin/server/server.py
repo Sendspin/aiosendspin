@@ -48,7 +48,7 @@ from .group import SendspinGroup
 logger = logging.getLogger(__name__)
 
 
-# Abort reconnection attempts after exponential backoff reaches this ceiling
+# Ceiling for the exponential backoff between reconnection attempts
 MAX_RECONNECT_BACKOFF_S = 300.0
 # Only consider a connection stable if it lasts at least this long, otherwise
 # a successful but broken session may cause a reconnection every second.
@@ -60,7 +60,6 @@ class _ServerInitiatedConnectionOptions:
     """Retry policy for a server-initiated client URL."""
 
     retry_initial_connection: bool = False
-    retry_indefinitely: bool = False
 
 
 class SendspinEvent:
@@ -502,25 +501,25 @@ class SendspinServer:
         *,
         connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
         retry_initial_connection: bool = False,
-        retry_indefinitely: bool = False,
+        # DEPRECATED(spec-pr-207): remove in aiosendspin <version>
+        retry_indefinitely: bool = False,  # noqa: ARG002
         pairing_attempt: PairingAttempt | None = None,
     ) -> None:
         """Start a background connection attempt to a client URL.
 
-        By default, initial connection failures are logged and stop the background task,
-        and automatic retries only happen after at least one successful connection.
+        By default, initial connection failures are logged and stop the background task.
+        Once connected, the task reconnects with capped exponential backoff until the
+        client says goodbye without asking for a reconnect, or the URL is disconnected.
         If mDNS discovery is unavailable, callers can build a full client WebSocket URL
         from a configured hostname/IP, port, and path, then pass
-        retry_initial_connection=True and retry_indefinitely=True.
+        retry_initial_connection=True to keep retrying until the client is reachable.
+
+        ``retry_indefinitely`` is deprecated and ignored: reconnection never gives up.
 
         ``pairing_attempt`` carries an operator-initiated pairing intent for this dial;
         when a dial task already exists it is queued for that task's next dial.
         """
-        self._set_connection_options(
-            url,
-            retry_initial_connection=retry_initial_connection,
-            retry_indefinitely=retry_indefinitely,
-        )
+        self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
@@ -543,23 +542,23 @@ class SendspinServer:
         *,
         connection_reason: ConnectionReason = ConnectionReason.DISCOVERY,
         retry_initial_connection: bool = False,
-        retry_indefinitely: bool = False,
+        # DEPRECATED(spec-pr-207): remove in aiosendspin <version>
+        retry_indefinitely: bool = False,  # noqa: ARG002
         pairing_attempt: PairingAttempt | None = None,
     ) -> None:
         """Connect to a client and wait for the initial connection attempt.
 
+        With ``retry_initial_connection=True`` this waits until the client is reachable or
+        the call is cancelled, so callers wanting a deadline must apply their own timeout.
+        ``retry_indefinitely`` is deprecated and ignored: reconnection never gives up.
+
         Raises:
             ClientConnectionError: If the initial connection to the client fails.
             ClientResponseError: If the client responds with an error HTTP status.
-            TimeoutError: If the initial connection attempt times out, or the backoff
-                ceiling is reached with retry_initial_connection=True.
+            TimeoutError: If the initial connection attempt times out.
             Exception: Other unexpected errors during the initial connection attempt.
         """
-        self._set_connection_options(
-            url,
-            retry_initial_connection=retry_initial_connection,
-            retry_indefinitely=retry_indefinitely,
-        )
+        self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         self._connection_reasons[url] = connection_reason
         if url in self._initial_connect_succeeded:
             return
@@ -659,27 +658,14 @@ class SendspinServer:
             raise ValueError(f"client {client_id} is not connected")
         return connection
 
-    def _set_connection_options(
-        self,
-        url: str,
-        *,
-        retry_initial_connection: bool,
-        retry_indefinitely: bool,
-    ) -> None:
+    def _set_connection_options(self, url: str, *, retry_initial_connection: bool) -> None:
         """Store retry options without downgrading an existing background task."""
         previous = self._connection_options.get(url)
-        if previous is None:
-            self._connection_options[url] = _ServerInitiatedConnectionOptions(
-                retry_initial_connection=retry_initial_connection,
-                retry_indefinitely=retry_indefinitely,
-            )
-            return
-
         self._connection_options[url] = _ServerInitiatedConnectionOptions(
             retry_initial_connection=(
-                previous.retry_initial_connection or retry_initial_connection
+                retry_initial_connection
+                or (previous is not None and previous.retry_initial_connection)
             ),
-            retry_indefinitely=previous.retry_indefinitely or retry_indefinitely,
         )
 
     def _get_connection_options(self, url: str) -> _ServerInitiatedConnectionOptions:
@@ -923,18 +909,6 @@ class SendspinServer:
                             return
                     else:
                         logger.debug("Connection task for %s failed: %s", url, err)
-
-                options = self._get_connection_options(url)
-                if not options.retry_indefinitely and backoff >= MAX_RECONNECT_BACKOFF_S:
-                    if not first_connection_succeeded:
-                        self._resolve_initial_connect_waiters(
-                            url,
-                            TimeoutError(
-                                "Initial connection did not succeed before "
-                                "the reconnect backoff ceiling was reached"
-                            ),
-                        )
-                    break
 
                 sleep_s = min(backoff, MAX_RECONNECT_BACKOFF_S)
                 logger.debug("Trying to reconnect to client at %s in %.1fs", url, sleep_s)
