@@ -1627,7 +1627,7 @@ class SendspinConnection:
                 in (PlayerCommand.SET_OUTPUT_DELAY, PlayerCommand.SET_STATIC_DELAY)
                 and player_cmd.output_delay_ms is not None
             ):
-                self.set_output_delay_ms(float(player_cmd.output_delay_ms))
+                self._client.set_output_delay_ms(float(player_cmd.output_delay_ms))
         self._client.notify_server_command_callback(payload)
 
     async def _handle_unpair(self) -> None:
@@ -1694,6 +1694,8 @@ class SendspinConnection:
         """Handle incoming audio chunk and notify callbacks."""
         if self._current_audio_format is None:
             logger.debug("Dropping audio chunk without format")
+            return
+        if not self._reported_available:
             return
         # Pass server timestamp directly to callback - it handles time conversion
         # to allow for dynamic time base updates
