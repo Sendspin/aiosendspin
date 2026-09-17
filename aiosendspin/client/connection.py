@@ -503,7 +503,7 @@ class SendspinConnection:
         """
         activate = await self._exchange_hellos()
         if (reason := await self._apply_activation(activate)) is not None:
-            await self._goodbye_and_disconnect(reason)
+            await self.goodbye_and_disconnect(reason)
             raise RuntimeError(f"server activation rejected ({reason.value})")
 
     async def _exchange_hellos(self) -> ServerActivatePayload:
@@ -915,7 +915,7 @@ class SendspinConnection:
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
 
-    async def _goodbye_and_disconnect(self, reason: GoodbyeReason) -> None:
+    async def goodbye_and_disconnect(self, reason: GoodbyeReason) -> None:
         """Send ``client/goodbye`` with ``reason`` and disconnect."""
         await self.send_goodbye(reason)
         await self.disconnect()
@@ -942,6 +942,19 @@ class SendspinConnection:
     def is_pairing(self) -> bool:
         """Whether this connection is currently a pairing connection."""
         return Activity.PAIRING in self._activities
+
+    @property
+    def relies_on_unpaired_access(self) -> bool:
+        """Whether this connection is unpaired and its activities or roles need unpaired access."""
+        psk = self._noise_psk
+        if psk is None or psk.category is PskCategory.LONG_TERM:
+            return False
+        return not _admissible(
+            psk.category,
+            set(self._activities),
+            has_roles=bool(self._active_roles),
+            unpaired_access=False,
+        )
 
     @property
     def pairing_attempt_in_progress(self) -> bool:
@@ -1446,7 +1459,7 @@ class SendspinConnection:
         was_artwork_active = self._is_role_active("artwork")
         was_visualizer_active = self._is_role_active("visualizer")
         if (reason := await self._apply_activation(payload)) is not None:
-            await self._goodbye_and_disconnect(reason)
+            await self.goodbye_and_disconnect(reason)
             return
         if self.is_pairing:
             self._start_pairing_attempt()
@@ -1620,7 +1633,7 @@ class SendspinConnection:
         if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
             return  # Not a long-term session (pairing / unpaired): ignore and continue.
         await handle_unpair(self._client.pairing_store, matched_psk_id=self._noise_psk.psk_id)
-        await self._goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
+        await self.goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
 
     async def _handle_management_request(self, message: _ManagementRequest) -> None:
         """Handle a management/* request, gating on the management activity."""
@@ -1669,7 +1682,7 @@ class SendspinConnection:
         )
         await self._send_message(ManagementResultMessage(payload=payload).to_json())
         if effect is ManagementEffect.GOODBYE_UNAUTHORIZED:
-            await self._goodbye_and_disconnect(GoodbyeReason.UNAUTHORIZED)
+            await self.goodbye_and_disconnect(GoodbyeReason.UNAUTHORIZED)
 
     def _configure_audio_output(self, audio_format: AudioFormat) -> None:
         """Store the current audio format for use in callbacks."""

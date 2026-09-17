@@ -556,6 +556,22 @@ class SendspinClient:
         self._pairing_window_deadline = self._loop.time() + _PAIRING_WINDOW_LIFETIME_S
         self._pairing_window_opened.set()
 
+    async def set_unpaired_access(self, *, enabled: bool) -> None:
+        """Persist whether this client admits unpaired access.
+
+        Disabling it closes the admitted connection with ``client/goodbye`` reason
+        ``pairing_required`` when that connection relies on unpaired access. Enabling it
+        closes nothing: the setting is advertised from the next ``client/hello``.
+        A pairing-store error propagates, and then no connection is closed.
+        """
+        store = self._pairing_store
+        config = await store.get_pairing_config()
+        await store.store_pairing_config(replace(config, unpaired_access_enabled=enabled))
+        connection = self._admitted_connection
+        if enabled or connection is None or not connection.relies_on_unpaired_access:
+            return
+        await connection.goodbye_and_disconnect(GoodbyeReason.PAIRING_REQUIRED)
+
     @property
     def implemented_pair_methods(self) -> frozenset[PairMethod]:
         """Pairing methods this client implements: each pairing-code method needs its wiring."""
