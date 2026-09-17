@@ -66,6 +66,8 @@ _CLIENT_ATTEMPT_TIMEOUT_S: float = 120.0
 SERVER_ATTEMPT_TIMEOUT_S: float = 180.0
 SERVER_FIRST_MESSAGE_TIMEOUT_S: float = 60.0
 SERVER_GESTURE_TIMEOUT_S: float = 360.0
+# Longest client/pair-pending message handed to on_pair_pending; longer ones are truncated.
+PAIR_PENDING_MESSAGE_MAX_LEN = 200
 
 
 class PairingError(Exception):
@@ -120,8 +122,12 @@ class PairingAttempt:
     """Required for the Pairing PSK method; the live PSK pasted from a token."""
     verify: bool = False
     """Re-verify an already-paired client instead of pairing anew."""
-    on_pair_pending: Callable[[], None] | None = None
-    """Called when the client reports the attempt gesture-gated or held back."""
+    on_pair_pending: Callable[[str | None], None] | None = None
+    """Called when the client reports the attempt gesture-gated or held back.
+
+    Receives the client's operator message, truncated to ``PAIR_PENDING_MESSAGE_MAX_LEN``
+    characters, or ``None`` when it sent none.
+    """
     owner: str | None = None
     """Application-defined authorization id the resulting record is bound to."""
 
@@ -338,7 +344,7 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
-    on_pair_pending: Callable[[], None] | None = None,
+    on_pair_pending: Callable[[str | None], None] | None = None,
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
@@ -466,7 +472,7 @@ async def run_static_pairing_code_server(
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
-    on_pair_pending: Callable[[], None] | None = None,
+    on_pair_pending: Callable[[str | None], None] | None = None,
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
@@ -775,7 +781,7 @@ async def _receive_pair_init(
     ws: EncryptedWebSocket,
     pairing_index: int,
     *,
-    on_pending: Callable[[], None] | None = None,
+    on_pending: Callable[[str | None], None] | None = None,
 ) -> ClientPairInitMessage:
     """Receive this attempt's ``client/pair-init``.
 
@@ -800,7 +806,10 @@ async def _receive_pair_init(
     if isinstance(message, ClientPairInitMessage):
         return message
     if on_pending is not None:
-        on_pending()
+        pending_message = message.payload.message
+        on_pending(
+            pending_message[:PAIR_PENDING_MESSAGE_MAX_LEN] if pending_message is not None else None
+        )
     # In-order delivery leaves no room for leftovers after the matching pair-pending:
     # the next pairing frame must be this attempt's client/pair-init.
     async with _server_timeout(SERVER_GESTURE_TIMEOUT_S, "gesture-gated client/pair-init"):

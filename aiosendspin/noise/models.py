@@ -167,6 +167,16 @@ class ClientPairPendingPayload(SendspinModel):
 
     pairing_index: int
     """Pairing ``server/activate`` message count received since the last Noise handshake."""
+    message: str | None = None
+    """Short plain-text sentence for the operator, such as what to do to proceed.
+
+    Unauthenticated: show it as text attributed to the device, never as markup.
+    """
+
+    class Config(SendspinConfig):
+        """Omit the optional operator message when absent."""
+
+        omit_none = True
 
 
 @dataclass

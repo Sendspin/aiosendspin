@@ -1180,7 +1180,7 @@ async def test_live_pairing_round_limit_holds_back_until_pairing_window() -> Non
     window_opened = asyncio.get_running_loop().create_future()
     pending_signals = 0
 
-    def on_pending() -> None:
+    def on_pending(_message: str | None) -> None:
         nonlocal pending_signals
         pending_signals += 1
 

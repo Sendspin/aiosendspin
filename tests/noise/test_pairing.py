@@ -37,6 +37,7 @@ from aiosendspin.noise.models import (
     ServerPairInitPayload,
 )
 from aiosendspin.noise.pairing import (
+    PAIR_PENDING_MESSAGE_MAX_LEN,
     InvalidPairingCodeError,
     PairingAbortError,
     PairingAttempt,
@@ -101,7 +102,7 @@ def test_pairing_attempt_pairing_psk_requires_material() -> None:
         PairingAttempt(
             method=PairMethod.PAIRING_PSK,
             pairing_psk=generate_psk(),
-            on_pair_pending=lambda: None,
+            on_pair_pending=lambda _message: None,
         )
 
 
@@ -252,20 +253,28 @@ async def test_static_pairing_code_server_first_message_wait_times_out(
     assert server_raw.sent == []
 
 
-async def test_pair_pending_extends_the_first_message_wait() -> None:
-    """A matching pair-pending switches the server to the gesture timeout; pairing completes."""
+@pytest.mark.parametrize(
+    ("sent", "surfaced"),
+    [
+        pytest.param(None, None, id="absent"),
+        pytest.param("Press the pairing button", "Press the pairing button", id="present"),
+        pytest.param("x" * 250, "x" * PAIR_PENDING_MESSAGE_MAX_LEN, id="truncated"),
+    ],
+)
+async def test_pair_pending_extends_the_first_message_wait(
+    sent: str | None, surfaced: str | None
+) -> None:
+    """A matching pair-pending surfaces its message and switches to the gesture timeout."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    pending_signals = 0
-
-    def on_pending() -> None:
-        nonlocal pending_signals
-        pending_signals += 1
+    pending_messages: list[str | None] = []
 
     async def gated_client() -> None:
         await client_ews.send_str(
-            ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=0)).to_json()
+            ClientPairPendingMessage(
+                payload=ClientPairPendingPayload(pairing_index=0, message=sent)
+            ).to_json()
         )
         await run_static_pairing_code_client(
             client_ews,
@@ -288,12 +297,12 @@ async def test_pair_pending_extends_the_first_message_wait() -> None:
             pairing_code_provider=provide,
             client_id="client-A",
             store=server_store,
-            on_pair_pending=on_pending,
+            on_pair_pending=pending_messages.append,
         ),
     )
     assert server_record is not None
     assert await server_store.record_by_client_id("client-A") == server_record
-    assert pending_signals == 1
+    assert pending_messages == [surfaced]
 
 
 async def test_gesture_wait_times_out_after_pair_pending(
@@ -325,7 +334,7 @@ async def test_stale_pair_pending_is_discarded() -> None:
     server_store = InMemoryServerPairingStore()
     pending_signals = 0
 
-    def on_pending() -> None:
+    def on_pending(_message: str | None) -> None:
         nonlocal pending_signals
         pending_signals += 1
 
