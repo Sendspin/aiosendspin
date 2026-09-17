@@ -144,7 +144,7 @@ from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 from aiosendspin.util import create_task, warn_deprecated
 
 from .client import SendspinClient
-from .compliance import ClientComplianceError
+from .compliance import ClientComplianceError, describe_client, noncompliance_subject
 from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
 from .roles.negotiation import negotiate_roles
 from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS, role_requires_pairing
@@ -347,6 +347,8 @@ class SendspinConnection:
 
         self._client_id: str | None = None
         self._client_info: ClientHelloPayload | None = None
+        # Operator-facing identity for deviations flagged before a client is attached.
+        self._hello_description = ""
         self._negotiated_roles: list[str] = []
         self._client: SendspinClient | None = None
         self._trusted_unpaired = False
@@ -1214,10 +1216,11 @@ class SendspinConnection:
         if self._client is not None:
             self._client.flag_noncompliance(reason)
             return
+        subject = noncompliance_subject(self._hello_description)
         if not self._server.allow_noncompliant_clients:
-            self._logger.error("rejecting non-compliant client: %s", reason)
+            self._logger.error("rejecting %s: %s", subject, reason)
             raise ClientComplianceError(reason)
-        self._logger.warning("non-compliant client: %s", reason)
+        self._logger.warning("%s: %s", subject, reason)
 
     # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
     def _flag_legacy_fragment(self) -> None:
@@ -1246,6 +1249,9 @@ class SendspinConnection:
             return False
 
         client_info = message.payload
+        # Recorded before the first deviation can be flagged below, while the connection
+        # still has no attached client to name.
+        self._hello_description = describe_client(client_info, self._client_id)
         # Encrypted clients omit version (it is in client/init); only a legacy
         # client carries it in the hello, so validate it only when present.
         if client_info.version is not None and client_info.version != 1:
@@ -1281,7 +1287,9 @@ class SendspinConnection:
         self._note_client_hello_wire(client_info)
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
             self._logger.info(
-                "Client offered roles/versions this server does not implement: %s", unimplemented
+                "Client %s offered roles/versions this server does not implement: %s",
+                self._hello_description,
+                unimplemented,
             )
 
         await self._reload_trusted_unpaired()

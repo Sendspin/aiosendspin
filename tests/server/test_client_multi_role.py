@@ -101,6 +101,7 @@ def _make_client_hello() -> MagicMock:
     hello = MagicMock()
     hello.client_id = "test-client"
     hello.name = "Test Client"
+    hello.device_info = None
     hello.player_support = ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(

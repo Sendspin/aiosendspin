@@ -104,6 +104,7 @@ def _make_player_client(
     )
     hello.artwork_support = None
     hello.visualizer_support = None
+    hello.device_info = None
 
     client.attach_connection(
         conn,

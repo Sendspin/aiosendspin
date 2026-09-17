@@ -1645,7 +1645,7 @@ async def test_list_form_client_pairs_under_the_pre_round_sid(
         finally:
             await client.disconnect()
     assert (
-        "non-compliant client: client/hello sent supported_pair_methods as a list"
+        "non-compliant client c: client/hello sent supported_pair_methods as a list"
         in caplog.messages
     )
 
@@ -1679,7 +1679,7 @@ async def test_strict_server_rejects_list_form_client(
         finally:
             await client.disconnect()
     assert (
-        "rejecting non-compliant client: client/hello sent supported_pair_methods as a list"
+        "rejecting non-compliant client c: client/hello sent supported_pair_methods as a list"
         in caplog.messages
     )
 
@@ -2359,7 +2359,7 @@ async def test_legacy_pairing_psk_client_pairs_and_is_flagged(
         finally:
             await client.disconnect()
     assert (
-        "non-compliant client: Pairing PSK client/pair-finalize sent without client/pair-init"
+        "non-compliant client c: Pairing PSK client/pair-finalize sent without client/pair-init"
         in caplog.messages
     )
 
@@ -2401,7 +2401,7 @@ async def test_strict_server_rejects_legacy_pairing_psk_client_on_connect(
             assert disconnect.await_args_list[0].kwargs == {"retry_connection": False}
             assert await server_store.record_by_client_id(client_identity.peer_id) is None
             assert (
-                "rejecting non-compliant client: "
+                "rejecting non-compliant client c: "
                 "Pairing PSK client/pair-finalize sent without client/pair-init"
             ) in caplog.messages
         finally:
@@ -4408,9 +4408,9 @@ async def test_repeated_client_hello_is_flagged(
             reason = "sent a second client/hello after the hello exchange"
             if strict:
                 await _wait_until(lambda: not client.connected)
-                assert f"rejecting non-compliant client: {reason}" in caplog.messages
+                assert f"rejecting non-compliant client c: {reason}" in caplog.messages
             else:
-                await _wait_until(lambda: f"non-compliant client: {reason}" in caplog.messages)
+                await _wait_until(lambda: f"non-compliant client c: {reason}" in caplog.messages)
                 assert client.connected
         finally:
             await client.disconnect()
@@ -4439,7 +4439,7 @@ async def test_repeated_client_hello_during_pairing_is_flagged_not_routed(
             await sdk_conn._ws.send_str(hello.to_json())  # noqa: SLF001
             await _wait_until(
                 lambda: (
-                    "non-compliant client: sent a second client/hello after the hello exchange"
+                    "non-compliant client c: sent a second client/hello after the hello exchange"
                     in caplog.messages
                 )
             )

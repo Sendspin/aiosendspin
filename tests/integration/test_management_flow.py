@@ -354,7 +354,8 @@ async def test_management_result_is_flagged_when_lenient(
                 result, _, _ = await conn.list_records()
             assert result is ManagementResult.OK
             assert any(
-                "non-compliant client: sent management/result" in r.message for r in caplog.records
+                "non-compliant client c: sent management/result" in r.message
+                for r in caplog.records
             )
             assert client.connected
         finally:
