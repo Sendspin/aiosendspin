@@ -46,13 +46,18 @@ class MetadataGroupRole(GroupRole):
             return
 
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-        current = replace(self._current_metadata, track_progress=self._get_current_track_progress())
+        current = replace(self._current_metadata, track_progress=self.track_progress)
         metadata_update = current.snapshot_update(timestamp)
         state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
         role.send_message(state_message)
 
-    def _get_current_track_progress(self) -> int | None:
-        """Calculate current track progress in milliseconds."""
+    @property
+    def track_progress(self) -> int | None:
+        """Return the playback position in milliseconds as of now, or None when unknown.
+
+        During an active stream the stored position is extrapolated at the playback speed and
+        clamped to the track duration.
+        """
         if self._current_metadata is None or self._current_metadata.track_progress is None:
             return None
 
@@ -83,7 +88,7 @@ class MetadataGroupRole(GroupRole):
     def freeze_progress(self) -> None:
         """Snapshot current progress and stop further client-side progress extrapolation."""
         metadata = self._current_metadata
-        if metadata is None or (current_progress := self._get_current_track_progress()) is None:
+        if metadata is None or (current_progress := self.track_progress) is None:
             return
 
         self.set_metadata(
@@ -99,42 +104,21 @@ class MetadataGroupRole(GroupRole):
 
         Nothing is sent when the metadata is unchanged. `None` clears the metadata.
         """
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
+        self._apply_metadata(metadata, force=False)
 
-        if metadata is not None:
-            if metadata.timestamp_us is None:
-                metadata = replace(metadata, timestamp_us=timestamp)
-            else:
-                timestamp = metadata.timestamp_us
+    def seek(self, track_progress: int) -> None:
+        """Set the playback position in milliseconds as of now and push it to all members.
 
-        if metadata is None and self._current_metadata is None:
-            return
-        if metadata is not None and metadata.equals(self._current_metadata):
-            return
+        Unlike `update`, the new position is sent even when it is close to the current one.
 
-        last_metadata = self._current_metadata
-        metadata_update = None if metadata is None else metadata.snapshot_update(timestamp)
-
-        self._current_metadata = metadata
-
-        if metadata is not None and metadata.track_progress is not None:
-            self._track_progress_timestamp_us = timestamp
-
-        for role in self._members:
-            state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
-            role.send_message(state_message)
-
-        if metadata is None:
-            self.emit_group_event(
-                MetadataClearedEvent(previous_metadata=last_metadata, timestamp_us=timestamp)
-            )
-            return
-        self.emit_group_event(
-            MetadataUpdatedEvent(
-                metadata=metadata,
-                previous_metadata=last_metadata,
-                timestamp_us=timestamp,
-            )
+        Raises ValueError if there is no metadata with a `playback_speed`, or if
+        `track_progress` is negative.
+        """
+        metadata = self._current_metadata
+        if metadata is None or metadata.playback_speed is None:
+            raise ValueError("seek requires metadata with a playback_speed")
+        self._apply_metadata(
+            replace(metadata, track_progress=track_progress, timestamp_us=None), force=True
         )
 
     def update(
@@ -189,7 +173,7 @@ class MetadataGroupRole(GroupRole):
             kwargs["timestamp_us"] = None
         elif self._group.has_active_stream:
             # The stored position is only valid at its own timestamp, so move it to now.
-            kwargs["track_progress"] = self._get_current_track_progress()
+            kwargs["track_progress"] = self.track_progress
             kwargs["timestamp_us"] = None
 
         new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
@@ -198,3 +182,43 @@ class MetadataGroupRole(GroupRole):
     def clear(self) -> None:
         """Clear all metadata."""
         self.set_metadata(None)
+
+    def _apply_metadata(self, metadata: Metadata | None, *, force: bool) -> None:
+        """Store metadata and push it, skipping unchanged metadata unless `force` is set."""
+        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
+
+        if metadata is not None:
+            if metadata.timestamp_us is None:
+                metadata = replace(metadata, timestamp_us=timestamp)
+            else:
+                timestamp = metadata.timestamp_us
+
+        if metadata is None and self._current_metadata is None:
+            return
+        if not force and metadata is not None and metadata.equals(self._current_metadata):
+            return
+
+        last_metadata = self._current_metadata
+        metadata_update = None if metadata is None else metadata.snapshot_update(timestamp)
+
+        self._current_metadata = metadata
+
+        if metadata is not None and metadata.track_progress is not None:
+            self._track_progress_timestamp_us = timestamp
+
+        for role in self._members:
+            state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
+            role.send_message(state_message)
+
+        if metadata is None:
+            self.emit_group_event(
+                MetadataClearedEvent(previous_metadata=last_metadata, timestamp_us=timestamp)
+            )
+            return
+        self.emit_group_event(
+            MetadataUpdatedEvent(
+                metadata=metadata,
+                previous_metadata=last_metadata,
+                timestamp_us=timestamp,
+            )
+        )

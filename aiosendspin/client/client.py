@@ -957,7 +957,12 @@ class SendspinClient:
         position_ms: int | None = None,
         offset_ms: int | None = None,
     ) -> None:
-        """Send a group command (playback control) to the server."""
+        """Send a group command (playback control) to the server.
+
+        Commands are checked against the latest controller state received from the server.
+        Raises ValueError if no controller state was received, if `command` is not in its
+        `supported_commands`, or if a `seek` targets a position outside 0 to `seek_max_ms`.
+        """
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
         await self._admitted_connection.send_group_command(
@@ -991,6 +996,17 @@ class SendspinClient:
     def now_us(self) -> int:
         """Return current timestamp from the client's clock in microseconds."""
         return self._clock.now_us()
+
+    def current_track_position(self) -> int | None:
+        """Return the playback position in milliseconds as of now, or None when unknown.
+
+        The position is extrapolated from the progress in the latest metadata received,
+        including metadata whose timestamp is still in the future. Returns None while not
+        connected, without progress, or before time synchronization has converged.
+        """
+        if self._admitted_connection is None:
+            return None
+        return self._admitted_connection.current_track_position()
 
     # --- Listener registration ---
 

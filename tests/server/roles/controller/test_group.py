@@ -211,6 +211,23 @@ def test_controller_group_role_set_supported_commands() -> None:
     assert MediaCommand.PAUSE in commands
 
 
+def test_controller_group_role_reordered_supported_commands_do_not_push() -> None:
+    """Re-setting the same supported commands in another order pushes no new state."""
+    cgr = ControllerGroupRole(_make_group_stub())
+    member = MagicMock()
+    cgr._members.append(member)  # noqa: SLF001
+    cgr.set_supported_commands([MediaCommand.PLAY, MediaCommand.PAUSE])
+    member.send_message.reset_mock()
+
+    cgr.set_supported_commands([MediaCommand.PAUSE, MediaCommand.PLAY])
+    member.send_message.assert_not_called()
+
+    cgr.set_supported_commands([MediaCommand.PAUSE])
+    member.send_message.assert_called_once()
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.controller.supported_commands == [MediaCommand.PAUSE, MediaCommand.SWITCH]
+
+
 def test_controller_group_role_on_member_join_sends_state() -> None:
     """on_member_join() sends current controller state."""
     group = _make_group_stub()
@@ -602,6 +619,90 @@ def test_handle_seek_relative_command_emits_event() -> None:
     event = group._signal_event.call_args.args[0]  # noqa: SLF001
     assert isinstance(event, ControllerSeekRelativeEvent)
     assert event.offset_ms == -15_000
+
+
+def _seek_relative_group(position_ms: int | None) -> tuple[MagicMock, ControllerGroupRole]:
+    """Create a group whose metadata reports the given playback position."""
+    group = MagicMock()
+    group.has_active_stream = False
+    metadata_group_role = MetadataGroupRole(group)
+    if position_ms is not None:
+        metadata_group_role.update(track_progress=position_ms, playback_speed=1000)
+    controller_group_role = ControllerGroupRole(group)
+    group.group_role.side_effect = {"metadata": metadata_group_role}.get
+    controller_group_role.set_supported_commands([MediaCommand.SEEK_RELATIVE])
+    group._signal_event.reset_mock()  # noqa: SLF001
+    return group, controller_group_role
+
+
+def _emitted_seek_offset(group: MagicMock) -> int:
+    group._signal_event.assert_called_once()  # noqa: SLF001
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, ControllerSeekRelativeEvent)
+    return event.offset_ms
+
+
+def test_handle_seek_relative_clamps_to_seek_max_ms() -> None:
+    """A relative seek past seek_max_ms is clamped to land on seek_max_ms."""
+    group, cgr = _seek_relative_group(290_000)
+    cgr.set_seek_max_ms(300_000)
+
+    cgr.handle_command(
+        ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=30_000)
+    )
+
+    assert _emitted_seek_offset(group) == 10_000
+
+
+def test_handle_seek_relative_clamps_to_start() -> None:
+    """A relative seek before the start is clamped to land on 0."""
+    group, cgr = _seek_relative_group(10_000)
+
+    cgr.handle_command(
+        ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=-30_000)
+    )
+
+    assert _emitted_seek_offset(group) == -10_000
+
+
+def test_handle_seek_relative_past_seek_max_ms_never_reverses() -> None:
+    """From beyond seek_max_ms a forward seek stays put and a backward seek is kept."""
+    group, cgr = _seek_relative_group(200_000)
+    cgr.set_seek_max_ms(150_000)
+
+    cgr.handle_command(
+        ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=10_000)
+    )
+    assert _emitted_seek_offset(group) == 0
+
+    group._signal_event.reset_mock()  # noqa: SLF001
+    cgr.handle_command(
+        ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=-10_000)
+    )
+    assert _emitted_seek_offset(group) == -10_000
+
+
+def test_handle_seek_relative_without_seek_max_ms_has_no_upper_bound() -> None:
+    """Without seek_max_ms a forward relative seek is not clamped."""
+    group, cgr = _seek_relative_group(290_000)
+
+    cgr.handle_command(
+        ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=30_000)
+    )
+
+    assert _emitted_seek_offset(group) == 30_000
+
+
+def test_handle_seek_relative_passes_offset_without_known_position() -> None:
+    """Without a known position the offset is passed through unchanged."""
+    group, cgr = _seek_relative_group(None)
+    cgr.set_seek_max_ms(300_000)
+
+    cgr.handle_command(
+        ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=-30_000)
+    )
+
+    assert _emitted_seek_offset(group) == -30_000
 
 
 def test_set_seek_max_ms_rejects_negative() -> None:

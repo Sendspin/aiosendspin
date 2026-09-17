@@ -67,9 +67,8 @@ class SessionUpdateMetadata(SendspinModel):
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        # Validate year is reasonable (between 1000 and current year + 10)
-        if self.year is not None and not (1000 <= self.year <= 2040):
-            raise ValueError(f"year must be between 1000 and 2040, got {self.year}")
+        if self.year is not None and self.year < 0:
+            raise ValueError(f"year must be non-negative, got {self.year}")
 
         # Validate track number is positive
         if self.track is not None and self.track <= 0:

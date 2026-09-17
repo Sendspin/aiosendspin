@@ -15,6 +15,7 @@ import pytest
 from aiosendspin.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.models import AudioFormat
+from aiosendspin.clock import ManualClock
 from aiosendspin.models.artwork import (
     ArtworkChannel,
     StreamArtworkChannelConfig,
@@ -22,15 +23,18 @@ from aiosendspin.models.artwork import (
     pack_artwork_announce,
     pack_artwork_parts,
 )
+from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.core import (
     ActivatePairing,
     ServerActivatePayload,
     ServerCommandPayload,
     ServerHelloPayload,
+    ServerStatePayload,
     ServerTimePayload,
     StreamStartMessage,
     StreamStartPayload,
 )
+from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.player import (
     SEND_AHEAD_MAX,
     ClientHelloPlayerSupport,
@@ -54,6 +58,7 @@ from aiosendspin.models.types import (
     PairMethod,
     PictureFormat,
     PlayerCommand,
+    RepeatMode,
     Roles,
 )
 from aiosendspin.models.visualizer import (
@@ -674,33 +679,220 @@ async def test_send_player_state_reports_client_level_available(
     assert "state" not in msg["payload"].get("player", {})
 
 
-@pytest.mark.asyncio
-async def test_send_group_command_seek_forwards_position_ms() -> None:
-    """send_group_command must include position_ms in the outgoing JSON for seek."""
+async def _controller_connection(
+    controller: ControllerStatePayload | None,
+) -> tuple[SendspinConnection, list[dict[str, Any]]]:
+    """Return a connected connection that has received `controller` state, and its sent messages."""
     client = make_sdk_client(
         client_name="Test Client",
-        roles=[Roles.PLAYER],
-        player_support=_player_support(),
+        roles=[Roles.CONTROLLER],
     )
     connection = SendspinConnection(client)
-
-    sent: list[str] = []
+    sent: list[dict[str, Any]] = []
 
     async def _capture(payload: str) -> None:
-        sent.append(payload)
+        sent.append(json.loads(payload))
 
-    mock_ws = MagicMock()
-    mock_ws.closed = False
-    connection._ws = mock_ws  # noqa: SLF001
+    connection._ws = MagicMock(closed=False)  # noqa: SLF001
     connection._connected = True  # noqa: SLF001
     connection._send_message = _capture  # noqa: SLF001
+    if controller is not None:
+        connection._handle_server_state(ServerStatePayload(controller=controller))  # noqa: SLF001
+    return connection, sent
+
+
+def _controller_state(
+    commands: list[MediaCommand], seek_max_ms: int | None = None
+) -> ControllerStatePayload:
+    return ControllerStatePayload(
+        supported_commands=commands,
+        volume=100,
+        muted=False,
+        repeat=RepeatMode.OFF,
+        shuffle=False,
+        seek_max_ms=seek_max_ms,
+    )
+
+
+async def test_send_group_command_seek_forwards_position_ms() -> None:
+    """send_group_command must include position_ms in the outgoing JSON for seek."""
+    connection, sent = await _controller_connection(
+        _controller_state([MediaCommand.SEEK], seek_max_ms=12_000)
+    )
 
     await connection.send_group_command(MediaCommand.SEEK, position_ms=12_000)
 
-    assert len(sent) == 1
-    msg = json.loads(sent[0])
-    assert msg["payload"]["controller"]["command"] == "seek"
-    assert msg["payload"]["controller"]["position_ms"] == 12_000
+    assert [msg["payload"]["controller"] for msg in sent] == [
+        {"command": "seek", "position_ms": 12_000}
+    ]
+
+
+async def test_send_group_command_sends_listed_command() -> None:
+    """A command listed in the latest controller state is sent."""
+    connection, sent = await _controller_connection(_controller_state([MediaCommand.PLAY]))
+
+    await connection.send_group_command(MediaCommand.PLAY)
+
+    assert [msg["payload"]["controller"] for msg in sent] == [{"command": "play"}]
+
+
+async def test_send_group_command_rejects_unlisted_command() -> None:
+    """A command missing from the latest controller state is rejected without sending."""
+    connection, sent = await _controller_connection(_controller_state([MediaCommand.PLAY]))
+    connection._handle_server_state(  # noqa: SLF001
+        ServerStatePayload(controller=_controller_state([MediaCommand.PAUSE]))
+    )
+
+    with pytest.raises(ValueError, match="'play' is not supported"):
+        await connection.send_group_command(MediaCommand.PLAY)
+
+    assert sent == []
+
+
+@pytest.mark.parametrize("controller", [None, "cleared"])
+async def test_send_group_command_rejects_without_controller_state(
+    controller: str | None,
+) -> None:
+    """Commands are rejected without sending until a controller state is received."""
+    connection, sent = await _controller_connection(None)
+    if controller == "cleared":
+        connection._handle_server_state(ServerStatePayload(controller=None))  # noqa: SLF001
+
+    with pytest.raises(ValueError, match="No controller state"):
+        await connection.send_group_command(MediaCommand.PLAY)
+
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("position_ms", "match"),
+    [
+        (None, "position_ms must be provided"),
+        (-1, "position_ms must be non-negative"),
+        (12_001, "position_ms must be at most seek_max_ms"),
+    ],
+)
+async def test_send_group_command_rejects_invalid_seek_position(
+    position_ms: int | None, match: str
+) -> None:
+    """A seek without a position or outside 0 to seek_max_ms is rejected without sending."""
+    connection, sent = await _controller_connection(
+        _controller_state([MediaCommand.SEEK], seek_max_ms=12_000)
+    )
+
+    with pytest.raises(ValueError, match=match):
+        await connection.send_group_command(MediaCommand.SEEK, position_ms=position_ms)
+
+    assert sent == []
+
+
+async def test_client_send_group_command_rejects_unlisted_command() -> None:
+    """The client-level send_group_command applies the same check."""
+    connection, sent = await _controller_connection(_controller_state([MediaCommand.PAUSE]))
+    client = connection._client  # noqa: SLF001
+    client._admitted_connection = connection  # noqa: SLF001
+
+    with pytest.raises(ValueError, match="'play' is not supported"):
+        await client.send_group_command(MediaCommand.PLAY)
+
+    assert sent == []
+
+
+def _position_connection(
+    metadata: SessionUpdateMetadata | None, *, synced: bool = True
+) -> tuple[SendspinConnection, ManualClock]:
+    """Return a connection whose server clock runs 5 s ahead, with `metadata` received."""
+    clock = ManualClock(now_us_value=1_000_000)
+    client = make_sdk_client(client_name="Test Client", roles=[Roles.METADATA], clock=clock)
+    connection = SendspinConnection(client)
+    if synced:
+        connection._time_filter.update(5_000_000, 1_000, 500_000)  # noqa: SLF001
+        connection._time_filter.update(5_000_000, 1_000, 1_000_000)  # noqa: SLF001
+    if metadata is not None:
+        connection._handle_server_state(ServerStatePayload(metadata=metadata))  # noqa: SLF001
+    client._admitted_connection = connection  # noqa: SLF001
+    return connection, clock
+
+
+def _progress_metadata(
+    track_progress: int,
+    *,
+    track_duration: int = 180_000,
+    playback_speed: int = 1000,
+    timestamp: int = 4_000_000,
+) -> SessionUpdateMetadata:
+    return SessionUpdateMetadata(
+        timestamp=timestamp,
+        progress=Progress(
+            track_progress=track_progress,
+            track_duration=track_duration,
+            playback_speed=playback_speed,
+        ),
+    )
+
+
+async def test_current_track_position_advances_with_server_clock() -> None:
+    """The position advances from the metadata timestamp at the playback speed."""
+    connection, clock = _position_connection(_progress_metadata(30_000))
+    client = connection._client  # noqa: SLF001
+
+    assert client.current_track_position() == 32_000
+    clock.advance_us(1_500_000)
+    assert client.current_track_position() == 33_500
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (_progress_metadata(30_000, playback_speed=1500), 33_000),
+        (_progress_metadata(30_000, playback_speed=0), 30_000),
+        (_progress_metadata(179_000), 180_000),
+        (_progress_metadata(179_000, track_duration=0), 181_000),
+        (_progress_metadata(1_000, timestamp=10_000_000), 0),
+        (_progress_metadata(1_000, track_duration=0, timestamp=10_000_000), 0),
+    ],
+    ids=["speed", "paused", "clamped-to-duration", "live", "clamped-to-start", "live-to-start"],
+)
+async def test_current_track_position_formula(
+    metadata: SessionUpdateMetadata, expected: int
+) -> None:
+    """The position follows the spec formula, clamped to 0 and a non-zero duration."""
+    connection, _ = _position_connection(metadata)
+
+    assert connection.current_track_position() == expected
+
+
+@pytest.mark.parametrize(
+    ("metadata", "synced"),
+    [
+        (None, True),
+        (SessionUpdateMetadata(timestamp=4_000_000, title="Song"), True),
+        (_progress_metadata(30_000), False),
+    ],
+    ids=["no-metadata", "no-progress", "unsynchronized"],
+)
+async def test_current_track_position_unknown(
+    metadata: SessionUpdateMetadata | None, *, synced: bool
+) -> None:
+    """The position is None without progress or before time sync converges."""
+    connection, _ = _position_connection(metadata, synced=synced)
+
+    assert connection._client.current_track_position() is None  # noqa: SLF001
+
+
+async def test_current_track_position_after_metadata_cleared() -> None:
+    """Clearing the metadata clears the position."""
+    connection, _ = _position_connection(_progress_metadata(30_000))
+    connection._handle_server_state(ServerStatePayload(metadata=None))  # noqa: SLF001
+
+    assert connection.current_track_position() is None
+
+
+async def test_current_track_position_without_connection() -> None:
+    """A client without a connection has no position."""
+    client = make_sdk_client(client_name="Test Client", roles=[Roles.METADATA])
+
+    assert client.current_track_position() is None
 
 
 async def _reporting_connection(

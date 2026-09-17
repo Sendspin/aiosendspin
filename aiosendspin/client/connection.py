@@ -1106,9 +1106,19 @@ class SendspinConnection:
         position_ms: int | None = None,
         offset_ms: int | None = None,
     ) -> None:
-        """Send a group command (playback control) to the server."""
+        """Send a group command (playback control) to the server.
+
+        Commands are checked against the latest controller state received from the server.
+        Raises ValueError if no controller state was received, if `command` is not in its
+        `supported_commands`, or if a `seek` targets a position outside 0 to `seek_max_ms`.
+        """
         if not self.connected:
             raise RuntimeError("Client is not connected")
+        controller = None if self._server_state is None else self._server_state.controller
+        if controller is None or isinstance(controller, UndefinedField):
+            raise ValueError("No controller state has been received from the server")
+        if command not in controller.supported_commands:
+            raise ValueError(f"Command '{command.value}' is not supported by the server")
         controller_payload = ControllerCommandPayload(
             command=command,
             volume=volume,
@@ -1116,6 +1126,15 @@ class SendspinConnection:
             position_ms=position_ms,
             offset_ms=offset_ms,
         )
+        if (
+            controller_payload.position_ms is not None
+            and controller.seek_max_ms is not None
+            and controller_payload.position_ms > controller.seek_max_ms
+        ):
+            raise ValueError(
+                f"position_ms must be at most seek_max_ms ({controller.seek_max_ms}), "
+                f"got {controller_payload.position_ms}"
+            )
         payload = ClientCommandPayload(controller=controller_payload)
         message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())
@@ -1861,6 +1880,29 @@ class SendspinConnection:
         """Convert a client timestamp to a server timestamp, with output delay removed."""
         adjusted_client_time = client_timestamp_us + self._output_delay_us
         return self._time_filter.compute_server_time(adjusted_client_time)
+
+    def current_track_position(self) -> int | None:
+        """Return the playback position in milliseconds as of now, or None when unknown.
+
+        The position is extrapolated from the progress in the latest metadata received,
+        including metadata whose timestamp is still in the future. Returns None without
+        progress or before time synchronization has converged.
+        """
+        metadata = None if self._server_state is None else self._server_state.metadata
+        if (
+            metadata is None
+            or isinstance(metadata, UndefinedField)
+            or metadata.progress is None
+            or not self._time_filter.is_synchronized
+        ):
+            return None
+        progress = metadata.progress
+        server_now_us = self._time_filter.compute_server_time(self.now_us())
+        elapsed_us = server_now_us - metadata.timestamp
+        position = progress.track_progress + elapsed_us * progress.playback_speed // 1_000_000
+        if progress.track_duration != 0:
+            return max(min(position, progress.track_duration), 0)
+        return max(position, 0)
 
     def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
         """Convert a capture timestamp to server time without playback delay."""
