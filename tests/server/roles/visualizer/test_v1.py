@@ -1799,6 +1799,25 @@ def test_repeated_stream_start_keeps_wire_cursor() -> None:
     assert _stream_start_count(client) == 2
 
 
+def test_periodic_frame_below_wire_cursor_is_dropped() -> None:
+    """After an in-stream stream/start advanced the cursor, older periodic frames are not sent."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+    client._server.clock.now_us.return_value = 3_000_000  # noqa: SLF001
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+
+    role.on_audio_chunk(_audio_chunk(2_500_000))
+    assert _sent_ts(client) == []
+
+    role.on_audio_chunk(_audio_chunk(3_000_000))
+    # loudness, f_peak and spectrum share one timestamp and all go out.
+    assert _sent_ts(client) == [3_025_000] * 3
+
+
 def test_stream_clear_and_new_stream_reset_wire_cursor() -> None:
     """After stream/clear, and on a new stream, timestamps may go below those already sent."""
     client = _make_beat_client_stub()

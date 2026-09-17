@@ -450,6 +450,10 @@ class VisualizerV1Role(Role):
         duration_us: int,
     ) -> None:
         """Reserve the wire ts and enqueue a periodic binary frame for sending."""
+        last = self._last_wire_emit_ts_us
+        # Strict `<`: the periodic types of one extractor frame share a timestamp.
+        if last is not None and ts_us < last:
+            return
         self._reserve_wire_ts(ts_us)
         self._client.send_binary(
             message,
