@@ -578,12 +578,15 @@ class SendspinClient:
         A pairing-store error propagates, and then no connection is closed.
         """
         store = self._pairing_store
-        config = await store.get_pairing_config()
-        await store.store_pairing_config(replace(config, unpaired_access_enabled=enabled))
-        connection = self._admitted_connection
-        if enabled or connection is None or not connection.relies_on_unpaired_access:
-            return
-        await connection.goodbye_and_disconnect(GoodbyeReason.PAIRING_REQUIRED)
+        # Admission re-checks the setting under this lock, so no connection is admitted
+        # between the write and the close.
+        async with self._admission_lock:
+            config = await store.get_pairing_config()
+            await store.store_pairing_config(replace(config, unpaired_access_enabled=enabled))
+            connection = self._admitted_connection
+            if enabled or connection is None:
+                return
+            await self._refuse_unpaired_access(connection)
 
     @property
     def implemented_pair_methods(self) -> frozenset[PairMethod]:
@@ -764,8 +767,10 @@ class SendspinClient:
         """Dial a server (client-initiated) and admit it, displacing any current connection.
 
         The user explicitly chose this server, so the new connection is admitted
-        unconditionally — an explicit switch. Returns once admitted; the reader and
-        time-sync loops, and any pairing attempt the server requests, then run in the background.
+        unconditionally — an explicit switch — unless it relies on unpaired access the
+        client no longer admits, which raises ``RuntimeError``. Returns once admitted; the
+        reader and time-sync loops, and any pairing attempt the server requests, then run in
+        the background.
         """
         if self._session is None:
             self._session = ClientSession()
@@ -783,11 +788,15 @@ class SendspinClient:
         # Hold the lock only for the admit decision, not for start()/pairing.
         try:
             async with self._admission_lock:
-                await self._admit_connection(connection)
+                refused = await self._refuse_unpaired_access(connection)
+                if not refused:
+                    await self._admit_connection(connection)
         except BaseException:
             # Bring-up already dropped it from _provisional_connections, so nothing else owns it.
             await connection.disconnect()
             raise
+        if refused:
+            raise RuntimeError("server activation rejected (pairing_required)")
         await connection.start()
 
     async def attach_websocket(
@@ -827,6 +836,8 @@ class SendspinClient:
                 await self._ensure_last_playback_loaded()
                 if not self._should_admit_connection(connection):
                     await self._reject_connection(connection)
+                    return
+                if await self._refuse_unpaired_access(connection):
                     return
                 await self._admit_connection(connection)
         except BaseException:
@@ -920,6 +931,18 @@ class SendspinClient:
         ):
             await self._pairing_store.set_last_playback_server_id(connection.server_id)
             self.last_playback_server_id = connection.server_id
+
+    async def _refuse_unpaired_access(self, connection: SendspinConnection) -> bool:
+        """Close ``connection`` if it relies on unpaired access the client no longer admits.
+
+        Returns whether it was closed, with ``client/goodbye`` reason ``pairing_required``.
+        """
+        if not connection.relies_on_unpaired_access:
+            return False
+        if (await self._pairing_store.get_pairing_config()).unpaired_access_enabled:
+            return False
+        await connection.goodbye_and_disconnect(GoodbyeReason.PAIRING_REQUIRED)
+        return True
 
     async def _reject_connection(self, connection: SendspinConnection) -> None:
         """Refuse an incoming connection that lost arbitration."""
