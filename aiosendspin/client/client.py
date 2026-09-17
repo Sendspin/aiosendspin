@@ -92,9 +92,10 @@ ColorCallback = Callable[[ServerStatePayload | None], None]
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
 
-# Callback invoked when audio streaming ends.
+# Callback invoked when streams end, by stream/end or by a server/activate removing their roles.
 # Receives list of roles to end, or None if all roles should be ended.
-# Output MUST stop and buffers MUST be cleared for those roles, also while unavailable.
+# Output MUST stop, buffers MUST be cleared and temporary output effects (e.g. ducking) MUST be
+# released for those roles, also while unavailable.
 StreamEndCallback = Callable[[list[str] | None], None]
 
 # Callback invoked when stream buffers should be cleared (e.g., seek operation).
@@ -1185,9 +1186,12 @@ class SendspinClient:
     def add_stream_end_listener(self, callback: StreamEndCallback) -> Callable[[], None]:
         """Add a listener for stream end events.
 
-        The callback receives the roles that ended, or ``None`` for all. For each, the
-        embedder MUST stop output and clear its buffers. Stream end keeps arriving while
-        the client reports unavailable and MUST be handled then too.
+        The callback receives the roles that ended, or ``None`` for all. It runs on
+        ``stream/end`` and when a ``server/activate`` removes the roles, including a
+        role replaced by another version and a role whose stream already ended. For each
+        role, the embedder MUST stop output, clear its buffers and release temporary
+        output effects it applied for that role, such as ducking. Stream end keeps
+        arriving while the client reports unavailable and MUST be handled then too.
 
         Returns:
             A function that removes this listener when called.
