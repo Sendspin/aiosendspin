@@ -314,6 +314,9 @@ class ClientHelloPayload(SendspinModel):
     Not part of the wire schema (omitted when None)."""
     source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
     """Source support configuration."""
+    missing_support_roles: list[str] | None = None
+    """Listed role versions whose required support object is missing, recorded for the
+    server to flag and never activate. Not part of the wire schema (omitted when None)."""
     # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
     legacy_pair_methods_list_used: bool | None = None
     """Whether supported_pair_methods arrived as the superseded list, recorded for the
@@ -353,18 +356,15 @@ class ClientHelloPayload(SendspinModel):
         return normalized
 
     def __post_init__(self) -> None:
-        """Enforce that support configs match supported roles."""
-        # Validate player role and support configuration
+        """Match support configs to supported roles, recording each mismatch."""
         # Require support objects only for the exact role version we parse (e.g. "player@v1").
         # Clients may advertise newer versions (e.g. "player@v2") which this server may not
         # implement. Those must not trigger v1 support requirements.
         unlisted: list[str] = []
+        missing: list[str] = []
         player_role_supported = Roles.PLAYER.value in self.supported_roles
         if player_role_supported and self.player_support is None:
-            raise ValueError(
-                "player@v1_support (player_support alias) must be provided when "
-                "'player@v1' is in supported_roles"
-            )
+            missing.append(Roles.PLAYER.value)
         if not player_role_supported:
             if self.player_support is not None:
                 unlisted.append(Roles.PLAYER.value)
@@ -376,25 +376,17 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append(Roles.ARTWORK.value)
             self.artwork_support = None
 
-        # Validate visualizer role and support configuration.
         visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
         if visualizer_role_supported and self.visualizer_support is None:
-            raise ValueError(
-                "visualizer@v1_support (visualizer_support alias) must be "
-                "provided when 'visualizer@v1' is in supported_roles"
-            )
+            missing.append(Roles.VISUALIZER.value)
         if not visualizer_role_supported:
             if self.visualizer_support is not None:
                 unlisted.append(Roles.VISUALIZER.value)
             self.visualizer_support = None
 
-        # Validate legacy `visualizer@_draft_r1` support configuration.
         visualizer_draft_supported = "visualizer@_draft_r1" in self.supported_roles
         if visualizer_draft_supported and self.visualizer_draft_r1_support is None:
-            raise ValueError(
-                "visualizer@_draft_r1_support must be provided when "
-                "'visualizer@_draft_r1' is in supported_roles"
-            )
+            missing.append("visualizer@_draft_r1")
         if not visualizer_draft_supported:
             if self.visualizer_draft_r1_support is not None:
                 unlisted.append("visualizer@_draft_r1")
@@ -402,17 +394,21 @@ class ClientHelloPayload(SendspinModel):
 
         source_role_supported = Roles.SOURCE.value in self.supported_roles
         if source_role_supported and self.source_support is None:
-            raise ValueError(
-                "source@v1_support (source_support alias) must be provided when "
-                "'source@v1' is in supported_roles"
-            )
+            missing.append(Roles.SOURCE.value)
         if not source_role_supported:
             if self.source_support is not None:
                 unlisted.append(Roles.SOURCE.value)
             self.source_support = None
 
-        # Overwrite so a client cannot spoof the record via the wire.
+        # Overwrite so a client cannot spoof the records via the wire.
         self.unlisted_support_roles = unlisted or None
+        self.missing_support_roles = missing or None
+
+    @property
+    def activatable_roles(self) -> list[str]:
+        """Listed role versions, in client order, less those missing their support object."""
+        missing = self.missing_support_roles or ()
+        return [role for role in self.supported_roles if role not in missing]
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

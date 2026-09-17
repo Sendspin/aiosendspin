@@ -586,6 +586,45 @@ class TestEncryptedActivities:
         assert "client-1" not in strict_server._clients  # noqa: SLF001
 
     @staticmethod
+    def _hello_missing_player_support() -> str:
+        return orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "client-1",
+                    "supported_roles": ["player@v1", "controller@v1"],
+                },
+            }
+        ).decode()
+
+    @pytest.mark.asyncio
+    async def test_hello_missing_support_object_is_flagged_and_role_skipped(
+        self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A role listed without its support object is flagged and not activated."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._hello_missing_player_support())
+
+        with caplog.at_level("WARNING"):
+            assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert "without their required support object, not activating: player@v1" in caplog.text
+        assert conn._negotiated_roles == ["controller@v1"]  # noqa: SLF001
+        assert "client-1" in mock_server._clients  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_strict_server_rejects_hello_missing_support_object(self) -> None:
+        """Strict mode rejects a hello listing a role without its support object."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
+        self._prime_encrypted_hello(conn, self._hello_missing_player_support())
+
+        assert await conn._exchange_hellos() is False  # noqa: SLF001
+        assert "client-1" not in strict_server._clients  # noqa: SLF001
+
+    @staticmethod
     def _artwork_hello(*, support: bool, player: bool = False) -> str:
         payload: dict[str, object] = {"name": "client-1", "supported_roles": ["artwork@v1"]}
         if support:
@@ -1284,10 +1323,10 @@ class TestCustomRoleSupportParsing:
             ("visualizer@_custom_version", "visualizer@_custom_version_support"),
         ],
     )
-    def test_deserialize_client_hello_requires_custom_support_key(
+    def test_deserialize_client_hello_records_missing_custom_support_key(
         self, role_id: str, missing_support_key: str
     ) -> None:
-        """Custom role IDs require their matching custom support keys."""
+        """A custom role ID without its matching support key is recorded as missing it."""
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -1300,8 +1339,10 @@ class TestCustomRoleSupportParsing:
             }
         ).decode()
 
-        with pytest.raises(ValueError, match=missing_support_key):
-            SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.missing_support_roles == [missing_support_key.removesuffix("_support")]
+        assert msg.payload.activatable_roles == []
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def test_deserialize_artwork_hello_accepts_pre_rename_dimensions(self) -> None:
@@ -1572,10 +1613,10 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.player_support is not None
 
-    def test_family_order_prefers_registered_v2_and_requires_matching_support_key(
+    def test_family_falls_back_when_preferred_version_lacks_support(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When v2 is registered and listed first, parser requires v2 support key."""
+        """A registered v2 listed first without its support key falls back to v1."""
         monkeypatch.setitem(ROLE_FACTORIES, "player@v2", lambda _client: None)  # type: ignore[arg-type]
 
         raw = orjson.dumps(
@@ -1602,8 +1643,39 @@ class TestCustomRoleSupportParsing:
             }
         ).decode()
 
-        with pytest.raises(ValueError, match="player@v2_support"):
-            SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.missing_support_roles == ["player@v2"]
+        assert msg.payload.player_support is not None
+        assert negotiate_roles(msg.payload.activatable_roles) == ["player@v1"]
+
+    def test_family_falls_back_to_custom_version_with_support(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """player@v1 without support falls back to a registered custom version that has it."""
+        monkeypatch.setitem(ROLE_FACTORIES, "player@_custom", lambda _client: None)  # type: ignore[arg-type]
+
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "Client",
+                    "supported_roles": ["player@v1", "player@_custom"],
+                    "player@_custom_support": {
+                        "supported_formats": [
+                            {"codec": "pcm", "sample_rate": 48000, "bit_depth": 16, "channels": 2}
+                        ],
+                        "buffer_capacity": 100_000,
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.missing_support_roles == ["player@v1"]
+        assert msg.payload.player_support is not None
+        assert negotiate_roles(msg.payload.activatable_roles) == ["player@_custom"]
 
     def test_legacy_family_support_key_used_for_custom_role(self) -> None:
         """A client that sends the legacy <family>_support key still binds for custom roles."""

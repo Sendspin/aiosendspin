@@ -55,10 +55,11 @@ def test_hello_serializes_support_under_versioned_alias() -> None:
     assert "source@v1_support" in hello.to_dict()
 
 
-def test_hello_source_role_requires_support_object() -> None:
-    """Listing source@v1 requires its versioned support object."""
-    with pytest.raises(ValueError, match="source@v1_support"):
-        ClientHelloPayload(name="x", supported_roles=["source@v1"])
+def test_hello_source_role_without_support_object_is_recorded() -> None:
+    """Listing source@v1 without its versioned support object records it as missing."""
+    hello = ClientHelloPayload(name="x", supported_roles=["source@v1"])
+    assert hello.missing_support_roles == ["source@v1"]
+    assert hello.activatable_roles == []
 
 
 def test_hello_drops_source_support_without_role() -> None:
