@@ -6,6 +6,8 @@ import asyncio
 import struct
 from unittest.mock import MagicMock
 
+import pytest
+
 from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
@@ -647,6 +649,84 @@ def test_join_ordering_beats_before_stream_start_drains_after_start() -> None:
     role.on_audio_chunk(_audio_chunk(1_000_000))
     beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
     assert beat_ts == [500_000]
+
+
+def _beat_only_role() -> tuple[VisualizerV1Role, MagicMock]:
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["beat"], "rate_max": 30}
+    return VisualizerV1Role(client=client), client
+
+
+def _assert_beats_only_inside_streams(client: MagicMock) -> None:
+    """Assert every beat binary was sent between a stream/start and the next stream/end."""
+    in_stream = False
+    for name, args, kwargs in client.method_calls:
+        if name == "send_role_message":
+            if isinstance(args[1], StreamStartMessage):
+                in_stream = True
+            elif isinstance(args[1], StreamEndMessage):
+                in_stream = False
+        elif (
+            name == "send_binary"
+            and kwargs["message_type"] == BinaryMessageType.VISUALIZATION_BEAT.value
+        ):
+            assert in_stream, f"beat {kwargs['timestamp_us']} sent outside a visualizer stream"
+
+
+def _deliver_state(role: VisualizerV1Role) -> None:
+    state = VisualizerStatePayload.from_dict(role._client.visualizer_state)  # noqa: SLF001
+    role.on_client_state(ClientStatePayload(visualizer=state))
+
+
+async def test_beat_only_sends_no_beat_before_state_object() -> None:
+    """Beats and audio before the first client/state send no beat."""
+    role, client = _beat_only_role()
+    role.on_connect()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    _assert_beats_only_inside_streams(client)
+    assert _beat_calls(client) == []
+
+
+async def test_beat_only_sends_no_beat_before_stream_start() -> None:
+    """Beats and audio after client/state but before the stream starts wait for stream/start."""
+    role, client = _beat_only_role()
+    role.on_connect()
+    _deliver_state(role)
+    role.append_beats([BeatTiming(500_000)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+    assert _beat_calls(client) == []
+
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    _assert_beats_only_inside_streams(client)
+    assert [c.kwargs["timestamp_us"] for c in _beat_calls(client)] == [500_000]
+
+
+@pytest.mark.parametrize("drain", ["audio_chunk", "release_scheduler"])
+async def test_beat_only_sends_no_beat_between_streams(drain: str) -> None:
+    """A beat queued after stream/end waits for the next stream/start, whatever drains it."""
+    role, client = _beat_only_role()
+    _connect(role)
+    role.on_stream_start()
+    role.on_stream_end()
+    role.append_beats([BeatTiming(1_500_000)])
+
+    if drain == "audio_chunk":
+        role.on_audio_chunk(_audio_chunk(2_000_000))
+    else:
+        role._run_release_scheduler()  # noqa: SLF001
+    assert _beat_calls(client) == []
+
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    _assert_beats_only_inside_streams(client)
+    assert [c.kwargs["timestamp_us"] for c in _beat_calls(client)] == [1_500_000]
+    role._cancel_release_timer()  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------
@@ -1634,6 +1714,129 @@ async def test_track_change_keeps_parked_periodic_frames() -> None:
     role._run_release_scheduler()  # noqa: SLF001
     assert _periodic_calls(client), "parked frame should release after the track change"
     role._cancel_release_timer()  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Wire cursor across in-stream stream/start
+# ---------------------------------------------------------------------------
+
+
+def _sent_ts(client: MagicMock) -> list[int]:
+    return [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
+
+
+def _assert_no_regression(client: MagicMock, sent_before: int, periodic_before: int) -> None:
+    sent = _sent_ts(client)
+    assert len(_periodic_calls(client)) > periodic_before, "the new config must take effect"
+    assert min(sent[sent_before:]) >= max(sent[:sent_before]), f"wire regressed: {sent}"
+
+
+async def test_state_change_mid_stream_keeps_wire_cursor() -> None:
+    """A client/state change mid-stream never sends below the highest timestamp already sent."""
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["loudness"], "rate_max": 60}
+    group_role = VisualizerGroupRole(client.group)
+    client.group.group_role.return_value = group_role
+    client.group._server.clock.now_us.return_value = 0  # noqa: SLF001
+    group_role.append_beat_schedule([BeatTiming(1_000_000), BeatTiming(2_100_000)])
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+    sent_before = len(client.send_binary.call_args_list)
+    periodic_before = len(_periodic_calls(client))
+
+    # Requesting beats rejoins the group, which replays beats already behind the cursor.
+    role.on_client_state(_state(types=["loudness", "beat"], rate_max=30))
+    for timestamp_us in range(2_025_000, 2_125_000, 25_000):
+        role.on_audio_chunk(_audio_chunk(timestamp_us))
+
+    _assert_no_regression(client, sent_before, periodic_before)
+    assert 2_100_000 in [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+async def test_pitch_toggle_mid_stream_keeps_wire_cursor() -> None:
+    """A pitch toggle mid-stream never sends below the highest timestamp already sent."""
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["loudness", "pitch", "beat"], "rate_max": 60}
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000)])
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+    sent_before = len(client.send_binary.call_args_list)
+    periodic_before = len(_periodic_calls(client))
+
+    # A re-pushed schedule starts behind the cursor.
+    role.append_beats([BeatTiming(1_500_000), BeatTiming(2_040_000)])
+    client._server.visualizer_pitch_enabled = False  # noqa: SLF001
+    role.refresh_pitch_setting()
+    role.on_audio_chunk(_audio_chunk(2_025_000))
+
+    _assert_no_regression(client, sent_before, periodic_before)
+    assert 2_040_000 in [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    role._cancel_release_timer()  # noqa: SLF001
+
+
+def test_repeated_stream_start_keeps_wire_cursor() -> None:
+    """A repeated on_stream_start within an announced stream never lowers the cursor."""
+    client = _make_beat_client_stub()
+    # The playhead sits below every beat, so only the cursor can drop the stale one.
+    client._server.clock.now_us.return_value = 0  # noqa: SLF001
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(2_000_000)])
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_000_000), BeatTiming(2_500_000)])
+    role.on_audio_chunk(_audio_chunk(2_500_000))
+
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert beat_ts == [2_000_000, 2_500_000]
+    assert _stream_start_count(client) == 2
+
+
+def test_periodic_frame_below_wire_cursor_is_dropped() -> None:
+    """After an in-stream stream/start advanced the cursor, older periodic frames are not sent."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+    client._server.clock.now_us.return_value = 3_000_000  # noqa: SLF001
+    role.on_stream_start()
+    client.send_binary.reset_mock()
+
+    role.on_audio_chunk(_audio_chunk(2_500_000))
+    assert _sent_ts(client) == []
+
+    role.on_audio_chunk(_audio_chunk(3_000_000))
+    # loudness, f_peak and spectrum share one timestamp and all go out.
+    assert _sent_ts(client) == [3_025_000] * 3
+
+
+def test_stream_clear_and_new_stream_reset_wire_cursor() -> None:
+    """After stream/clear, and on a new stream, timestamps may go below those already sent."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(2_000_000)])
+    role.on_audio_chunk(_audio_chunk(2_000_000))
+
+    role.on_stream_clear()
+    role.append_beats([BeatTiming(1_000_000)])
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+    role.on_stream_end()
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000)])
+    role.on_audio_chunk(_audio_chunk(500_000))
+
+    beat_ts = [c.kwargs["timestamp_us"] for c in _beat_calls(client)]
+    assert beat_ts == [2_000_000, 1_000_000, 500_000]
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>

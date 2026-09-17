@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from aiosendspin.client.connection import SendspinConnection
+from aiosendspin.clock import ManualClock
 from aiosendspin.models.types import BinaryMessageType, Roles
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSpectrum,
@@ -172,12 +175,18 @@ def test_parse_pitch_rejects_wrong_length() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _connection_with_visualizer_callback() -> tuple[SendspinConnection, list[VisualizerFrame]]:
+_NOW_US = 10_000_000
+
+
+def _connection_with_visualizer_callback(
+    *, synced: bool = False
+) -> tuple[SendspinConnection, list[VisualizerFrame]]:
     client = make_sdk_client(
         client_name="x",
         roles=[Roles.VISUALIZER],
         visualizer_support=ClientHelloVisualizerSupport(buffer_capacity=65536),
         visualizer_state=VisualizerStatePayload(types=["loudness", "beat"], rate_max=30),
+        clock=ManualClock(now_us_value=_NOW_US),
     )
     received: list[VisualizerFrame] = []
 
@@ -185,7 +194,23 @@ def _connection_with_visualizer_callback() -> tuple[SendspinConnection, list[Vis
         received.extend(frames)
 
     client.add_visualizer_listener(_cb)
-    return SendspinConnection(client), received
+    connection = SendspinConnection(client)
+    connection._current_visualizer_config = _basic_config()  # noqa: SLF001
+    if synced:
+        # Server and client clocks agree.
+        time_filter = MagicMock()
+        time_filter.count = 2
+        time_filter.compute_client_time.side_effect = lambda server_us: server_us
+        connection._time_filter = time_filter  # noqa: SLF001
+    return connection, received
+
+
+def _loudness_body(timestamp_us: int) -> bytes:
+    return struct.pack(">q", timestamp_us) + struct.pack(">H", 1)
+
+
+def _beat_body(timestamp_us: int) -> bytes:
+    return struct.pack(">q", timestamp_us) + bytes([0])
 
 
 @pytest.mark.asyncio
@@ -224,6 +249,74 @@ async def test_handle_beat_rejects_empty_payload() -> None:
     connection, received = _connection_with_visualizer_callback()
     connection._handle_visualization_beat(b"")  # noqa: SLF001
     assert received == []
+
+
+# ---------------------------------------------------------------------------
+# Late data
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_past_frame_and_beat_are_dropped() -> None:
+    """A frame or beat whose timestamp is already past on the local clock is not delivered."""
+    connection, received = _connection_with_visualizer_callback(synced=True)
+
+    connection._handle_visualization_frame(  # noqa: SLF001
+        BinaryMessageType.VISUALIZATION_LOUDNESS, _loudness_body(_NOW_US - 1)
+    )
+    connection._handle_visualization_beat(_beat_body(_NOW_US - 1))  # noqa: SLF001
+
+    assert received == []
+
+
+@pytest.mark.asyncio
+async def test_future_frame_and_beat_are_delivered() -> None:
+    """A frame or beat still ahead of the local clock is delivered."""
+    connection, received = _connection_with_visualizer_callback(synced=True)
+
+    connection._handle_visualization_frame(  # noqa: SLF001
+        BinaryMessageType.VISUALIZATION_LOUDNESS, _loudness_body(_NOW_US + 1)
+    )
+    connection._handle_visualization_beat(_beat_body(_NOW_US))  # noqa: SLF001
+
+    assert [frame.timestamp_us for frame in received] == [_NOW_US + 1, _NOW_US]
+
+
+@pytest.mark.asyncio
+async def test_frames_are_delivered_before_time_sync() -> None:
+    """Without a time-sync measurement, lateness is not judged and data is delivered."""
+    connection, received = _connection_with_visualizer_callback()
+
+    connection._handle_visualization_frame(  # noqa: SLF001
+        BinaryMessageType.VISUALIZATION_LOUDNESS, _loudness_body(0)
+    )
+    connection._handle_visualization_beat(_beat_body(0))  # noqa: SLF001
+
+    assert [frame.timestamp_us for frame in received] == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_client_discards_frames_and_beats() -> None:
+    """While unavailable, frames and beats are discarded without closing the connection."""
+    connection, received = _connection_with_visualizer_callback(synced=True)
+    connection.disconnect = AsyncMock()  # type: ignore[method-assign]
+    connection._reported_available = False  # noqa: SLF001
+
+    connection._handle_visualization_frame(  # noqa: SLF001
+        BinaryMessageType.VISUALIZATION_LOUDNESS, _loudness_body(_NOW_US + 1)
+    )
+    connection._handle_visualization_beat(_beat_body(_NOW_US + 1))  # noqa: SLF001
+    assert received == []
+
+    connection._reported_available = True  # noqa: SLF001
+    connection._handle_visualization_frame(  # noqa: SLF001
+        BinaryMessageType.VISUALIZATION_LOUDNESS, _loudness_body(_NOW_US + 2)
+    )
+    connection._handle_visualization_beat(_beat_body(_NOW_US + 2))  # noqa: SLF001
+
+    assert [frame.timestamp_us for frame in received] == [_NOW_US + 2, _NOW_US + 2]
+    await asyncio.sleep(0)
+    connection.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

@@ -1763,7 +1763,7 @@ class SendspinConnection:
 
     def _handle_visualization_frame(self, message_type: BinaryMessageType, payload: bytes) -> None:
         """Parse a single-type visualization binary and notify callbacks."""
-        if self._current_visualizer_config is None:
+        if self._current_visualizer_config is None or not self._reported_available:
             return
         try:
             frame = self._parse_visualization_frame(
@@ -1772,7 +1772,7 @@ class SendspinConnection:
         except Exception:
             logger.exception("Failed to parse visualization frame")
             return
-        if frame is not None:
+        if frame is not None and not self._is_visualization_late(frame.timestamp_us):
             self._client.notify_visualizer_callbacks([frame])
 
     @staticmethod
@@ -1820,16 +1820,25 @@ class SendspinConnection:
 
     def _handle_visualization_beat(self, payload: bytes) -> None:
         """Dispatch a `beat` binary (`[ts:8][flags:1]`) as a timestamp + is_downbeat frame."""
-        if len(payload) != 9:
+        if len(payload) != 9 or not self._reported_available:
             return
         try:
             (ts,) = struct.unpack_from(">q", payload, 0)
         except Exception:
             logger.exception("Failed to parse beat data")
             return
+        if self._is_visualization_late(ts):
+            return
         is_downbeat = bool(payload[8] & 0b0000_0001)
         self._client.notify_visualizer_callbacks(
             [VisualizerFrame(timestamp_us=ts, is_downbeat=is_downbeat)]
+        )
+
+    def _is_visualization_late(self, timestamp_us: int) -> bool:
+        """Return whether visualization data is already past on the local clock."""
+        return (
+            self._time_filter.count > 0
+            and self._time_filter.compute_client_time(timestamp_us) < self.now_us()
         )
 
     def compute_play_time(self, server_timestamp_us: int) -> int:

@@ -298,9 +298,11 @@ class VisualizerV1Role(Role):
         # `on_stream_start` (mid-stream join replay) are reflected.
         self._stream_config = self._build_stream_config()
         self.reset_binary_timing()
-        # Prime the wire-ts cursor to the current playhead so a stale
-        # replayed beat can't poison the cursor backward into the past.
-        self._last_wire_emit_ts_us = self._client._server.clock.now_us()  # noqa: SLF001
+        # Advance the wire-ts cursor to the current playhead so a stale
+        # replayed beat can't poison the cursor backward into the past. It only
+        # moves forward: a restart within an announced stream must not let
+        # timestamps decrease.
+        self._reserve_wire_ts(self._client._server.clock.now_us())  # noqa: SLF001
         # Arm the warmup holdback if beats are wanted but none have landed yet.
         self._cancel_release_timer()
         self._pending_frames.clear()
@@ -448,6 +450,10 @@ class VisualizerV1Role(Role):
         duration_us: int,
     ) -> None:
         """Reserve the wire ts and enqueue a periodic binary frame for sending."""
+        last = self._last_wire_emit_ts_us
+        # Strict `<`: the periodic types of one extractor frame share a timestamp.
+        if last is not None and ts_us < last:
+            return
         self._reserve_wire_ts(ts_us)
         self._client.send_binary(
             message,
@@ -476,8 +482,8 @@ class VisualizerV1Role(Role):
         track change keeps streaming the same continuous audio, so parked frames
         are still valid and must keep flowing, and a late beat landing below the
         cursor is dropped by the `<=` guard rather than emitted out of order.
-        Genuine resets (`on_stream_clear` for a seek, `on_stream_request_format`)
-        drop the parked frames and reset the cursor themselves.
+        `on_stream_clear` (a seek) drops the parked frames and resets the cursor
+        itself; a stream config change drops the parked frames and keeps the cursor.
         """
         self._holdback_active = self._holdback_should_be_active()
         self._arm_release_timer()
@@ -590,9 +596,14 @@ class VisualizerV1Role(Role):
 
         While the near-playhead cap is active, beats drain only up to the cap
         cutoff, so a far-ahead audio chunk cannot push the cursor past beats a
-        later mid-stream schedule will need to sit at.
+        later mid-stream schedule will need to sit at. Outside an announced
+        stream, beats stay queued.
         """
-        if self._stream_config is None or "beat" not in self._stream_config.types:
+        if (
+            not self._stream_started
+            or self._stream_config is None
+            or "beat" not in self._stream_config.types
+        ):
             return
         if self._holdback_active:
             max_ts_us = min(max_ts_us, self._warmup_cutoff_us())
@@ -673,6 +684,7 @@ class VisualizerV1Role(Role):
         self._stream_started = False
         self._pending_beats.clear()
         self._has_beats_landed = False
+        self._last_wire_emit_ts_us = None
         self._cancel_release_timer()
         self._pending_frames.clear()
         self._holdback_active = False
@@ -802,9 +814,9 @@ class VisualizerV1Role(Role):
         self._cancel_release_timer()
         self._pending_frames.clear()
         self._holdback_active = self._holdback_should_be_active()
-        # rate_max / types change rebuilds the extractor (new hop). Drop
-        # the wire-ts guard so the new config takes effect immediately.
-        self._last_wire_emit_ts_us = None
+        # rate_max / types change rebuilds the extractor (new hop). The wire-ts
+        # cursor is kept: the stream continues, so timestamps must not decrease.
+        # The new extractor's first frame lands at the next chunk's end.
         self._rebuild_extractor()
         self._ensure_buffer_tracker()
         self._send_stream_start()
@@ -898,9 +910,8 @@ class VisualizerV1Role(Role):
         if new_config.types == self._stream_config.types:
             return
         self._stream_config = new_config
-        # Types changed (pitch added/removed) — let the new config take effect
-        # immediately rather than being blocked by the prior wire-ts cursor.
-        self._last_wire_emit_ts_us = None
+        # Types changed (pitch added/removed). The wire-ts cursor is kept so an
+        # in-stream `stream/start` never lets timestamps decrease.
         self._rebuild_extractor()
         if self._stream_started:
             self._send_stream_start()
