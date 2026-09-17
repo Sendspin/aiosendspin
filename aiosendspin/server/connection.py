@@ -2301,6 +2301,10 @@ class SendspinConnection:
         )
         if is_initial:
             self._flag_initial_state_deviations(payload)
+        elif payload.available is None:
+            # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+            # A client/state without `available` leaves the availability unchanged.
+            self._flag_noncompliance("client/state omitted the required 'available' field")
         if payload.legacy_state_used:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
         self._flag_inactive_role_payloads("client/state", self._role_state_objects(payload))

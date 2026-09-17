@@ -116,6 +116,58 @@ async def test_state_before_the_initial_gate_opens_is_not_initial() -> None:
     assert conn._initial_state_received is False  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_non_initial_state_without_available_is_flagged_and_applied() -> None:
+    """A lenient server flags a later client/state without `available` and still applies it."""
+    conn, client = _conn_with_client()
+    role = _role("player")
+    role.client_state_deviations.return_value = []
+    client.active_roles = [role]
+    client.available = True
+    client.handle_availability_change = AsyncMock()
+    conn._initial_state_received = True  # noqa: SLF001
+    payload = ClientStatePayload(player=PlayerStatePayload(volume=10))
+
+    await conn._handle_client_state(payload)  # noqa: SLF001
+
+    client.flag_noncompliance.assert_called_once_with(
+        "client/state omitted the required 'available' field"
+    )
+    client.handle_availability_change.assert_not_called()
+    role.on_client_state.assert_called_once_with(payload)
+
+
+# DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_strict_rejects_non_initial_state_without_available() -> None:
+    """A strict server rejects a later client/state without `available` before applying it."""
+    conn, client = _conn_with_client()
+    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
+    role = _role("player")
+    client.active_roles = [role]
+    conn._initial_state_received = True  # noqa: SLF001
+
+    with pytest.raises(ClientComplianceError):
+        await conn._handle_client_state(  # noqa: SLF001
+            ClientStatePayload(player=PlayerStatePayload(volume=10))
+        )
+    role.on_client_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_non_initial_state_with_available_is_not_flagged() -> None:
+    """A later client/state carrying `available` passes the check."""
+    conn, client = _conn_with_client()
+    client.active_roles = []
+    client.available = True
+    conn._initial_state_received = True  # noqa: SLF001
+
+    await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
+
+    client.flag_noncompliance.assert_not_called()
+
+
 def _role_mock(deviations: list[str]) -> MagicMock:
     role = MagicMock()
     role.initial_state_deviations.return_value = deviations
@@ -243,9 +295,10 @@ async def test_client_state_player_object_for_active_role_is_not_flagged() -> No
     conn, client = _conn_with_client()
     client.active_roles = [_role("player")]
     conn._initial_state_received = True  # noqa: SLF001
-    client.available = None
+    client.available = True
     await conn._handle_message(  # noqa: SLF001
-        ClientStateMessage(payload=ClientStatePayload(player=PlayerStatePayload())), timestamp_us=0
+        ClientStateMessage(payload=ClientStatePayload(available=True, player=PlayerStatePayload())),
+        timestamp_us=0,
     )
     client.flag_noncompliance.assert_not_called()
 
@@ -374,9 +427,11 @@ async def test_client_state_visualizer_object_for_inactive_role_is_flagged() -> 
     conn, client = _conn_with_client()
     client.active_roles = [_role("controller")]
     conn._initial_state_received = True  # noqa: SLF001
-    client.available = None
+    client.available = True
     await conn._handle_message(  # noqa: SLF001
-        ClientStateMessage(payload=ClientStatePayload(visualizer=_VISUALIZER_STATE)),
+        ClientStateMessage(
+            payload=ClientStatePayload(available=True, visualizer=_VISUALIZER_STATE)
+        ),
         timestamp_us=0,
     )
     flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
@@ -385,7 +440,7 @@ async def test_client_state_visualizer_object_for_inactive_role_is_flagged() -> 
 
 def _visualizer_client(conn: SendspinConnection, client: MagicMock) -> VisualizerV1Role:
     client.info.visualizer_support = ClientHelloVisualizerSupport(buffer_capacity=65_536)
-    client.available = None
+    client.available = True
     role = VisualizerV1Role(client=client)
     role.on_connect()
     client.active_roles = [role]
@@ -417,7 +472,9 @@ async def test_lenient_keeps_client_but_omits_spectrum_without_config() -> None:
     role = _visualizer_client(conn, client)
 
     await conn._handle_message(  # noqa: SLF001
-        ClientStateMessage(payload=ClientStatePayload(visualizer=_VISUALIZER_STATE)),
+        ClientStateMessage(
+            payload=ClientStatePayload(available=True, visualizer=_VISUALIZER_STATE)
+        ),
         timestamp_us=0,
     )
 

@@ -92,7 +92,7 @@ def _make_player(
 
 
 def _state(fmt: SupportedAudioFormat | None) -> ClientStatePayload:
-    return ClientStatePayload(player=PlayerStatePayload(volume=50, format=fmt))
+    return ClientStatePayload(available=True, player=PlayerStatePayload(volume=50, format=fmt))
 
 
 def _transformer(role: PlayerV1Role) -> object:
