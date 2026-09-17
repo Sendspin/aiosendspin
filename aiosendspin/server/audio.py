@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections import deque
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -16,30 +15,33 @@ from aiosendspin.audio.format import (
     _validate_pcm_buffer_length,
 )
 
-logger = logging.getLogger(__name__)
-
 if TYPE_CHECKING:
     from aiosendspin.clock import Clock
+
+# Wait before rechecking capacity held by a chunk whose transmission has not finished.
+TRANSMISSION_RECHECK_US = 1_000
 
 
 class BufferedChunk(NamedTuple):
     """Buffered chunk metadata tracked by BufferTracker for backpressure control."""
 
     end_time_us: int
-    """Absolute timestamp when these bytes should be fully consumed."""
+    """Timestamp plus duration, before the tracker's output delay is applied."""
     byte_count: int
-    """Compressed byte count occupying the device buffer."""
+    """Bytes the chunk occupies in the device buffer."""
     duration_us: int
     """Duration of audio in microseconds (independent of compression)."""
 
 
 class BufferTracker:
     """
-    Track buffered compressed audio for a client and apply backpressure when needed.
+    Track the bytes a client holds in its buffer and apply backpressure when needed.
 
-    This class monitors the amount of compressed audio data buffered on a client device
-    and ensures the server doesn't exceed the client's buffer capacity by applying
-    backpressure when necessary.
+    A registered chunk counts in full while its transmission is unfinished or its
+    completion time (end time minus ``output_delay_us``) is in the future. Changing
+    ``output_delay_us`` recalculates the completion time of every chunk registered
+    since the last reset. Callers must not send a chunk larger than
+    ``capacity_bytes``: it can never fit.
     """
 
     def __init__(
@@ -65,27 +67,56 @@ class BufferTracker:
         self.capacity_bytes = capacity_bytes
         self.max_duration_us = max_duration_us
         self.buffered_chunks: deque[BufferedChunk] = deque()
+        """Chunks that currently count, in registration order."""
         self.buffered_bytes = 0
         self.buffered_duration_us = 0
+        # Completed chunks that a lower output delay could make count again.
+        self._completed_chunks: deque[BufferedChunk] = deque()
+        self._output_delay_us = 0
+        self._transmitting: BufferedChunk | None = None
+        self.oversize_logged = False
+        """Whether a chunk larger than the capacity was reported since the last reset."""
+
+    @property
+    def output_delay_us(self) -> int:
+        """Output delay subtracted from each chunk's end time to get its completion time."""
+        return self._output_delay_us
+
+    @output_delay_us.setter
+    def output_delay_us(self, value: int) -> None:
+        if value == self._output_delay_us:
+            return
+        self._output_delay_us = value
+        # Recount every chunk since the last reset, then drop those complete under the new delay.
+        chunks = [*self._completed_chunks, *self.buffered_chunks]
+        self._completed_chunks.clear()
+        self.buffered_chunks = deque(chunks)
+        self.buffered_bytes = sum(chunk.byte_count for chunk in chunks)
+        self.buffered_duration_us = sum(chunk.duration_us for chunk in chunks)
+        self.prune_consumed()
 
     def prune_consumed(self, now_us: int | None = None) -> int:
-        """Drop finished chunks and return the timestamp used for the calculation."""
+        """Stop counting completed chunks and return the timestamp used for the calculation."""
         if now_us is None:
             now_us = self._clock.now_us()
-        while self.buffered_chunks and self.buffered_chunks[0].end_time_us <= now_us:
+        while self.buffered_chunks and self._completion_us(self.buffered_chunks[0]) <= now_us:
+            if self.buffered_chunks[0] is self._transmitting:
+                break
             chunk = self.buffered_chunks.popleft()
             self.buffered_bytes -= chunk.byte_count
             self.buffered_duration_us -= chunk.duration_us
-        self.buffered_bytes = max(self.buffered_bytes, 0)
-        self.buffered_duration_us = max(self.buffered_duration_us, 0)
+            self._completed_chunks.append(chunk)
+        # A chunk whose end time has passed stays complete under any non-negative delay.
+        while self._completed_chunks and self._completed_chunks[0].end_time_us <= now_us:
+            self._completed_chunks.popleft()
         return now_us
 
     def buffered_horizon_us(self, now_us: int | None = None) -> int:
-        """Return buffer horizon from now until the furthest scheduled end time."""
+        """Return buffer horizon from now until the furthest completion time."""
         now_us = self.prune_consumed(now_us)
         if not self.buffered_chunks:
             return 0
-        return max(self.buffered_chunks[-1].end_time_us - now_us, 0)
+        return max(self._completion_us(self.buffered_chunks[-1]) - now_us, 0)
 
     def has_capacity_now(self, bytes_needed: int) -> bool:
         """
@@ -101,20 +132,8 @@ class BufferTracker:
         """
         if bytes_needed <= 0:
             return True
-        if bytes_needed >= self.capacity_bytes:
-            logger.warning(
-                "Chunk size %s exceeds reported buffer capacity %s for client %s "
-                "— blocking until buffer drains",
-                bytes_needed,
-                self.capacity_bytes,
-                self.client_id,
-            )
-            self.prune_consumed()
-            return self.buffered_bytes == 0
-
         self.prune_consumed()
-        projected_usage = self.buffered_bytes + bytes_needed
-        return projected_usage <= self.capacity_bytes
+        return self.buffered_bytes + bytes_needed <= self.capacity_bytes
 
     def has_duration_capacity(self, duration_needed_us: int = 0) -> bool:
         """
@@ -169,23 +188,25 @@ class BufferTracker:
         """
         Calculate wait time until the buffer horizon can extend to end_time_us.
 
-        This preserves effective playback headroom based on the furthest buffered end time,
-        which is more accurate than summing durations when chunks are intentionally shifted
-        on the timeline (for example, player output delay).
+        This preserves effective playback headroom based on the furthest completion
+        time, which is more accurate than summing durations when chunks are shifted
+        on the timeline by the output delay. ``end_time_us`` is given before the
+        output delay is applied.
         """
         if self.max_duration_us == 0:
             return 0
 
         now_us = self.prune_consumed()
-        if end_time_us <= now_us:
+        completion_us = end_time_us - self._output_delay_us
+        if completion_us <= now_us:
             return 0
 
         latest_end_us = now_us
         if self.buffered_chunks:
             # Chunks are appended in timestamp order, so the last entry is the furthest.
-            latest_end_us = max(now_us, self.buffered_chunks[-1].end_time_us)
+            latest_end_us = max(now_us, self._completion_us(self.buffered_chunks[-1]))
 
-        projected_end_us = max(latest_end_us, end_time_us)
+        projected_end_us = max(latest_end_us, completion_us)
         projected_horizon_us = projected_end_us - now_us
         if projected_horizon_us <= self.max_duration_us:
             return 0
@@ -195,47 +216,22 @@ class BufferTracker:
         """
         Calculate time in microseconds until the buffer can accept bytes_needed more bytes.
 
-        Returns 0 if bytes_needed <= 0 (immediate capacity). When bytes_needed exceeds
-        capacity_bytes, returns the time needed for the buffer to fully drain so the
-        oversize chunk can be admitted alone; returns 0 only if the buffer is already empty.
+        Returns 0 if bytes_needed <= 0 (immediate capacity). ``bytes_needed`` must not
+        exceed ``capacity_bytes``.
         """
         if bytes_needed <= 0:
             return 0
-        if bytes_needed >= self.capacity_bytes:
-            logger.warning(
-                "Chunk size %s exceeds reported buffer capacity %s for client %s "
-                "— blocking until buffer drains",
-                bytes_needed,
-                self.capacity_bytes,
-                self.client_id,
-            )
-            cursor_time_us = self.prune_consumed()
-            if self.buffered_bytes == 0:
-                return 0
-            latest_end_us = self.buffered_chunks[-1].end_time_us
-            return max(latest_end_us - cursor_time_us, 0)
 
-        # Prune consumed chunks once at the start
-        cursor_time_us = self.prune_consumed()
+        now_us = self.prune_consumed()
         time_needed_us = 0
-
-        # Simulate state without modifying it to find when capacity is available
+        # Simulate chunks completing in order without modifying the tracked state.
         virtual_buffered_bytes = self.buffered_bytes
-        cursor_index = 0
-
-        while cursor_index < len(self.buffered_chunks):
-            projected_usage = virtual_buffered_bytes + bytes_needed
-            if projected_usage <= self.capacity_bytes:
-                # We have enough capacity at this point
+        for chunk in self.buffered_chunks:
+            if virtual_buffered_bytes + bytes_needed <= self.capacity_bytes:
                 break
-
-            chunk = self.buffered_chunks[cursor_index]
-            cursor_end_time_us = chunk.end_time_us
-            time_needed_us += max(cursor_end_time_us - cursor_time_us, 0)
-
-            # Advance cursor to the next chunk
-            cursor_index += 1
-            cursor_time_us = cursor_end_time_us
+            if chunk is self._transmitting:
+                return max(time_needed_us, TRANSMISSION_RECHECK_US)
+            time_needed_us = max(time_needed_us, self._completion_us(chunk) - now_us)
             virtual_buffered_bytes -= chunk.byte_count
         return time_needed_us
 
@@ -255,7 +251,8 @@ class BufferTracker:
         Args:
             bytes_needed: Number of bytes to check capacity for.
             duration_needed_us: Duration in microseconds to check capacity for.
-            end_time_us: Absolute end timestamp for horizon-based duration gating.
+            end_time_us: End timestamp, before the output delay, for horizon-based
+                duration gating.
 
         Returns:
             Time in microseconds to wait, or 0 if ready immediately.
@@ -273,25 +270,44 @@ class BufferTracker:
         if sleep_time_us := self.time_until_capacity(bytes_needed):
             await asyncio.sleep(sleep_time_us / 1_000_000)
 
-    def register(self, end_time_us: int, byte_count: int, duration_us: int = 0) -> None:
-        """Record bytes added to the buffer finishing at end_time_us.
+    def register(
+        self, end_time_us: int, byte_count: int, duration_us: int = 0
+    ) -> BufferedChunk | None:
+        """Count a chunk whose transmission is starting, and return it.
+
+        The chunk keeps counting at least until it is passed to finish_transmission().
+        Returns None, counting nothing, for an empty chunk.
 
         Args:
-            end_time_us: Absolute timestamp when these bytes should be fully consumed.
-            byte_count: Compressed byte count occupying the device buffer.
+            end_time_us: Timestamp plus duration, before the output delay is applied.
+            byte_count: Bytes the chunk occupies in the device buffer.
             duration_us: Duration of audio in microseconds (for duration-based tracking).
         """
         if byte_count <= 0:
-            return
-        self.buffered_chunks.append(BufferedChunk(end_time_us, byte_count, duration_us))
+            return None
+        chunk = BufferedChunk(end_time_us, byte_count, duration_us)
+        self.buffered_chunks.append(chunk)
         self.buffered_bytes += byte_count
         self.buffered_duration_us += duration_us
+        self._transmitting = chunk
+        return chunk
+
+    def finish_transmission(self, chunk: BufferedChunk) -> None:
+        """Mark the transmission of a chunk returned by register() as finished."""
+        if chunk is self._transmitting:
+            self._transmitting = None
 
     def reset(self) -> None:
         """Clear all tracked chunks and reset counters to zero."""
         self.buffered_chunks.clear()
+        self._completed_chunks.clear()
         self.buffered_bytes = 0
         self.buffered_duration_us = 0
+        self._transmitting = None
+        self.oversize_logged = False
+
+    def _completion_us(self, chunk: BufferedChunk) -> int:
+        return chunk.end_time_us - self._output_delay_us
 
 
 __all__ = [

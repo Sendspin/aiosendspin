@@ -122,7 +122,7 @@ def test_player_role_on_audio_chunk_defers_header_and_tracks_duration() -> None:
     # The connection prepends the header at send time.
     assert sent == [(payload, timestamp_us, BinaryMessageType.AUDIO_CHUNK.value, True)]
 
-    assert tracker.calls == [(timestamp_us + duration_us, byte_count)]
+    assert tracker.calls == [(timestamp_us + duration_us, 13 + byte_count)]
 
 
 def test_player_role_on_stream_start_drops_without_transport() -> None:

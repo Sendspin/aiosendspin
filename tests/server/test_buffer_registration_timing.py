@@ -65,12 +65,12 @@ class _DummyGroup:
 
 
 @pytest.mark.asyncio
-async def test_buffer_tracker_does_not_backpressure_until_send() -> None:  # noqa: PLR0915
+async def test_buffer_tracker_counts_from_transmission_start() -> None:  # noqa: PLR0915
     """
-    Backpressure must reflect bytes that have actually left the server.
+    A chunk counts once its transmission starts, never while it only waits in the queue.
 
-    This test blocks websocket send to create a gap between "queued" and "sent".
-    Before the send completes, BufferTracker must remain at 0 bytes (no backpressure).
+    The websocket send is blocked so the first chunk stays mid-transmission while
+    the second one is still queued.
     """
     loop = asyncio.get_running_loop()
     clock = LoopClock(loop)
@@ -110,7 +110,7 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:  # noq
                 bit_depth=16,
             )
         ],
-        buffer_capacity=100,
+        buffer_capacity=1000,
         supported_commands=[PlayerCommand.VOLUME],
     )
     hello.artwork_support = None
@@ -132,30 +132,38 @@ async def test_buffer_tracker_does_not_backpressure_until_send() -> None:  # noq
     assert buffer_tracker is not None
 
     now_us = clock.now_us()
-    chunk = AudioChunk(
-        timestamp_us=now_us + 100_000,
-        data=b"x" * 100,
-        byte_count=100,
-        duration_us=100_000,
-    )
+    chunks = [
+        AudioChunk(
+            timestamp_us=now_us + offset_us,
+            data=b"x" * 100,
+            byte_count=100,
+            duration_us=100_000,
+        )
+        for offset_us in (100_000, 200_000)
+    ]
 
     try:
-        # Use the hook-based on_audio_chunk method
-        sent = role.on_audio_chunk(chunk)
-        assert sent is None
-
-        # Regression assertion: queued-but-not-sent data must not cause backpressure.
+        for chunk in chunks:
+            role.on_audio_chunk(chunk)
         assert buffer_tracker.buffered_bytes == 0
-        assert buffer_tracker.time_until_capacity(1) == 0
 
-        send_event.set()
         for _ in range(50):
             if wsock.send_bytes.called:
                 break
             await asyncio.sleep(0)
 
+        # The first chunk (13-byte header + payload) is mid-transmission; the second is queued.
         assert wsock.send_bytes.call_count == 1
-        assert buffer_tracker.buffered_bytes == 100
+        assert buffer_tracker.buffered_bytes == 113
+
+        send_event.set()
+        for _ in range(50):
+            if wsock.send_bytes.call_count == 2:
+                break
+            await asyncio.sleep(0)
+
+        assert wsock.send_bytes.call_count == 2
+        assert buffer_tracker.buffered_bytes == 226
     finally:
         send_event.set()
         await conn.disconnect(retry_connection=False)

@@ -28,6 +28,7 @@ from aiosendspin.models.core import (
     StreamStartPayload,
 )
 from aiosendspin.models.player import (
+    PLAYER_AUDIO_HEADER_SIZE,
     PlayerCommandPayload,
     PlayerStatePayload,
     StreamStartPlayer,
@@ -365,19 +366,14 @@ class PlayerV1Role(Role):
                 )
             return
 
-        message_type = BinaryMessageType.AUDIO_CHUNK.value
-        # Compute the wall-clock buffer horizon (effective play time) by shifting
-        # the chunk's end time earlier by the configured output delay.
-        output_delay_us = self.output_delay_ms * 1_000
-        chunk_end_us = chunk.timestamp_us + chunk.duration_us - output_delay_us
-
         self._client.send_binary(
             chunk.data,
             role_family=self.role_family,
             timestamp_us=chunk.timestamp_us,
-            message_type=message_type,
-            buffer_end_time_us=chunk_end_us,
-            buffer_byte_count=chunk.byte_count,
+            message_type=BinaryMessageType.AUDIO_CHUNK.value,
+            buffer_end_time_us=chunk.timestamp_us + chunk.duration_us,
+            # The buffer accounting counts the audio chunk header with the payload.
+            buffer_byte_count=PLAYER_AUDIO_HEADER_SIZE + chunk.byte_count,
             duration_us=chunk.duration_us,
             player_audio_header=True,
         )
@@ -734,6 +730,8 @@ class PlayerV1Role(Role):
 
         if state.output_delay_ms is not None and self.output_delay_ms != state.output_delay_ms:
             self.output_delay_ms = state.output_delay_ms
+            if self._buffer_tracker is not None:
+                self._buffer_tracker.output_delay_us = self.get_output_delay_us()
             self.emit_client_event(OutputDelayChangedEvent(output_delay_ms=state.output_delay_ms))
 
         if (
@@ -848,12 +846,9 @@ class PlayerV1Role(Role):
         chunk so it can carry the new codec header.
         """
         self._client.drop_pending_binary([self.role_family])
-        # Everything the buffer tracker and binary timing know about was just
-        # invalidated with the old format; without resetting them the writer
-        # paces the replacement audio against a buffer the client flushed.
+        # The binary timing belongs to the old format. An in-place stream/start does not
+        # reset the buffer accounting, so the tracker keeps counting chunks already sent.
         self.reset_binary_timing()
-        if self._buffer_tracker is not None:
-            self._buffer_tracker.reset()
         self._pending_stream_start = True
         # The client flushes its invalidated buffer only on a stream/start, so a
         # flip-flop back to the announced format must not suppress one.
@@ -948,6 +943,7 @@ class PlayerV1Role(Role):
         else:
             state.buffer_tracker.capacity_bytes = capacity
             state.buffer_tracker.max_duration_us = max_duration_us
+        state.buffer_tracker.output_delay_us = self.get_output_delay_us()
         self._buffer_tracker = state.buffer_tracker
 
     def _ensure_preferred_format(self) -> None:

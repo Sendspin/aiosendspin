@@ -120,6 +120,23 @@ def test_idle_format_applies_to_next_stream_without_starting_one(
     assert isinstance(_transformer(role), FlacEncoder)
 
 
+def test_format_change_mid_stream_keeps_buffer_count(mock_server: MagicMock) -> None:
+    """The in-place stream/start of a format change leaves already sent chunks counted."""
+    client, role, _conn = _make_player(mock_server)
+    client.group.start_stream()
+    tracker = role.get_buffer_tracker()
+    assert tracker is not None
+    chunk = tracker.register(mock_server.clock.now_us() + 1_000_000, 5_000, 25_000)
+    assert chunk is not None
+    tracker.finish_transmission(chunk)
+
+    role.on_client_state(_state(FLAC_48K))
+
+    assert role._pending_stream_start is True  # noqa: SLF001
+    assert tracker.buffered_bytes == 5_000
+    assert tracker.buffered_chunks[0].duration_us == 25_000
+
+
 def test_format_change_mid_stream_begins_transition(mock_server: MagicMock) -> None:
     """A changed preference during a stream restarts it in the new format."""
     client, role, conn = _make_player(mock_server)

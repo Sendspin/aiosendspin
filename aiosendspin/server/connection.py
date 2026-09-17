@@ -148,7 +148,7 @@ from .roles.source import SourceV1Role
 if TYPE_CHECKING:
     from aiosendspin.models.artwork import ClientHelloArtworkSupport
 
-    from .audio import BufferTracker
+    from .audio import BufferedChunk, BufferTracker
     from .group import SendspinGroup
     from .roles.base import BinaryHandling, Role
     from .server import SendspinServer
@@ -547,14 +547,19 @@ class SendspinConnection:
             return
 
         now_us = self._server.clock.now_us()
-        # buffer_end_time_us already carries the role's output delay, which shifts the
-        # deadline earlier than the raw timestamp. Fall back to the raw span only when
-        # a caller does not supply it.
         deadline_us = (
             buffer_end_time_us
             if buffer_end_time_us is not None
             else timestamp_us + (duration_us or 0)
         )
+        # The role's output delay makes the data due earlier than its end time.
+        cached = (
+            self._client.get_binary_handling_cached(message_type)
+            if self._client is not None
+            else None
+        )
+        if cached is not None:
+            deadline_us -= cached[1].get_output_delay_us()
         if timestamp_us != 0 and deadline_us <= now_us:
             self._warn_late_at_enqueue(role, message_type, timestamp_us, now_us)
 
@@ -2495,8 +2500,24 @@ class SendspinConnection:
                 stamp_send_ahead(frame, compute_send_ahead(entry.timestamp_us, now_us))
                 # The Noise transport only encrypts bytes.
                 data = bytes(frame)
+        # A chunk counts toward the client's buffer from the moment its transmission starts.
+        tracked: BufferedChunk | None = None
+        if (
+            buffer_tracker is not None
+            and binary.buffer_end_time_us is not None
+            and binary.buffer_byte_count is not None
+        ):
+            tracked = buffer_tracker.register(
+                binary.buffer_end_time_us,
+                binary.buffer_byte_count,
+                binary.duration_us or 0,
+            )
         start_s = time.monotonic()
-        await wsock.send_bytes(data)
+        try:
+            await wsock.send_bytes(data)
+        finally:
+            if buffer_tracker is not None and tracked is not None:
+                buffer_tracker.finish_transmission(tracked)
         elapsed_ms = (time.monotonic() - start_s) * 1000
         if elapsed_ms >= 50.0:
             # Slow writes indicate transport/backpressure issues but are not fatal.
@@ -2525,18 +2546,6 @@ class SendspinConnection:
                     entry.timestamp_us,
                     role,
                 )
-
-        # Buffer tracking via role's tracker (framework-managed)
-        if (
-            buffer_tracker is not None
-            and binary.buffer_end_time_us is not None
-            and binary.buffer_byte_count is not None
-        ):
-            buffer_tracker.register(
-                binary.buffer_end_time_us,
-                binary.buffer_byte_count,
-                binary.duration_us or 0,
-            )
 
     #### Role Queue Heap Management ####
     #
@@ -2772,6 +2781,20 @@ class SendspinConnection:
             if buffer_tracker is not None:
                 buffer_tracker.prune_consumed(now_us)
                 bytes_needed = entry.binary.buffer_byte_count or 0
+                if bytes_needed > buffer_tracker.capacity_bytes:
+                    # Encoded frames cannot be split, so this chunk can never be sent.
+                    if not buffer_tracker.oversize_logged:
+                        buffer_tracker.oversize_logged = True
+                        self._logger.warning(
+                            "Dropping %s chunk(s) larger than the client's buffer capacity: "
+                            "%s > %s bytes",
+                            role,
+                            bytes_needed,
+                            buffer_tracker.capacity_bytes,
+                        )
+                    self._discard_role_head(role)
+                    self._schedule_role_head(role)
+                    return False, now_us
                 duration_needed_us = entry.binary.duration_us or 0
                 wait_us = max(
                     wait_us,
