@@ -1278,6 +1278,184 @@ async def test_live_pairing_invalid_operator_input_leaves_pairing() -> None:
             await client.disconnect()
 
 
+async def _code_pairing_client(
+    identity: Identity,
+    store: InMemoryClientPairingStore,
+    method: PairMethod,
+    shown: asyncio.Queue[str],
+) -> SdkClient:
+    """Build a client offering ``method``; shown codes land on ``shown``, windows open on ask."""
+    if method is PairMethod.STATIC_PAIRING_CODE:
+        await store.store_pairing_config(
+            replace(await store.get_pairing_config(), static_pairing_code_enabled=True)
+        )
+        await store.set_static_pairing_code(_STATIC_PAIRING_CODE)
+        shown.put_nowait(_STATIC_PAIRING_CODE)
+
+    async def display(pairing_code: str | None) -> None:
+        if pairing_code is not None:
+            shown.put_nowait(pairing_code)
+
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        if active:
+            client.open_pairing_window()
+
+    client = make_sdk_client(
+        identity=identity,
+        pairing_store=store,
+        client_name="c",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(
+            gesture_prompt=gesture_prompt,
+            pairing_code_display=display if method is PairMethod.DYNAMIC_PAIRING_CODE else None,
+        ),
+    )
+    return client
+
+
+def _code_attempt(
+    method: PairMethod, provide: pairing_module.PairingCodeProvider
+) -> PairingAttempt:
+    return PairingAttempt(
+        method=method,
+        pairing_code_provider=provide,
+        pairing_format=(
+            PairingCodeFormat.DIGITS if method is PairMethod.DYNAMIC_PAIRING_CODE else None
+        ),
+    )
+
+
+def _grouped(code: str, separator: str) -> str:
+    half = len(code) // 2
+    return f"{code[:half]}{separator}{code[half:]}"
+
+
+_STATIC_PAIRING_CODE = "12345678"
+_CODE_METHODS = (PairMethod.DYNAMIC_PAIRING_CODE, PairMethod.STATIC_PAIRING_CODE)
+
+
+@pytest.mark.parametrize("separator", ["-", " "])
+@pytest.mark.parametrize("method", _CODE_METHODS)
+async def test_live_pairing_strips_separators_from_the_entered_code(
+    method: PairMethod, separator: str
+) -> None:
+    """A grouped entry (``123-456``, ``1234 5678``) pairs like the contiguous code."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def provide() -> str:
+        return _grouped(await shown.get(), separator)
+
+    async with _serve(server) as url:
+        client = await _code_pairing_client(client_identity, client_store, method, shown)
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            await server.initiate_pairing(client_identity.peer_id, _code_attempt(method, provide))
+            await _await_long_term_record(client_store, server.id)
+            assert await server_store.record_by_client_id(client_identity.peer_id) is not None
+        finally:
+            await client.disconnect()
+
+
+async def test_live_static_pairing_wrong_code_keeps_the_connection() -> None:
+    """A wrong static code surfaces as a ``pairing_code_mismatch`` abort, not a disconnect."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    method = PairMethod.STATIC_PAIRING_CODE
+
+    async def wrong_code() -> str:
+        return "8765-4321"
+
+    async with _serve(server) as url:
+        client = await _code_pairing_client(client_identity, client_store, method, asyncio.Queue())
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            with pytest.raises(PairingAbortError) as excinfo:
+                await server.initiate_pairing(
+                    client_identity.peer_id, _code_attempt(method, wrong_code)
+                )
+            assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
+            assert client.connected
+            assert await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert await client_store.record_by_server_id(server.id) is None
+        finally:
+            await client.disconnect()
+
+
+@pytest.mark.parametrize("method", _CODE_METHODS)
+async def test_dial_pairing_accepts_a_separated_code(method: PairMethod) -> None:
+    """A pairing dial strips separators from the entered code."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def provide() -> str:
+        return _grouped(await shown.get(), "-")
+
+    sdk = await _code_pairing_client(client_identity, client_store, method, shown)
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(server, url, pairing_attempt=_code_attempt(method, provide)),
+        ):
+            await _await_paired_session(sdk)
+            assert await server_store.record_by_client_id(client_identity.peer_id) is not None
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
+@pytest.mark.parametrize(
+    ("method", "entered"),
+    [
+        pytest.param(PairMethod.DYNAMIC_PAIRING_CODE, "12x456", id="dynamic_malformed"),
+        pytest.param(PairMethod.STATIC_PAIRING_CODE, "1234567", id="static_malformed"),
+        pytest.param(PairMethod.STATIC_PAIRING_CODE, "8765-4321", id="static_mismatch"),
+    ],
+)
+async def test_dial_pairing_failed_entry_keeps_the_connection(
+    method: PairMethod, entered: str
+) -> None:
+    """Malformed or wrong operator input on a pairing dial leaves pairing, still connected."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    asked = asyncio.Event()
+
+    async def provide() -> str:
+        await shown.get()
+        asked.set()
+        return entered
+
+    sdk = await _code_pairing_client(client_identity, client_store, method, shown)
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(server, url, pairing_attempt=_code_attempt(method, provide)),
+        ):
+            async with asyncio.timeout(5):
+                await asked.wait()
+            await _await_left_pairing(sdk)
+            assert sdk.connected
+            server_client = await _await_connected_client(server, client_identity.peer_id)
+            assert not server_client.is_paired
+            assert await client_store.record_by_server_id(server.id) is None
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_pair_retry_in_flight_does_not_fail_the_next_attempt() -> None:
     """A retry sent before the client saw a leave does not fail an attempt started right after."""
     server_store = InMemoryServerPairingStore()
@@ -3264,10 +3442,14 @@ async def _host_incoming_client(
 
 
 @asynccontextmanager
-async def _dial(server: SendspinServer, url: str) -> AsyncIterator[None]:
+async def _dial(
+    server: SendspinServer, url: str, *, pairing_attempt: PairingAttempt | None = None
+) -> AsyncIterator[None]:
     """Dial ``url`` from ``server`` (server-initiated), running the connection in the background."""
     async with ClientSession() as session, session.ws_connect(url) as wsock:
-        conn = SendspinConnection(server, wsock_client=wsock, url=url)
+        conn = SendspinConnection(
+            server, wsock_client=wsock, url=url, pairing_attempt=pairing_attempt
+        )
         task = asyncio.create_task(conn.handle_client())
         try:
             yield
