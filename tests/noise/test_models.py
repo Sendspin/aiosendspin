@@ -11,6 +11,8 @@ from aiosendspin.models.types import ServerErrorReason
 from aiosendspin.noise.models import (
     ClientInitMessage,
     ClientInitPayload,
+    ClientPairPendingMessage,
+    ClientPairPendingPayload,
     ClientPairRetryMessage,
     NoiseHandshakeMessage,
     NoiseHandshakePayload,
@@ -150,6 +152,27 @@ def test_server_pair_init_omits_absent_nonce(
     msg = ServerPairInitMessage(payload=payload)
     raw = msg.to_json()
     assert json.loads(raw) == {"type": "server/pair-init", "payload": wire}
+    assert PairingMessage.from_json(raw) == msg
+
+
+@pytest.mark.parametrize(
+    ("payload", "wire"),
+    [
+        pytest.param(
+            ClientPairPendingPayload(pairing_index=1, message="Press the button"),
+            {"pairing_index": 1, "message": "Press the button"},
+            id="with-message",
+        ),
+        pytest.param(ClientPairPendingPayload(pairing_index=1), {"pairing_index": 1}, id="bare"),
+    ],
+)
+def test_client_pair_pending_omits_absent_message(
+    payload: ClientPairPendingPayload, wire: dict[str, object]
+) -> None:
+    """client/pair-pending carries message only when set and round-trips either way."""
+    msg = ClientPairPendingMessage(payload=payload)
+    raw = msg.to_json()
+    assert json.loads(raw) == {"type": "client/pair-pending", "payload": wire}
     assert PairingMessage.from_json(raw) == msg
 
 

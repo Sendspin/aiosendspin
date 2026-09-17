@@ -121,6 +121,7 @@ from aiosendspin.noise.models import (
     PairAbortPayload,
 )
 from aiosendspin.noise.pairing import (
+    LocalPairingAbortError,
     PairingAbortError,
     abort_pairing,
     receive_pairing_abort,
@@ -691,22 +692,30 @@ class SendspinConnection:
             assert static_pairing_code is not None  # offered only when configured
             # Every static-pairing-code attempt is gesture-gated.
             await self._gate_on_pairing_window(ws, pairing_index)
-            with self._attempt_in_progress():
-                await run_static_pairing_code_client(
-                    ws,
-                    handshake_hash=self._handshake_hash,
-                    pairing_index=pairing_index,
-                    static_pairing_code=static_pairing_code,
-                    server_id=self._server_id,
-                    store=store,
-                )
+            try:
+                with self._attempt_in_progress():
+                    await run_static_pairing_code_client(
+                        ws,
+                        handshake_hash=self._handshake_hash,
+                        pairing_index=pairing_index,
+                        static_pairing_code=static_pairing_code,
+                        server_id=self._server_id,
+                        store=store,
+                    )
+            except LocalPairingAbortError as err:
+                # The client aborts with pairing_code_mismatch only when server_kc fails.
+                if err.reason is PairAbortReason.PAIRING_CODE_MISMATCH:
+                    self._client.record_pairing_window_attempt(self, paired=False)
+                raise
+            self._client.record_pairing_window_attempt(self, paired=True)
             return
         # Dynamic pairing code is held back only at the round limit, until an operator action.
         pairing_format = await self._validate_pairing_format(pairing.format)
         if await store.is_pairing_round_limit_reached():
             await self._gate_on_pairing_window(ws, pairing_index)
             await store.reset_pairing_rounds()
-        self._client.consume_pairing_window()
+            # The operator action is spent on lifting the hold-back.
+            self._client.close_pairing_window()
         try:
             with self._attempt_in_progress():
                 await run_dynamic_pairing_code_client(
@@ -733,21 +742,21 @@ class SendspinConnection:
             self._pairing_attempt_in_progress = False
 
     async def _gate_on_pairing_window(self, ws: EncryptedWebSocket, pairing_index: int) -> None:
-        """Hold a gesture-gated attempt until a pairing window is open.
+        """Hold a gesture-gated attempt until a pairing window admits it on this connection.
 
         With no window open, signals ``client/pair-pending`` first and waits, raising if the
         server aborts meanwhile.
         """
-        if self._client.pairing_window_open:
+        if self._client.pairing_window_admits(self):
             # Claims the window without signalling pair-pending, since none is awaited.
-            await self._client.await_pairing_window()
+            await self._client.await_pairing_window(self)
             return
         await ws.send_str(
             ClientPairPendingMessage(
                 payload=ClientPairPendingPayload(pairing_index=pairing_index),
             ).to_json(),
         )
-        window = asyncio.ensure_future(self._client.await_pairing_window())
+        window = asyncio.ensure_future(self._client.await_pairing_window(self))
         receive = asyncio.create_task(receive_pairing_abort(ws))
         try:
             done, _ = await asyncio.wait((window, receive), return_when=asyncio.FIRST_COMPLETED)

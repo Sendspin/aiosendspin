@@ -37,6 +37,7 @@ from aiosendspin.noise.models import (
     ServerPairInitPayload,
 )
 from aiosendspin.noise.pairing import (
+    PAIR_PENDING_MESSAGE_MAX_LEN,
     InvalidPairingCodeError,
     PairingAbortError,
     PairingAttempt,
@@ -88,7 +89,7 @@ def test_pairing_attempt_verify_is_code_only() -> None:
 
 
 def test_pairing_attempt_pairing_psk_requires_material() -> None:
-    """PAIRING_PSK must carry a 32-byte pairing_psk and no pairing-code flow hooks."""
+    """PAIRING_PSK must carry a 32-byte pairing_psk, its client_id, and no code flow hooks."""
     with pytest.raises(ValueError, match="requires pairing_psk"):
         PairingAttempt(method=PairMethod.PAIRING_PSK)
     with pytest.raises(ValueError, match="must be 32 bytes"):
@@ -101,19 +102,29 @@ def test_pairing_attempt_pairing_psk_requires_material() -> None:
         PairingAttempt(
             method=PairMethod.PAIRING_PSK,
             pairing_psk=generate_psk(),
-            on_pair_pending=lambda: None,
+            on_pair_pending=lambda _message: None,
         )
+    with pytest.raises(ValueError, match="requires client_id"):
+        PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk())
+    assert (
+        PairingAttempt(
+            method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id="client-A"
+        ).client_id
+        == "client-A"
+    )
 
 
 @pytest.mark.parametrize(
     "method", [PairMethod.DYNAMIC_PAIRING_CODE, PairMethod.STATIC_PAIRING_CODE]
 )
 def test_pairing_attempt_code_methods_require_pairing_code_provider(method: PairMethod) -> None:
-    """pairing-code methods must carry a pairing_code_provider and must not carry a pairing_psk."""
+    """Pairing-code methods carry a pairing_code_provider and no Pairing PSK token material."""
     with pytest.raises(ValueError, match="requires pairing_code_provider"):
         PairingAttempt(method=method)
-    with pytest.raises(ValueError, match="does not use pairing_psk"):
+    with pytest.raises(ValueError, match="does not use pairing_psk or client_id"):
         PairingAttempt(method=method, pairing_code_provider=_code, pairing_psk=generate_psk())
+    with pytest.raises(ValueError, match="does not use pairing_psk or client_id"):
+        PairingAttempt(method=method, pairing_code_provider=_code, client_id="client-A")
 
 
 def test_pairing_attempt_pairing_format_is_dynamic_only() -> None:
@@ -252,20 +263,28 @@ async def test_static_pairing_code_server_first_message_wait_times_out(
     assert server_raw.sent == []
 
 
-async def test_pair_pending_extends_the_first_message_wait() -> None:
-    """A matching pair-pending switches the server to the gesture timeout; pairing completes."""
+@pytest.mark.parametrize(
+    ("sent", "surfaced"),
+    [
+        pytest.param(None, None, id="absent"),
+        pytest.param("Press the pairing button", "Press the pairing button", id="present"),
+        pytest.param("x" * 250, "x" * PAIR_PENDING_MESSAGE_MAX_LEN, id="truncated"),
+    ],
+)
+async def test_pair_pending_extends_the_first_message_wait(
+    sent: str | None, surfaced: str | None
+) -> None:
+    """A matching pair-pending surfaces its message and switches to the gesture timeout."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
-    pending_signals = 0
-
-    def on_pending() -> None:
-        nonlocal pending_signals
-        pending_signals += 1
+    pending_messages: list[str | None] = []
 
     async def gated_client() -> None:
         await client_ews.send_str(
-            ClientPairPendingMessage(payload=ClientPairPendingPayload(pairing_index=0)).to_json()
+            ClientPairPendingMessage(
+                payload=ClientPairPendingPayload(pairing_index=0, message=sent)
+            ).to_json()
         )
         await run_static_pairing_code_client(
             client_ews,
@@ -288,12 +307,12 @@ async def test_pair_pending_extends_the_first_message_wait() -> None:
             pairing_code_provider=provide,
             client_id="client-A",
             store=server_store,
-            on_pair_pending=on_pending,
+            on_pair_pending=pending_messages.append,
         ),
     )
     assert server_record is not None
     assert await server_store.record_by_client_id("client-A") == server_record
-    assert pending_signals == 1
+    assert pending_messages == [surfaced]
 
 
 async def test_gesture_wait_times_out_after_pair_pending(
@@ -325,7 +344,7 @@ async def test_stale_pair_pending_is_discarded() -> None:
     server_store = InMemoryServerPairingStore()
     pending_signals = 0
 
-    def on_pending() -> None:
+    def on_pending(_message: str | None) -> None:
         nonlocal pending_signals
         pending_signals += 1
 
@@ -750,6 +769,31 @@ async def test_pairing_psk_server_always_discards_a_wrapped_finalize(
     client_record = await client_store.record_by_server_id("server-X")
     assert client_record is not None
     assert server_record.psk == client_record.psk
+
+
+async def test_pairing_psk_finalize_with_both_psk_fields_is_protocol_error() -> None:
+    """A Pairing PSK finalize carrying ``wrapped_psk`` too persists nothing."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    await client_ews.send_str(
+        ClientPairFinalizeMessage(
+            payload=ClientPairFinalizePayload(
+                long_term_psk=b64url_encode(generate_psk()), wrapped_psk=b64url_encode(bytes(48))
+            )
+        ).to_json()
+    )
+    with pytest.raises(PairingError, match="both long_term_psk and wrapped_psk") as excinfo:
+        await run_pairing_psk_server(
+            server_ews, pairing_index=1, client_id="client-A", store=server_store
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
+    assert server_raw.sent == []
 
 
 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
@@ -1703,6 +1747,40 @@ async def test_static_pairing_code_wraps_under_the_round_one_sid() -> None:
     )
     assert server_record is not None
     assert server_record.psk == psk
+
+
+async def test_pairing_code_finalize_with_both_psk_fields_is_protocol_error() -> None:
+    """A validly wrapped finalize that also carries ``long_term_psk`` persists nothing."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    sid = _pake_sid(_HANDSHAKE_HASH, 0, 1)
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    async def client() -> None:
+        cpace = await _honest_pake_to_finalize(client_ews, sid=sid)
+        finalize = ClientPairFinalizeMessage.from_json(
+            _psk_finalize_wrapped(sid, cpace, generate_psk())
+        )
+        finalize.payload.long_term_psk = b64url_encode(generate_psk())
+        await client_ews.send_str(finalize.to_json())
+
+    with pytest.raises(PairingError, match="both long_term_psk and wrapped_psk") as excinfo:
+        await asyncio.gather(
+            run_static_pairing_code_server(
+                server_ews,
+                handshake_hash=_HANDSHAKE_HASH,
+                pairing_index=0,
+                pairing_code_provider=provide,
+                client_id="client-A",
+                store=server_store,
+            ),
+            client(),
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
 
 
 # DEPRECATED(spec-pr-237): remove in aiosendspin <version>

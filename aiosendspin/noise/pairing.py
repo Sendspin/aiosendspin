@@ -66,6 +66,8 @@ _CLIENT_ATTEMPT_TIMEOUT_S: float = 120.0
 SERVER_ATTEMPT_TIMEOUT_S: float = 180.0
 SERVER_FIRST_MESSAGE_TIMEOUT_S: float = 60.0
 SERVER_GESTURE_TIMEOUT_S: float = 360.0
+# Longest client/pair-pending message handed to on_pair_pending; longer ones are truncated.
+PAIR_PENDING_MESSAGE_MAX_LEN = 200
 
 
 class PairingError(Exception):
@@ -77,7 +79,10 @@ class PairingTimeoutError(PairingError):
 
 
 class InvalidPairingCodeError(PairingError):
-    """The operator-entered pairing code or token is malformed; nothing was sent for it."""
+    """The operator-entered pairing code or token is malformed or names another client.
+
+    Nothing was sent for it.
+    """
 
 
 class PairingAbortError(PairingError):
@@ -118,10 +123,19 @@ class PairingAttempt:
     """Emission format for the dynamic pairing code; absent for the other methods."""
     pairing_psk: bytes | None = None
     """Required for the Pairing PSK method; the live PSK pasted from a token."""
+    client_id: str | None = None
+    """Required for the Pairing PSK method; the ``client_id`` decoded from the same token.
+
+    The attempt runs only on a connection presenting this ``client_id``.
+    """
     verify: bool = False
     """Re-verify an already-paired client instead of pairing anew."""
-    on_pair_pending: Callable[[], None] | None = None
-    """Called when the client reports the attempt gesture-gated or held back."""
+    on_pair_pending: Callable[[str | None], None] | None = None
+    """Called when the client reports the attempt gesture-gated or held back.
+
+    Receives the client's operator message, truncated to ``PAIR_PENDING_MESSAGE_MAX_LEN``
+    characters, or ``None`` when it sent none.
+    """
     owner: str | None = None
     """Application-defined authorization id the resulting record is bound to."""
 
@@ -143,12 +157,15 @@ class PairingAttempt:
             if self.on_pair_pending is not None:
                 msg = "PAIRING_PSK does not use on_pair_pending"
                 raise ValueError(msg)
+            if self.client_id is None:
+                msg = "PAIRING_PSK requires client_id"
+                raise ValueError(msg)
         else:  # Pairing-code methods
             if self.pairing_code_provider is None:
                 msg = f"{self.method.value} requires pairing_code_provider"
                 raise ValueError(msg)
-            if self.pairing_psk is not None:
-                msg = f"{self.method.value} does not use pairing_psk"
+            if self.pairing_psk is not None or self.client_id is not None:
+                msg = f"{self.method.value} does not use pairing_psk or client_id"
                 raise ValueError(msg)
             if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
                 if self.pairing_format is None:
@@ -338,7 +355,7 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
-    on_pair_pending: Callable[[], None] | None = None,
+    on_pair_pending: Callable[[str | None], None] | None = None,
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
@@ -466,7 +483,7 @@ async def run_static_pairing_code_server(
     client_id: str,
     store: ServerPairingStore,
     verify: bool = False,
-    on_pair_pending: Callable[[], None] | None = None,
+    on_pair_pending: Callable[[str | None], None] | None = None,
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
@@ -649,6 +666,8 @@ def _unwrap_psk(
     suite: NoiseCipherSuite, payload: ClientPairFinalizePayload, wrap_key: bytes | None
 ) -> bytes:
     """Extract the PSK from ``client/pair-finalize``, unwrapping when ``wrap_key`` is set."""
+    if payload.long_term_psk is not None and payload.wrapped_psk is not None:
+        raise PairingError("client/pair-finalize carries both long_term_psk and wrapped_psk")
     if wrap_key is None:
         if payload.long_term_psk is None:
             raise PairingError("client/pair-finalize is missing long_term_psk")
@@ -773,7 +792,7 @@ async def _receive_pair_init(
     ws: EncryptedWebSocket,
     pairing_index: int,
     *,
-    on_pending: Callable[[], None] | None = None,
+    on_pending: Callable[[str | None], None] | None = None,
 ) -> ClientPairInitMessage:
     """Receive this attempt's ``client/pair-init``.
 
@@ -798,7 +817,10 @@ async def _receive_pair_init(
     if isinstance(message, ClientPairInitMessage):
         return message
     if on_pending is not None:
-        on_pending()
+        pending_message = message.payload.message
+        on_pending(
+            pending_message[:PAIR_PENDING_MESSAGE_MAX_LEN] if pending_message is not None else None
+        )
     # In-order delivery leaves no room for leftovers after the matching pair-pending:
     # the next pairing frame must be this attempt's client/pair-init.
     async with _server_timeout(SERVER_GESTURE_TIMEOUT_S, "gesture-gated client/pair-init"):
