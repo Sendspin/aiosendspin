@@ -934,6 +934,11 @@ class SendspinClient:
 
         Player clients can report availability here. Use ``send_available()`` when no
         player fields changed.
+
+        ``volume`` (0-100) is perceived loudness: the embedder SHOULD apply the gain
+        ``(volume / 100) ** 1.5`` over a short ramp. ``muted`` is independent of
+        ``volume``. Persisting both and passing them back as ``initial_volume`` and
+        ``initial_muted`` is RECOMMENDED.
         """
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
@@ -1153,6 +1158,10 @@ class SendspinClient:
 
     def add_server_command_listener(self, callback: ServerCommandCallback) -> Callable[[], None]:
         """Add a listener for server command events.
+
+        A player ``volume`` command sets perceived loudness: the embedder SHOULD apply
+        the gain ``(volume / 100) ** 1.5`` over a short ramp. A volume command MUST NOT
+        clear the mute state.
 
         Returns:
             A function that removes this listener when called.
