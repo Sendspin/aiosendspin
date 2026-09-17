@@ -144,13 +144,6 @@ class ExternalStreamStartRequest:
 ExternalStreamStartCallback = Callable[[ExternalStreamStartRequest], None]
 
 
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-def _warn_if_management_reason(connection_reason: ConnectionReason) -> None:
-    """Report the deprecated management dial reason once per process."""
-    if connection_reason is ConnectionReason.MANAGEMENT:
-        warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
-
-
 def _get_first_valid_ip(addresses: list[str]) -> str | None:
     """Get the first valid IP address, filtering out link-local and unspecified addresses."""
     for addr_str in addresses:
@@ -528,7 +521,9 @@ class SendspinServer:
         when a dial task already exists it is queued for that task's next dial.
         """
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
-        _warn_if_management_reason(connection_reason)
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+        if connection_reason is ConnectionReason.MANAGEMENT:
+            warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
@@ -568,7 +563,9 @@ class SendspinServer:
             Exception: Other unexpected errors during the initial connection attempt.
         """
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
-        _warn_if_management_reason(connection_reason)
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+        if connection_reason is ConnectionReason.MANAGEMENT:
+            warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
         self._connection_reasons[url] = connection_reason
         if url in self._initial_connect_succeeded:
             return
