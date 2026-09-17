@@ -66,6 +66,21 @@ def test_resolve_audio_format_float_requires_32_bit() -> None:
         ).resolve_av_format()
 
 
+@pytest.mark.parametrize("channels", [9, 11, 64])
+def test_resolve_audio_format_uses_unnamed_layout_without_a_named_one(channels: int) -> None:
+    """Channel counts without a named layout map to PyAV's unnamed layout."""
+    _, _, layout, _ = AudioFormat(
+        sample_rate=48_000, bit_depth=16, channels=channels
+    ).resolve_av_format()
+    assert layout == f"{channels} channels"
+
+
+def test_resolve_audio_format_rejects_no_channels() -> None:
+    """A format needs at least one channel."""
+    with pytest.raises(ValueError, match="channel count"):
+        AudioFormat(sample_rate=48_000, bit_depth=16, channels=0).resolve_av_format()
+
+
 def test_convert_s32_to_s24_drops_least_significant_byte_python_impl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

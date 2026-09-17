@@ -64,6 +64,7 @@ from aiosendspin.models.types import (
     PlayerCommand,
     RepeatMode,
     Roles,
+    SignalState,
 )
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSpectrum,
@@ -1518,6 +1519,61 @@ async def test_player_available_withheld_until_clock_synchronizes(
     await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
     await report(connection)
     assert sent[-1]["available"] is True
+
+
+async def test_player_and_source_states_carry_source_object() -> None:
+    """With player and source active, every client/state carries the source object."""
+    connection, sent = await _state_connection(
+        [Roles.PLAYER.value, Roles.SOURCE.value],
+        roles=[Roles.PLAYER, Roles.SOURCE],
+        source_support=ClientHelloSourceSupport(),
+    )
+
+    await connection.start()
+    await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
+
+    assert [(state["available"], "player" in state, state.get("source")) for state in sent] == [
+        (False, True, {}),
+        (True, True, {}),
+    ]
+
+
+@pytest.mark.parametrize(
+    "features",
+    [None, ClientHelloSourceFeatures(), ClientHelloSourceFeatures(line_sense=False)],
+)
+async def test_source_signal_requires_line_sense(
+    features: ClientHelloSourceFeatures | None,
+) -> None:
+    """A source that did not advertise line_sense cannot report a signal."""
+    connection, sent = await _state_connection(
+        [Roles.SOURCE.value],
+        roles=[Roles.SOURCE],
+        source_support=ClientHelloSourceSupport(features=features),
+    )
+    await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="line_sense"):
+        await connection.send_source_signal(SignalState.PRESENT)
+    await connection.send_available(available=True)
+
+    assert [state["source"] for state in sent] == [{}, {}]
+
+
+async def test_source_signal_is_reported_with_line_sense() -> None:
+    """A source that advertised line_sense reports its signal in client/state."""
+    connection, sent = await _state_connection(
+        [Roles.SOURCE.value],
+        roles=[Roles.SOURCE],
+        source_support=ClientHelloSourceSupport(
+            features=ClientHelloSourceFeatures(line_sense=True)
+        ),
+    )
+    await connection._handle_server_time(_SERVER_TIME)  # noqa: SLF001
+
+    await connection.send_source_signal(SignalState.PRESENT)
+
+    assert sent[-1]["source"] == {"signal": "present"}
 
 
 @pytest.mark.parametrize("role", [Roles.CONTROLLER, Roles.METADATA])

@@ -223,6 +223,33 @@ def test_bit_depth_conversion_to_24bit_output() -> None:
     assert out != bytes(480 * 6)
 
 
+def test_unnamed_channel_layout_converts_at_the_same_channel_count() -> None:
+    """A source without a named channel layout still converts rate and depth."""
+    channels = 9
+    bridge = SourceBridge(
+        input_format=AudioFormat(sample_rate=48000, bit_depth=24, channels=channels),
+        output_format=AudioFormat(sample_rate=44100, bit_depth=16, channels=channels),
+        target_latency_ms=100,
+        max_latency_ms=300,
+    )
+    bridge.feed(bytes(4800 * 3 * channels), 0)
+    bridge.flush()
+    assert len(bridge.read(4410)) == 4410 * 2 * channels
+
+
+def test_remix_needs_a_layout_pyav_can_map() -> None:
+    """Remixing a channel count PyAV has no layout for fails when the bridge is built."""
+    with pytest.raises(ValueError, match="Cannot remix 9 channels to 2 channels"):
+        SourceBridge(
+            input_format=AudioFormat(sample_rate=48000, bit_depth=16, channels=9),
+            output_format=FMT,
+        )
+    SourceBridge(
+        input_format=AudioFormat(sample_rate=48000, bit_depth=16, channels=12),
+        output_format=FMT,
+    )
+
+
 def test_asrc_bridge_preserves_duration() -> None:
     """The ASRC path converts rate without changing the buffered duration."""
     pytest.importorskip("soxr")

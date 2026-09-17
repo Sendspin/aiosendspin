@@ -18,6 +18,7 @@ from aiosendspin.models.source import (
     ClientHelloSourceSupport,
     ClientStreamStartPayload,
     ClientStreamStartSource,
+    SourceStatePayload,
 )
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
 from aiosendspin.server.roles.source import SourceStreamStartedEvent
@@ -43,6 +44,9 @@ class _ServerSideClient:
 
     def _signal_event(self, event: Any) -> None:
         self.events.append(event)
+
+    def awaits_role_state(self, _role_family: str) -> bool:
+        return False
 
     def send_role_message(self, _family: str, message: Any) -> None:
         self.sent.append(message)
@@ -106,7 +110,7 @@ async def test_source_loopback(codec: AudioCodec) -> None:
     server_client = _ServerSideClient()
     role = SourceV1Role(client=server_client)  # type: ignore[arg-type]
     role.on_connect()
-    role.on_client_state(ClientStatePayload(available=True))
+    role.on_client_state(ClientStatePayload(available=True, source=SourceStatePayload()))
     role.request_start()
     conn = _LoopbackConnection(role)
 
@@ -142,7 +146,7 @@ async def test_flac_24_bit_source_loopback_preserves_packed_pcm() -> None:
     server_client = _ServerSideClient()
     role = SourceV1Role(client=server_client)  # type: ignore[arg-type]
     role.on_connect()
-    role.on_client_state(ClientStatePayload(available=True))
+    role.on_client_state(ClientStatePayload(available=True, source=SourceStatePayload()))
     role.request_start()
     conn = _LoopbackConnection(role)
     capture = SourceCapture(

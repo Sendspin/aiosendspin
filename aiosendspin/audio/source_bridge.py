@@ -116,6 +116,18 @@ class SourceBridge:
         self._window_overflow_us = 0
         self._resampler_rate = output_format.sample_rate
         self._resampler = self._build_resampler(rate=self._resampler_rate)
+        if input_format.channels != output_format.channels:
+            # Remixing needs a channel layout, which PyAV has only for some counts.
+            try:
+                self._convert_via(
+                    self._build_resampler(rate=self._resampler_rate), bytes(self._in_stride)
+                )
+            except ValueError as err:
+                msg = (
+                    f"Cannot remix {input_format.channels} channels "
+                    f"to {output_format.channels} channels"
+                )
+                raise ValueError(msg) from err
 
     @property
     def occupancy_us(self) -> int:

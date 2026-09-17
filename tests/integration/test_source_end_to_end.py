@@ -27,6 +27,7 @@ from aiosendspin.noise.trust_store import (
     PskCategory,
 )
 from aiosendspin.server.roles.source import SourceStreamStartedEvent
+from aiosendspin.server.roles.source.v1 import SourceV1Role
 from aiosendspin.server.server import SendspinServer
 from tests.conftest import make_sdk_client, sine_pcm_16bit
 
@@ -61,12 +62,18 @@ def _pcm_format() -> SupportedAudioFormat:
     return SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
 
 
-async def _wait_for_time_sync(client: Any) -> None:
-    for _attempt in range(500):
-        if client.is_time_synchronized():
-            return
-        await asyncio.sleep(0.01)
-    raise TimeoutError("Client time synchronization did not converge")
+async def _request_start(client: Any, role: SourceV1Role) -> None:
+    """Request a start and wait until the client receives it."""
+    commanded: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def _on_command(payload: Any) -> None:
+        if payload.source is not None and not commanded.done():
+            commanded.set_result(None)
+
+    client.add_server_command_listener(_on_command)
+    # Queued until the source state that follows the client's clock sync arrives.
+    role.request_start()
+    await asyncio.wait_for(commanded, timeout=5)
 
 
 async def test_paired_source_client_streams_pcm_end_to_end() -> None:
@@ -114,8 +121,6 @@ async def test_paired_source_client_streams_pcm_end_to_end() -> None:
             server_client = server.get_client(client_identity.peer_id)
             assert server_client is not None
             assert "source@v1" in server_client.active_role_ids
-            await _wait_for_time_sync(play_client)
-
             started: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
 
             def _on_event(_client: Any, event: Any) -> None:
@@ -125,8 +130,8 @@ async def test_paired_source_client_streams_pcm_end_to_end() -> None:
             server_client.add_event_listener(_on_event)
 
             source_role = server_client.role("source@v1")
-            assert source_role is not None
-            source_role.request_start()  # type: ignore[attr-defined]
+            assert isinstance(source_role, SourceV1Role)
+            await _request_start(play_client, source_role)
 
             pcm = sine_pcm_16bit(48000)
             capture = play_client.create_source_capture(_pcm_format())

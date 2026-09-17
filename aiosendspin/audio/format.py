@@ -84,9 +84,10 @@ class AudioFormat:
         else:
             raise ValueError("Only 16-bit, 24-bit, and 32-bit PCM are supported")
 
-        layout = _CHANNEL_LAYOUTS.get(self.channels)
-        if layout is None:
+        if self.channels < 1:
             raise ValueError(f"Unsupported channel count: {self.channels}")
+        # PyAV accepts an unnamed layout for any other channel count.
+        layout = _CHANNEL_LAYOUTS.get(self.channels, f"{self.channels} channels")
 
         return wire_bytes_per_sample, av_format, layout, av_bytes_per_sample
 

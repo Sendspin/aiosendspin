@@ -2406,6 +2406,7 @@ class SendspinConnection:
         ]
         for role in roles:
             self._client.release_role_hold(role.role_family)
+            role.on_hold_released()
         if self._held_roles():
             self._arm_activation_state_timeout()
         else:

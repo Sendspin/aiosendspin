@@ -420,6 +420,13 @@ class Role(ABC):
         """
         return self.requires_initial_state()
 
+    def on_hold_released(self) -> None:  # noqa: B027
+        """Handle the release of a role activated mid-connection, before its stream join.
+
+        Called once the client/state object the activation awaited arrives, or its timeout
+        expires; roles released by the initial client/state get `on_client_state` instead.
+        """
+
     def initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:  # noqa: ARG002
         """Spec requirements this role's part of the initial client/state does not meet."""
         return []

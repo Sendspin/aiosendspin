@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 import types
 from collections.abc import Iterator
 from unittest.mock import MagicMock
@@ -11,9 +12,11 @@ import pytest
 from aiosendspin.audio.codecs import (
     create_decoder,
     create_encoder,
+    decoded_bit_depth,
     flac_encoder_available,
     opus_available,
 )
+from aiosendspin.audio.format import _convert_s24_to_s32
 from tests.conftest import sine_pcm_16bit
 
 
@@ -104,6 +107,54 @@ def test_flac_decoder_preserves_multichannel_frame_width() -> None:
     decoded = b"".join(decoder.decode(frame) for frame, _ in frames) + decoder.flush()
 
     assert len(pcm) <= len(decoded) <= len(pcm) + 4608 * channels * 2
+
+
+@pytest.mark.parametrize(
+    ("codec", "bit_depth", "expected"),
+    [
+        ("pcm", 8, 16),
+        ("pcm", 16, 16),
+        ("pcm", 24, 24),
+        ("pcm", 32, 32),
+        ("flac", 4, 16),
+        ("flac", 12, 16),
+        ("flac", 20, 24),
+        ("flac", 28, 32),
+        ("opus", 24, 16),
+    ],
+)
+def test_decoded_bit_depth_rounds_up_to_a_packed_depth(
+    codec: str, bit_depth: int, expected: int
+) -> None:
+    """Decoders emit the smallest of 16, 24 and 32 bits that holds the announced depth."""
+    assert decoded_bit_depth(codec, bit_depth) == expected
+
+
+def test_pcm_decoder_widens_8_bit_to_16_bit() -> None:
+    """Signed 8-bit PCM becomes the same values scaled to little-endian 16-bit."""
+    decoder = create_decoder("pcm", sample_rate=8000, bit_depth=8, channels=2, codec_header=None)
+
+    assert decoder.decode(bytes([0x01, 0x7F, 0x80, 0xFF])) == struct.pack(
+        "<4h", 0x0100, 0x7F00, -0x8000, -0x0100
+    )
+
+
+def test_flac_decoder_emits_packed_24_bit_for_a_20_bit_announcement() -> None:
+    """A FLAC depth between 16 and 24 bits decodes to packed 24-bit PCM."""
+    pcm = b"\x00\x10\x00\x00\xf0\xff" * 4800
+    encoder = create_encoder("flac", sample_rate=48000, bit_depth=24, channels=2)
+    frames = encoder.process(_convert_s24_to_s32(pcm), 0, 0) + encoder.flush()
+    decoder = create_decoder(
+        "flac",
+        sample_rate=48000,
+        bit_depth=20,
+        channels=2,
+        codec_header=encoder.get_codec_header(),
+    )
+
+    decoded = b"".join(decoder.decode(frame) for frame, _ in frames) + decoder.flush()
+
+    assert decoded[: len(pcm)] == pcm
 
 
 @pytest.mark.usefixtures("_uncached_opus_probe")
