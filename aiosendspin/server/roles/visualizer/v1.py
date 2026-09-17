@@ -87,8 +87,8 @@ def warn_pitch_deprecated() -> None:
     _pitch_deprecation_logged = True
     _LOGGER.warning(
         "The visualizer 'pitch' type is deprecated: it uses binary type 21, which the "
-        "spec reserves. It is only sent to legacy visualizer@v1 clients and will be "
-        "removed in a future release"
+        "spec reserves. It is only sent to legacy visualizer@v1 clients on servers "
+        "that allow non-compliant clients, and will be removed in a future release"
     )
 
 

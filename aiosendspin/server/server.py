@@ -222,11 +222,12 @@ class SendspinServer:
         self._clients: dict[str, SendspinClient] = {}
         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []
         # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
-        # Server-wide toggle for the deprecated visualizer `pitch` feature. Off by
-        # default: `pitch` rides reserved binary type 21, so enabling it puts a
-        # spec-reserved type on the wire and is non-compliant. It only applies to
-        # connections whose hello carried the pre-#195 visualizer stream
-        # configuration. Read by VisualizerV1Role when building its stream config.
+        # Server-wide toggle for the deprecated visualizer `pitch` feature, which
+        # rides spec-reserved binary type 21. Off by default, which sheds pitch
+        # unless it is a client's only type. Only connections whose hello carried
+        # the pre-#195 visualizer stream configuration, on a server allowing
+        # non-compliant clients, can get pitch at all. Read by VisualizerV1Role
+        # when building its stream config.
         self._visualizer_pitch_enabled: bool = False
 
         if client_session is None:
@@ -336,13 +337,15 @@ class SendspinServer:
     def set_visualizer_pitch_enabled(self, *, enabled: bool) -> None:
         """Enable or disable the deprecated visualizer `pitch` feature server-wide.
 
-        `pitch` uses reserved binary type 21, which the spec forbids, so this option
-        only applies to legacy connections: those whose hello carried the pre-#195
-        visualizer stream configuration. Other clients never receive `pitch`, and a
-        server with `allow_noncompliant_clients` False never emits it. Enabling it
-        logs a deprecation warning once per process. Pitch (YINFFT) is also the
-        heaviest per-frame visualizer computation, so leaving it off sheds that cost
-        on constrained hardware.
+        `pitch` uses reserved binary type 21, which the spec forbids. Only legacy
+        connections, whose hello carried the pre-#195 visualizer stream
+        configuration, can receive it, and only while `allow_noncompliant_clients`
+        is True; this option has no effect on anyone else. Disabled, it drops
+        `pitch` from a legacy client's types unless `pitch` is the only type that
+        client requested, so it does not guarantee type 21 is never sent. Enabling
+        it logs a deprecation warning once per process. Pitch (YINFFT) is also the
+        heaviest per-frame visualizer computation, so leaving it off sheds that
+        cost on constrained hardware.
         Toggling drops/adds `pitch` on live roles' negotiated types and re-emits
         `stream/start`; new roles pick the setting up when they connect.
         """

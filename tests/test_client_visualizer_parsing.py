@@ -222,7 +222,7 @@ async def test_handle_beat_rejects_empty_payload() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Reserved type 21 (formerly pitch)
+# Reserved type 21
 # ---------------------------------------------------------------------------
 
 

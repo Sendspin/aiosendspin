@@ -70,6 +70,7 @@ def _make_legacy_client_stub(types: list[str]) -> MagicMock:
         buffer_capacity=65536, types=types, rate_max=60
     )
     client.visualizer_state = {"types": types, "rate_max": 60}
+    client._server.allow_noncompliant_clients = True  # noqa: SLF001
     return client
 
 
@@ -1584,7 +1585,7 @@ def test_legacy_pitch_request_logs_deprecation_warning(
 
 # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 def test_pitch_in_types_when_server_enabled() -> None:
-    """Pitch stays in the negotiated types while the server flag is on (default)."""
+    """Pitch stays in the negotiated types while the server flag is on."""
     client = _make_pitch_client_stub()
     role = VisualizerV1Role(client)
     _connect(role)
