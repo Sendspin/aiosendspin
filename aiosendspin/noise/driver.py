@@ -428,13 +428,13 @@ async def _exchange_as_responder(
     msg1_pt = _read_handshake_message(session, hs1_text, "Noise message 1")
     msg1_obj = _parse_msg1_payload(msg1_pt)
 
-    declared = _declared_category(msg1_obj.psk_category)
+    declared = PskCategory.from_code(msg1_obj.psk_category)
+    if declared is None:
+        raise HandshakeAbortedError(
+            f"malformed Noise message 1 payload: unknown psk_category {msg1_obj.psk_category!r}",
+        )
     credential_mismatch = False
-    if declared is _UNKNOWN_CATEGORY:
-        # A category from a newer revision names nothing this client holds.
-        resolved = None
-    else:
-        resolved = await psk_resolver(msg1_obj.psk_id, declared)
+    resolved = await psk_resolver(msg1_obj.psk_id, declared)
     if resolved is None:
         if not allow_sentinel_fallback:
             raise HandshakeAbortedError(f"no PSK matches psk_id={msg1_obj.psk_id!r}")
@@ -563,15 +563,6 @@ class _HandshakeAuthenticationError(HandshakeAbortedError):
 def _sentinel_psk() -> ResolvedPsk:
     """Return the Sentinel PSK as a resolved credential."""
     return ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
-
-
-# Stands for a declared category this implementation does not know, which no PSK answers.
-_UNKNOWN_CATEGORY: Final[PskCategory] = cast("PskCategory", object())
-
-
-def _declared_category(code: str) -> PskCategory:
-    """Return the category message 1 declared; a code naming none we know matches nothing."""
-    return PskCategory.from_code(code) or _UNKNOWN_CATEGORY
 
 
 def _parse_msg1_payload(plaintext: bytes) -> NoiseMsg1Payload:
