@@ -1649,6 +1649,49 @@ class TestCustomRoleSupportParsing:
         assert msg.payload.player_support is not None
         assert negotiate_roles(msg.payload.activatable_roles) == ["player@v1"]
 
+    def test_family_falls_back_past_custom_version_without_support(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A registered custom version without support falls back to the next one that has it."""
+        monkeypatch.setitem(ROLE_FACTORIES, "player@_a", lambda _client: None)  # type: ignore[arg-type]
+        monkeypatch.setitem(ROLE_FACTORIES, "player@_b", lambda _client: None)  # type: ignore[arg-type]
+
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "Client",
+                    "supported_roles": ["player@_a", "player@_b"],
+                    "player@_b_support": {
+                        "supported_formats": [
+                            {"codec": "pcm", "sample_rate": 48000, "bit_depth": 16, "channels": 2}
+                        ],
+                        "buffer_capacity": 100_000,
+                    },
+                },
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.missing_support_roles == ["player@_a"]
+        assert msg.payload.player_support is not None
+        assert negotiate_roles(msg.payload.activatable_roles) == ["player@_b"]
+
+    def test_unregistered_custom_versions_without_support_are_each_recorded_once(self) -> None:
+        """Every listed custom version lacking support is recorded once, then selection stops."""
+        raw = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {"name": "Client", "supported_roles": ["player@_x", "player@_y"]},
+            }
+        ).decode()
+
+        msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert isinstance(msg, ClientHelloMessage)
+        assert msg.payload.missing_support_roles == ["player@_x", "player@_y"]
+        assert msg.payload.player_support is None
+
     def test_family_falls_back_to_custom_version_with_support(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

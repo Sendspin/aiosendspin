@@ -853,7 +853,9 @@ class SendspinConnection:
                     (
                         r
                         for r in supported_roles
-                        if role_family(r) == family and r.partition("@")[2].startswith("_")
+                        if role_family(r) == family
+                        and r.partition("@")[2].startswith("_")
+                        and r not in missing_support_roles
                     ),
                     None,
                 )
@@ -922,11 +924,15 @@ class SendspinConnection:
             decoded = orjson.loads(raw_message)
             if not isinstance(decoded, dict):
                 return parsed
-            custom_supports = cls._extract_custom_role_supports(
-                decoded, parsed.payload.missing_support_roles or ()
-            )
-            cls._apply_custom_role_support(parsed.payload, custom_supports)
-            return parsed
+            # Each pass records the selected versions that lack support; select again
+            # until every family lands on a version that has one, or runs out.
+            missing = parsed.payload.missing_support_roles
+            while True:
+                custom_supports = cls._extract_custom_role_supports(decoded, missing or ())
+                cls._apply_custom_role_support(parsed.payload, custom_supports)
+                if parsed.payload.missing_support_roles == missing:
+                    return parsed
+                missing = parsed.payload.missing_support_roles
         return parsed
 
     async def _setup_connection(self) -> None:
