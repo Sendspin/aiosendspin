@@ -174,6 +174,8 @@ async def test_management_connection_reason_warns_on_wait_too() -> None:
         (_hello("Kitchen", DeviceInfo(manufacturer="Acme\x00Corp")), "dev-1", "Kitchen (AcmeCorp)"),
         # A part of nothing but control characters and spaces drops out entirely.
         (_hello("\x00 \x00", DeviceInfo(manufacturer="Acme")), "dev-1", "dev-1 (Acme)"),
+        # An interior control character between spaces leaves a single space, not two.
+        (_hello("Acme \x00 Speaker"), "dev-1", "Acme Speaker"),
         # Unbounded client input is capped per part.
         (_hello("N" * 200), "dev-1", "N" * 64),
     ],
