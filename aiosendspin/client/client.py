@@ -41,6 +41,7 @@ from aiosendspin.noise.driver import HandshakeAbortedError
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
+from aiosendspin.util import create_task
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
 from .models import (
@@ -1047,6 +1048,11 @@ class SendspinClient:
         """Report a disconnect only when the admitted connection (not a provisional one) closes."""
         self._provisional_connections.discard(connection)
         self._open_connections.discard(connection)
+        # A record a re-pairing replaced is kept only while a connection still used it.
+        create_task(
+            self._pairing_store.remove_superseded_records(protected=self.protected_psk_ids()),
+            loop=self._loop,
+        )
         if self._pairing_window_connection is connection:
             self.close_pairing_window()
         if self._admitted_connection is connection:

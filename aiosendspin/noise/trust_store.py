@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -421,7 +421,7 @@ class ClientPairingStore(ABC):
 
     @abstractmethod
     async def record_by_server_id(self, server_id: str) -> ClientPairingRecord | None:
-        """Return the stored-pubkey record bound to ``server_id``, if any."""
+        """Return the newest stored-pubkey record bound to ``server_id``, if any."""
 
     @abstractmethod
     async def store_record(self, record: ClientPairingRecord) -> None:
@@ -583,6 +583,23 @@ class ClientPairingStore(ABC):
                 await self.remove_record(psk_id)
         if record.server_id is not None:
             await self._evict_over_capacity(keep={record.psk_id, *protected})
+
+    async def remove_superseded_records(self, *, protected: AbstractSet[str]) -> None:
+        """Remove per-server records a newer record for the same server replaced.
+
+        Records whose ``psk_id`` is in ``protected`` (the records backing open connections)
+        are kept.
+        """
+        records = await self.list_records()
+        newest = _newest_per_server(records)
+        for record in records:
+            if (
+                record.server_id is not None
+                and newest[record.server_id] is not record
+                and record.psk_id not in protected
+                and await self.can_remove_record(record.psk_id)
+            ):
+                await self.remove_record(record.psk_id)
 
     async def _evict_over_capacity(self, *, keep: AbstractSet[str]) -> None:
         """Evict least recently used per-server records outside ``keep`` down to capacity."""
@@ -779,11 +796,8 @@ class _ClientPairingStoreBase(ClientPairingStore):
         return self._records.get(psk_id)
 
     async def record_by_server_id(self, server_id: str) -> ClientPairingRecord | None:
-        """Return the stored-pubkey record bound to ``server_id`` (linear scan)."""
-        for record in self._records.values():
-            if record.server_id == server_id:
-                return record
-        return None
+        """Return the newest stored-pubkey record bound to ``server_id`` (linear scan)."""
+        return _newest_per_server(self._records.values()).get(server_id)
 
     async def store_record(self, record: ClientPairingRecord) -> None:
         """Persist a long-term record keyed by its ``psk_id``."""
@@ -965,6 +979,18 @@ class FileClientPairingStore(_ClientPairingStoreBase):
 def _is_shared_record(resolved: ResolvedPsk) -> bool:
     """Return whether ``resolved`` is a shared-PSK record (long-term, no counterparty)."""
     return resolved.category is PskCategory.LONG_TERM and resolved.counterparty_id is None
+
+
+def _newest_per_server(records: Iterable[ClientPairingRecord]) -> dict[str, ClientPairingRecord]:
+    """Map each server to its newest record, the later-stored one on equal creation times."""
+    newest: dict[str, ClientPairingRecord] = {}
+    for record in records:
+        if record.server_id is None:
+            continue
+        current = newest.get(record.server_id)
+        if current is None or record.created_at >= current.created_at:
+            newest[record.server_id] = record
+    return newest
 
 
 def _check_psk(psk: bytes) -> None:

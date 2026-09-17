@@ -11,6 +11,7 @@ import pytest
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.types import Activity, GoodbyeReason, PairAbortReason, Roles
+from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
     ClientPairingRecord,
     InMemoryClientPairingStore,
@@ -873,3 +874,26 @@ async def test_handshake_failure_closes_the_raw_socket(
 
     assert ws.closed
     assert not client._open_connections
+
+
+async def test_closing_a_connection_drops_the_record_a_repairing_replaced() -> None:
+    """A server's prior record kept for an open connection goes once that connection closes."""
+    store = InMemoryClientPairingStore(record_capacity=5)
+    (old,) = await seed_used_client_records(store, 1)
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    connection = SendspinConnection(client)
+    assert client._claim_connection_slot(connection)
+    connection._resolving_psk_id = old.psk_id
+    psk = generate_psk()
+    new = ClientPairingRecord(psk_id=psk_id_for(psk), psk=psk, server_id=old.server_id)
+
+    await store.replace_record_for_server_id(new, protected=client.protected_psk_ids())
+    assert await store.record_by_psk_id(old.psk_id) is not None
+    assert await store.record_by_server_id("server-0") == new
+
+    connection._resolving_psk_id = None
+    client.on_connection_closed(connection)
+    await asyncio.sleep(0)
+
+    assert await store.record_by_psk_id(old.psk_id) is None
+    assert await store.record_by_psk_id(new.psk_id) == new

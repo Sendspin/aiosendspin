@@ -7,7 +7,7 @@ import logging
 import stat
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -911,3 +911,34 @@ async def test_file_client_store_loads_records_without_last_used_at(tmp_path: Pa
     restored = await reopened.record_by_psk_id(record.psk_id)
     assert restored is not None
     assert restored.last_used_at == record.created_at
+
+
+async def test_record_by_server_id_prefers_the_newest_record(
+    client_store: ClientPairingStore,
+) -> None:
+    """With two records for one server, the lookup returns the newer one."""
+    older = replace(_client_record(server_id="server-X"), created_at=_EPOCH)
+    newer = replace(_client_record(server_id="server-X"), created_at=_EPOCH + timedelta(days=1))
+    await client_store.store_record(older)
+    await client_store.store_record(newer)
+
+    assert await client_store.record_by_server_id("server-X") == newer
+
+
+async def test_remove_superseded_records_keeps_protected_and_newest(
+    client_store: ClientPairingStore,
+) -> None:
+    """Superseded per-server records go unless protected; newest and shared records stay."""
+    shared = [r for r in await client_store.list_records() if r.server_id is None]
+    x_old = replace(_client_record(server_id="server-X"), created_at=_EPOCH)
+    x_new = _client_record(server_id="server-X")
+    y_old = replace(_client_record(server_id="server-Y"), created_at=_EPOCH)
+    y_new = _client_record(server_id="server-Y")
+    for record in (x_old, x_new, y_old, y_new):
+        await client_store.store_record(record)
+
+    await client_store.remove_superseded_records(protected={y_old.psk_id})
+
+    assert await _per_server_psk_ids(client_store) == {x_new.psk_id, y_old.psk_id, y_new.psk_id}
+    remaining = await client_store.list_records()
+    assert all(r in remaining for r in shared)
