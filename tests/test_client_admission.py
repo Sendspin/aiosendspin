@@ -4,14 +4,19 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.types import Activity, GoodbyeReason, PairAbortReason, Roles
-from aiosendspin.noise.trust_store import InMemoryClientPairingStore, PskCategory, ResolvedPsk
+from aiosendspin.noise.trust_store import (
+    ClientPairingRecord,
+    InMemoryClientPairingStore,
+    PskCategory,
+    ResolvedPsk,
+)
 
 from .conftest import make_sdk_client
 from .pairing_stores import seed_used_client_records
@@ -749,3 +754,122 @@ async def test_rehandshake_refreshes_the_record_last_use(
     refreshed = await store.record_by_psk_id(record.psk_id)
     assert refreshed is not None
     assert refreshed.last_used_at > record.last_used_at
+
+
+def _bring_up_paired(
+    monkeypatch: pytest.MonkeyPatch, record: ClientPairingRecord, sockets: list[_BlockingWebSocket]
+) -> None:
+    """Make every bring-up succeed as a paired connection on ``record``."""
+
+    async def bring_up(self: SendspinConnection, *_: object, **__: object) -> None:
+        sockets.append(_BlockingWebSocket())
+        self._ws = sockets[-1]  # type: ignore[assignment]
+        self._connected = True
+        self._noise_psk = record.as_resolved()
+
+    monkeypatch.setattr(SendspinConnection, "attach_websocket", bring_up)
+    monkeypatch.setattr(SendspinConnection, "connect", bring_up)
+
+
+async def _paired_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[SendspinClient, list[_BlockingWebSocket]]:
+    store = InMemoryClientPairingStore(record_capacity=5)
+    (record,) = await seed_used_client_records(store, 1)
+    client = make_sdk_client(
+        client_name="c",
+        roles=[Roles.CONTROLLER],
+        pairing_store=store,
+        session=MagicMock(ws_connect=AsyncMock()),
+    )
+    sockets: list[_BlockingWebSocket] = []
+    _bring_up_paired(monkeypatch, record, sockets)
+    return client, sockets
+
+
+async def _await_provisional(client: SendspinClient) -> None:
+    async with asyncio.timeout(1):
+        while not client._provisional_connections:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+
+
+@pytest.mark.parametrize("entry", ["attach", "connect"])
+async def test_shutdown_during_admission_admits_nothing(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """A connection waiting for admission is closed by shutdown and never admitted."""
+    client, sockets = await _paired_client(monkeypatch)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(client, "_owns_session", False)
+        async with client._admission_lock:
+            if entry == "attach":
+                task = asyncio.create_task(client.attach_websocket(MagicMock()))
+            else:
+                task = asyncio.create_task(client.connect("ws://127.0.0.1:9/sendspin"))
+            await _await_provisional(client)
+            await client.disconnect()
+        if entry == "attach":
+            await task
+        else:
+            with pytest.raises(RuntimeError, match="closed before admission"):
+                await task
+
+    assert client._admitted_connection is None
+    assert not client._provisional_connections
+    assert not client._open_connections
+    assert all(ws.closed for ws in sockets)
+
+
+@pytest.mark.parametrize("entry", ["attach", "connect"])
+async def test_start_failure_after_admission_releases_the_slot(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """An admitted connection that fails to start is closed and gives its slot back."""
+    client, sockets = await _paired_client(monkeypatch)
+
+    async def fail_start(self: SendspinConnection) -> None:  # noqa: ARG001
+        raise OSError("state send failed")
+
+    monkeypatch.setattr(SendspinConnection, "start", fail_start)
+
+    if entry == "attach":
+        await client.attach_websocket(MagicMock())
+    else:
+        with pytest.raises(OSError, match="state send failed"):
+            await client.connect("ws://127.0.0.1:9/sendspin")
+
+    assert client._admitted_connection is None
+    assert not client._open_connections
+    assert sockets[0].closed
+
+
+async def test_over_limit_handshake_protects_the_record_it_resolved() -> None:
+    """A connection over the limit still protects the record its handshake resolved."""
+    store = InMemoryClientPairingStore(record_capacity=5)
+    (record,) = await seed_used_client_records(store, 1)
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    connection = SendspinConnection(client)
+    client._provisional_connections.add(connection)
+
+    await connection._resolve_psk(record.psk_id, PskCategory.LONG_TERM)
+
+    assert not client.has_connection_slot(connection)
+    assert client.protected_psk_ids() == {record.psk_id}
+
+
+async def test_handshake_failure_closes_the_raw_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any handshake failure before the session is up closes the raw socket."""
+    client = _client_with_capacity(5)
+
+    async def handshake(self: SendspinConnection, *_: object, **__: object) -> None:  # noqa: ARG001
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(SendspinConnection, "_run_noise_handshake", handshake)
+    ws = _BlockingWebSocket()
+
+    await client.attach_websocket(ws)  # type: ignore[arg-type]
+
+    assert ws.closed
+    assert not client._open_connections

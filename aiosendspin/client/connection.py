@@ -473,12 +473,11 @@ class SendspinConnection:
                 await self._run_noise_handshake(ws, expected_server_id=expected_server_id)
                 await self._require_connection_slot()
                 await self._run_inner_handshake()
-        except BaseException as err:
-            # Close whatever transport bring-up reached: encrypted if up, else the raw socket,
-            # which a failed handshake has already closed unless it stalled.
+        except BaseException:
+            # Close whatever transport bring-up reached: encrypted if up, else the raw socket.
             if self._connected:
                 await self.disconnect()
-            elif isinstance(err, TimeoutError):
+            else:
                 await ws.close()
             raise
 
