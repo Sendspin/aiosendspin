@@ -30,6 +30,7 @@ from aiosendspin.models.artwork import (
 )
 from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
+    STREAM_END_ROLE_FAMILIES,
     ActivatePairing,
     ClientCommandMessage,
     ClientCommandPayload,
@@ -213,9 +214,6 @@ _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
 
 # Binary message IDs the spec leaves to application-specific roles.
 _APPLICATION_BINARY_TYPES = range(192, 256)
-
-# Built-in role families whose streams run server to client.
-_STREAM_ROLE_FAMILIES = frozenset({"player", "artwork", "visualizer"})
 
 
 @dataclass(slots=True)
@@ -1711,7 +1709,7 @@ class SendspinConnection:
             {
                 family
                 for role_id in set(self._active_roles) - set(active_roles)
-                if (family := role_family(role_id)) in _STREAM_ROLE_FAMILIES
+                if (family := role_family(role_id)) in STREAM_END_ROLE_FAMILIES
                 or family.startswith("_")
             }
         )
