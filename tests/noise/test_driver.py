@@ -1231,7 +1231,12 @@ async def test_message_1_without_a_category_is_rejected() -> None:
     await asyncio.gather(server_task, return_exceptions=True)
 
 
-async def test_message_1_with_an_unknown_category_is_rejected() -> None:
+@pytest.mark.parametrize(
+    "category",
+    ["zz", [], {}, 1, None],
+    ids=["unknown-code", "list", "object", "number", "null"],
+)
+async def test_message_1_with_an_unknown_category_is_rejected(category: object) -> None:
     """An undefined category is malformed input, not a miss the Sentinel could answer."""
     server_id = Identity.generate()
     client_id = Identity.generate()
@@ -1259,7 +1264,7 @@ async def test_message_1_with_an_unknown_category_is_rejected() -> None:
             psk=psk,
         )
         await server_ws.send_str(server_init)
-        payload = orjson.dumps({"psk_id": resolved.psk_id, "psk_category": "zz"})
+        payload = orjson.dumps({"psk_id": resolved.psk_id, "psk_category": category})
         msg1 = session.write_message(payload)
         await server_ws.send_str(
             NoiseHandshakeMessage(payload=NoiseHandshakePayload(data=b64url_encode(msg1))).to_json()
