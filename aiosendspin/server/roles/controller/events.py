@@ -81,8 +81,11 @@ class ControllerSeekEvent(ControllerEvent):
 class ControllerSeekRelativeEvent(ControllerEvent):
     """Relative seek command received.
 
-    The handler owns clamping the resulting position to the seekable range (the spec
-    requires it).
+    The offset is clamped so that, from the group's current metadata position, it lands
+    between 0 and `seek_max_ms` (with no upper bound while `seek_max_ms` is unset). Clamping
+    never reverses the seek: from beyond `seek_max_ms` a forward offset becomes 0. When the
+    current position is unknown the offset is passed through unchanged, and the handler owns
+    clamping the result to the seekable range.
     """
 
     offset_ms: int

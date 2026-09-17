@@ -26,6 +26,7 @@ from aiosendspin.server.roles.controller.events import (
     ControllerSwitchEvent,
     ControllerVolumeEvent,
 )
+from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 from aiosendspin.server.roles.player.events import VolumeChangedEvent
 
 if TYPE_CHECKING:
@@ -248,12 +249,26 @@ class ControllerGroupRole(GroupRole):
         if cmd.command == MediaCommand.SEEK_RELATIVE:
             if cmd.offset_ms is None:
                 return
-            self.emit_group_event(ControllerSeekRelativeEvent(offset_ms=cmd.offset_ms))
+            offset_ms = self._clamp_seek_offset(cmd.offset_ms)
+            self.emit_group_event(ControllerSeekRelativeEvent(offset_ms=offset_ms))
             return
 
         event = self._command_to_event(cmd)
         if event is not None:
             self.emit_group_event(event)
+
+    def _clamp_seek_offset(self, offset_ms: int) -> int:
+        """Clamp an offset so it lands within the seekable range, never reversing its direction."""
+        metadata_group_role = self._group.group_role("metadata")
+        if not isinstance(metadata_group_role, MetadataGroupRole):
+            return offset_ms
+        position = metadata_group_role.track_progress
+        if position is None:
+            return offset_ms
+        target = max(0, position + offset_ms)
+        if self._seek_max_ms is not None:
+            target = min(target, max(position, self._seek_max_ms))
+        return target - position
 
     def _command_to_event(self, cmd: ControllerCommandPayload) -> ControllerEvent | None:
         """Convert a command payload to an event."""

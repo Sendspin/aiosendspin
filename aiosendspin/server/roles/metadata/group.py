@@ -46,13 +46,18 @@ class MetadataGroupRole(GroupRole):
             return
 
         timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-        current = replace(self._current_metadata, track_progress=self._get_current_track_progress())
+        current = replace(self._current_metadata, track_progress=self.track_progress)
         metadata_update = current.snapshot_update(timestamp)
         state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
         role.send_message(state_message)
 
-    def _get_current_track_progress(self) -> int | None:
-        """Calculate current track progress in milliseconds."""
+    @property
+    def track_progress(self) -> int | None:
+        """Return the playback position in milliseconds as of now, or None when unknown.
+
+        During an active stream the stored position is extrapolated at the playback speed and
+        clamped to the track duration.
+        """
         if self._current_metadata is None or self._current_metadata.track_progress is None:
             return None
 
@@ -83,7 +88,7 @@ class MetadataGroupRole(GroupRole):
     def freeze_progress(self) -> None:
         """Snapshot current progress and stop further client-side progress extrapolation."""
         metadata = self._current_metadata
-        if metadata is None or (current_progress := self._get_current_track_progress()) is None:
+        if metadata is None or (current_progress := self.track_progress) is None:
             return
 
         self.set_metadata(
@@ -168,7 +173,7 @@ class MetadataGroupRole(GroupRole):
             kwargs["timestamp_us"] = None
         elif self._group.has_active_stream:
             # The stored position is only valid at its own timestamp, so move it to now.
-            kwargs["track_progress"] = self._get_current_track_progress()
+            kwargs["track_progress"] = self.track_progress
             kwargs["timestamp_us"] = None
 
         new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
