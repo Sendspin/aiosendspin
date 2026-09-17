@@ -17,6 +17,12 @@ def _make_group_stub() -> MagicMock:
     return group
 
 
+def _member(*, legacy: bool) -> MagicMock:
+    member = MagicMock()
+    member.clears_state_with_null.return_value = legacy
+    return member
+
+
 def test_color_group_role_family() -> None:
     """ColorGroupRole has role_family of 'color'."""
     group = _make_group_stub()
@@ -73,11 +79,11 @@ def test_set_color_no_op_when_equal() -> None:
 
 
 def test_clear_color() -> None:
-    """clear() sets color to None and sends a color null."""
+    """clear() sets color to None and sends a timestamp-only color object."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
 
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr._members = [member]  # noqa: SLF001
 
     cgr.set_color(Color(primary=(255, 0, 0)))
@@ -90,10 +96,35 @@ def test_clear_color() -> None:
     member.send_message.assert_called_once()
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
-    assert msg.payload.to_dict() == {"color": None}
+    assert msg.payload.to_dict() == {"color": {"timestamp": 1_000_000}}
 
     event = group._signal_event.call_args.args[0]  # noqa: SLF001
     assert isinstance(event, ColorClearedEvent)
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+def test_clear_color_sends_null_to_legacy_member() -> None:
+    """clear() sends a color null to a legacy-generation member."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+
+    legacy = _member(legacy=True)
+    current = _member(legacy=False)
+    cgr._members = [legacy, current]  # noqa: SLF001
+
+    cgr.set_color(Color(primary=(255, 0, 0)))
+    legacy.send_message.reset_mock()
+    current.send_message.reset_mock()
+
+    cgr.clear()
+
+    assert legacy.send_message.call_args.args[0].to_dict() == {
+        "type": "server/state",
+        "payload": {"color": None},
+    }
+    assert current.send_message.call_args.args[0].payload.to_dict() == {
+        "color": {"timestamp": 1_000_000}
+    }
 
 
 def test_on_member_join_sends_current_color() -> None:
@@ -112,18 +143,34 @@ def test_on_member_join_sends_current_color() -> None:
     assert msg.payload.color.primary == (100, 150, 200)
 
 
-def test_on_member_join_sends_null_when_no_color() -> None:
-    """on_member_join sends a color null when no color is set."""
+def test_on_member_join_sends_timestamp_only_when_no_color() -> None:
+    """on_member_join sends a timestamp-only color object when no color is set."""
     group = _make_group_stub()
     cgr = ColorGroupRole(group)
 
-    member = MagicMock()
+    member = _member(legacy=False)
     cgr.on_member_join(member)
 
     member.send_message.assert_called_once()
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
-    assert msg.payload.to_dict() == {"color": None}
+    assert msg.payload.to_dict() == {"color": {"timestamp": 1_000_000}}
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+def test_on_member_join_sends_null_to_legacy_member_when_no_color() -> None:
+    """on_member_join sends a color null to a legacy-generation member when no color is set."""
+    group = _make_group_stub()
+    cgr = ColorGroupRole(group)
+
+    member = _member(legacy=True)
+    cgr.on_member_join(member)
+
+    member.send_message.assert_called_once()
+    assert member.send_message.call_args.args[0].to_dict() == {
+        "type": "server/state",
+        "payload": {"color": None},
+    }
 
 
 def test_set_color_sends_full_state_on_partial_change() -> None:

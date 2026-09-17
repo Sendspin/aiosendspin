@@ -21,6 +21,12 @@ def _make_group_stub() -> MagicMock:
     return group
 
 
+def _member(*, legacy: bool) -> MagicMock:
+    member = MagicMock()
+    member.clears_state_with_null.return_value = legacy
+    return member
+
+
 def test_metadata_group_role_family() -> None:
     """MetadataGroupRole has role_family of 'metadata'."""
     group = _make_group_stub()
@@ -72,11 +78,11 @@ def test_metadata_group_role_set_metadata_sends_to_members() -> None:
 
 
 def test_metadata_group_role_clear_metadata() -> None:
-    """clear() sets metadata to None and sends clear update."""
+    """clear() sets metadata to None and sends a timestamp-only metadata object."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    member = MagicMock()
+    member = _member(legacy=False)
     mgr._members = [member]  # noqa: SLF001
 
     mgr.set_metadata(Metadata(title="Test"))
@@ -88,10 +94,53 @@ def test_metadata_group_role_clear_metadata() -> None:
     member.send_message.assert_called_once()
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
-    assert msg.payload.to_dict() == {"metadata": None}
+    assert msg.payload.to_dict() == {"metadata": {"timestamp": 1_000_000}}
     group._signal_event.assert_called()  # noqa: SLF001
     event = group._signal_event.call_args.args[0]  # noqa: SLF001
     assert isinstance(event, MetadataClearedEvent)
+
+
+def test_metadata_group_role_set_metadata_none_sends_timestamp_only() -> None:
+    """set_metadata(None) sends a timestamp-only metadata object with the present time."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+
+    mgr.set_metadata(Metadata(title="Test"))
+    group._server.clock.now_us.return_value = 2_000_000  # noqa: SLF001
+    member.reset_mock()
+
+    mgr.set_metadata(None)
+
+    msg = member.send_message.call_args.args[0]
+    assert msg.payload.to_dict() == {"metadata": {"timestamp": 2_000_000}}
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+def test_metadata_group_role_clear_sends_null_to_legacy_member() -> None:
+    """clear() sends a metadata null to a legacy-generation member."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    legacy = _member(legacy=True)
+    current = _member(legacy=False)
+    mgr._members = [legacy, current]  # noqa: SLF001
+
+    mgr.set_metadata(Metadata(title="Test"))
+    legacy.reset_mock()
+    current.reset_mock()
+
+    mgr.clear()
+
+    assert legacy.send_message.call_args.args[0].to_dict() == {
+        "type": "server/state",
+        "payload": {"metadata": None},
+    }
+    assert current.send_message.call_args.args[0].payload.to_dict() == {
+        "metadata": {"timestamp": 1_000_000}
+    }
 
 
 def test_metadata_group_role_clear_when_already_cleared_is_noop() -> None:
@@ -186,17 +235,33 @@ def test_metadata_group_role_on_member_join_sends_current_state() -> None:
 
 
 def test_metadata_group_role_on_member_join_no_metadata() -> None:
-    """on_member_join() sends a metadata null when no metadata is set."""
+    """on_member_join() sends a timestamp-only metadata object when no metadata is set."""
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    new_member = MagicMock()
+    new_member = _member(legacy=False)
     mgr.on_member_join(new_member)
 
     new_member.send_message.assert_called_once()
     msg = new_member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
-    assert msg.payload.to_dict() == {"metadata": None}
+    assert msg.payload.to_dict() == {"metadata": {"timestamp": 1_000_000}}
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+def test_metadata_group_role_on_member_join_no_metadata_legacy() -> None:
+    """on_member_join() sends a metadata null to a legacy-generation member without metadata."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+
+    new_member = _member(legacy=True)
+    mgr.on_member_join(new_member)
+
+    new_member.send_message.assert_called_once()
+    assert new_member.send_message.call_args.args[0].to_dict() == {
+        "type": "server/state",
+        "payload": {"metadata": None},
+    }
 
 
 def test_metadata_group_role_skips_unchanged() -> None:

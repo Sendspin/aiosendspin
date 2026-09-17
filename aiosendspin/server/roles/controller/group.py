@@ -162,7 +162,11 @@ class ControllerGroupRole(GroupRole):
         return [command for command in MediaCommand if command in commands]
 
     def _send_state_to_role(self, role: Role) -> None:
-        """Send current controller state to a single role."""
+        """
+        Send the complete current controller state to a single role.
+
+        Every required field is always set, falling back to defaults.
+        """
         supported_commands = self._get_supported_commands()
         controller_state = ControllerStatePayload(
             supported_commands=supported_commands,

@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
+from aiosendspin.models.core import (
+    LegacyServerStateClearMessage,
+    ServerStateMessage,
+    ServerStatePayload,
+)
+from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.server.roles.base import GroupRole, Role
 from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
 from aiosendspin.server.roles.metadata.state import Metadata
@@ -40,16 +45,26 @@ class MetadataGroupRole(GroupRole):
         self._send_state_to_role(role)
 
     def _send_state_to_role(self, role: Role) -> None:
-        """Send current metadata state to a single role."""
+        """
+        Send the complete current metadata state to a single role.
+
+        Without metadata the state is a timestamp-only object.
+        """
+        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
         if self._current_metadata is None:
-            role.send_message(ServerStateMessage(ServerStatePayload(metadata=None)))
+            self._send_metadata(role, SessionUpdateMetadata(timestamp=timestamp), cleared=True)
             return
 
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
         current = replace(self._current_metadata, track_progress=self.track_progress)
-        metadata_update = current.snapshot_update(timestamp)
-        state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
-        role.send_message(state_message)
+        self._send_metadata(role, current.snapshot_update(timestamp), cleared=False)
+
+    def _send_metadata(self, role: Role, update: SessionUpdateMetadata, *, cleared: bool) -> None:
+        """Send a metadata object to a role; `cleared` marks the object for no metadata."""
+        # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+        if cleared and role.clears_state_with_null():
+            role.send_message(LegacyServerStateClearMessage(self.role_family))
+            return
+        role.send_message(ServerStateMessage(ServerStatePayload(metadata=update)))
 
     @property
     def track_progress(self) -> int | None:
@@ -199,7 +214,11 @@ class MetadataGroupRole(GroupRole):
             return
 
         last_metadata = self._current_metadata
-        metadata_update = None if metadata is None else metadata.snapshot_update(timestamp)
+        metadata_update = (
+            SessionUpdateMetadata(timestamp=timestamp)
+            if metadata is None
+            else metadata.snapshot_update(timestamp)
+        )
 
         self._current_metadata = metadata
 
@@ -207,8 +226,7 @@ class MetadataGroupRole(GroupRole):
             self._track_progress_timestamp_us = timestamp
 
         for role in self._members:
-            state_message = ServerStateMessage(ServerStatePayload(metadata=metadata_update))
-            role.send_message(state_message)
+            self._send_metadata(role, metadata_update, cleared=metadata is None)
 
         if metadata is None:
             self.emit_group_event(

@@ -52,6 +52,8 @@ class _DummyServer:
 
 
 class _DummyConnection:
+    clears_role_state_with_null = False
+
     def __init__(self) -> None:
         self.sent_json: list[object] = []
         self.sent_binary: list[bytes] = []
