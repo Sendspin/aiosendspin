@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass
 from itertools import pairwise
@@ -414,14 +415,14 @@ async def test_commit_audio_float_input_quantizes_at_output_edge(
     _client, conn = _make_connected_player(mock_loop, group, "p1")
 
     quantize_calls = 0
-    original_quantizer = push_stream_module._quantize_float_pcm  # noqa: SLF001
+    original_quantizer = push_stream_module._quantizer_state  # noqa: SLF001
 
     def _counted_quantizer(**kwargs: Any) -> object:
         nonlocal quantize_calls
         quantize_calls += 1
         return original_quantizer(**kwargs)
 
-    monkeypatch.setattr(push_stream_module, "_quantize_float_pcm", _counted_quantizer)
+    monkeypatch.setattr(push_stream_module, "_quantizer_state", _counted_quantizer)
 
     stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(
@@ -853,6 +854,189 @@ async def test_clear_during_inflight_commit_suppresses_audio_delivery(mock_loop:
 
     assert any(isinstance(m, StreamClearMessage) for m in conn.sent_json)
     assert not conn.sent_binary
+
+
+class _BlockingTransformer:
+    """Transformer whose process() parks its thread until `release` is set."""
+
+    pending_timestamp_us: int | None = None
+    frame_duration_us = 25_000
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.process_thread: int | None = None
+        self.in_process = False
+        self.reset_calls = 0
+        self.reset_overlapped_process = False
+
+    def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+        self.process_thread = threading.get_ident()
+        self.in_process = True
+        self.entered.set()
+        self.release.wait()
+        self.in_process = False
+        return [(pcm, 25_000)]
+
+    def flush(self) -> list[tuple[bytes, int]]:
+        return []
+
+    def get_header(self) -> bytes | None:
+        return None
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+        self.reset_overlapped_process |= self.in_process
+        # Unblock process() so an overlapping reset fails the test instead of hanging it.
+        self.release.set()
+
+
+class _ReleaseBeforeAcquire:
+    """Lock proxy that releases a parked transformer right before waiting for the lock."""
+
+    def __init__(self, lock: threading.Lock, release: threading.Event) -> None:
+        self._lock = lock
+        self._release = release
+
+    def __enter__(self) -> None:
+        self._release.set()
+        self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
+
+
+def _blocking_transformer_stream(
+    mock_loop: Any,
+) -> tuple[PushStream, _DummyRole, _BlockingTransformer]:
+    transformer = _BlockingTransformer()
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,  # type: ignore[arg-type]
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group = _DummyGroup(clients=[])
+    group.clients.append(_DummyClient([role]))  # type: ignore[arg-type]
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)  # type: ignore[arg-type]
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    return stream, role, transformer
+
+
+@pytest.mark.asyncio
+async def test_encode_runs_off_loop_and_stop_reset_waits_for_it(mock_loop: Any) -> None:
+    """Encoding runs on a worker thread, and stop() never resets a transformer mid-process()."""
+    stream, role, transformer = _blocking_transformer_stream(mock_loop)
+    commit_task = asyncio.create_task(stream.commit_audio())
+
+    # The loop keeps running while the worker is parked inside process().
+    assert await asyncio.to_thread(transformer.entered.wait, 5.0)
+    assert transformer.in_process
+    assert transformer.process_thread != threading.get_ident()
+
+    # The worker already holds the real lock; stop() goes through the proxy,
+    # which lets process() finish only once stop() is about to wait for it.
+    stream._transformer_lock = _ReleaseBeforeAcquire(  # type: ignore[assignment]  # noqa: SLF001
+        stream._transformer_lock,  # noqa: SLF001
+        transformer.release,
+    )
+    stream.stop()
+    await commit_task
+
+    assert transformer.reset_calls == 1
+    assert not transformer.reset_overlapped_process
+    assert role.received == []
+
+
+@pytest.mark.asyncio
+async def test_overlapping_commits_run_dsp_one_at_a_time_in_order(
+    mock_loop: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second commit waits for the first commit's worker before starting its own DSP."""
+    stream, role, transformer = _blocking_transformer_stream(mock_loop)
+    in_flight = 0
+    max_in_flight = 0
+    original_run_off_loop = push_stream_module._run_off_loop  # noqa: SLF001
+
+    async def _tracked_run_off_loop(func: Any, /, *args: object) -> Any:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        try:
+            return await original_run_off_loop(func, *args)
+        finally:
+            in_flight -= 1
+
+    monkeypatch.setattr(push_stream_module, "_run_off_loop", _tracked_run_off_loop)
+
+    first = asyncio.create_task(stream.commit_audio())
+    assert await asyncio.to_thread(transformer.entered.wait, 5.0)
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    second = asyncio.create_task(stream.commit_audio())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert in_flight == 1
+    assert stream._commit_dsp_lock.locked()  # noqa: SLF001
+
+    transformer.release.set()
+    first_start_us, second_start_us = await asyncio.gather(first, second)
+
+    assert max_in_flight == 1
+    assert first_start_us < second_start_us
+    assert [chunk.timestamp_us for chunk in role.received] == [first_start_us, second_start_us]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_commit_waits_for_its_worker(mock_loop: Any) -> None:
+    """Cancelling commit_audio() completes only once its worker thread has finished."""
+    stream, _role, transformer = _blocking_transformer_stream(mock_loop)
+    commit_task = asyncio.create_task(stream.commit_audio())
+    assert await asyncio.to_thread(transformer.entered.wait, 5.0)
+
+    for _ in range(2):
+        commit_task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not commit_task.done()
+    assert stream._commit_in_flight == 1  # noqa: SLF001
+
+    transformer.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await commit_task
+    assert not transformer.in_process
+    assert stream._commit_in_flight == 0  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_run_off_loop_retrieves_worker_error_after_cancel(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A worker that fails after its caller was cancelled is logged, not left unretrieved."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _failing_worker() -> None:
+        entered.set()
+        release.wait()
+        raise ValueError("worker failed")
+
+    task = asyncio.create_task(push_stream_module._run_off_loop(_failing_worker))  # noqa: SLF001
+    assert await asyncio.to_thread(entered.wait, 5.0)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with (
+        caplog.at_level("DEBUG", logger=push_stream_module.__name__),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await task
+    assert any(record.exc_info and record.exc_info[0] is ValueError for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -3146,14 +3330,14 @@ async def test_multi_role_fanout_quantizes_once_per_pcm_key(
     group.clients.extend([_DummyClient([role1]), _DummyClient([role2])])
 
     quantize_calls = 0
-    original_quantizer = push_stream_module._quantize_float_pcm  # noqa: SLF001
+    original_quantizer = push_stream_module._quantizer_state  # noqa: SLF001
 
     def _counted_quantizer(**kwargs: Any) -> object:
         nonlocal quantize_calls
         quantize_calls += 1
         return original_quantizer(**kwargs)
 
-    monkeypatch.setattr(push_stream_module, "_quantize_float_pcm", _counted_quantizer)
+    monkeypatch.setattr(push_stream_module, "_quantizer_state", _counted_quantizer)
 
     stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
     stream.prepare_audio(

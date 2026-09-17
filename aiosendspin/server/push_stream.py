@@ -7,6 +7,7 @@ __all__ = ["MAIN_CHANNEL", "PushStream"]
 import asyncio
 import contextlib
 import logging
+import threading
 import weakref
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from collections.abc import Set as AbstractSet
 
     import av
@@ -230,6 +232,27 @@ def _encode_for_transform_key(
         result.append((data, ts, dur))
         ts += dur
     return result
+
+
+async def _run_off_loop[T, *Ts](func: Callable[[*Ts], T], /, *args: *Ts) -> T:
+    """
+    Run func on a worker thread and return its result.
+
+    A cancelled caller still waits for the thread to finish before CancelledError is
+    re-raised, so the work never outlives the coroutine that started it.
+    """
+    future = asyncio.get_running_loop().run_in_executor(None, func, *args)
+    cancelled: asyncio.CancelledError | None = None
+    while not future.done():
+        try:
+            await asyncio.wait((future,))
+        except asyncio.CancelledError as err:
+            cancelled = err
+    if cancelled is None:
+        return future.result()
+    if not future.cancelled() and (exc := future.exception()) is not None:
+        _LOGGER.debug("Worker failed after its caller was cancelled", exc_info=exc)
+    raise cancelled
 
 
 class _ResamplerKey(NamedTuple):
@@ -580,17 +603,15 @@ def _flush_resampler(resampler_state: _ResamplerState) -> _ResampledPCM:
     )
 
 
-def _quantize_float_pcm(
+def _quantizer_state(
     *,
     channel_id: UUID,
-    pcm_data: bytes,
-    output_ts: int,
     sample_rate: int,
     channels: int,
     target_bit_depth: int,
     resampler_cache: dict[_ResamplerKey, _ResamplerState],
-) -> _ResampledPCM:
-    """Convert float32 PCM to integer output format using the provided cache."""
+) -> _ResamplerState:
+    """Return the cached float32-to-integer quantizer for this output shape."""
     source_format = AudioFormat(
         sample_rate=sample_rate,
         bit_depth=32,
@@ -618,7 +639,28 @@ def _quantize_float_pcm(
     if state is None:
         state = _create_resampler_state(resampler_key, source_format, target_format)
         resampler_cache[resampler_key] = state
-    return _resample_pcm_standalone(state, pcm_data, source_format, output_ts)
+    return state
+
+
+def _quantize_float_pcm(
+    *,
+    channel_id: UUID,
+    pcm_data: bytes,
+    output_ts: int,
+    sample_rate: int,
+    channels: int,
+    target_bit_depth: int,
+    resampler_cache: dict[_ResamplerKey, _ResamplerState],
+) -> _ResampledPCM:
+    """Convert float32 PCM to integer output format using the provided cache."""
+    state = _quantizer_state(
+        channel_id=channel_id,
+        sample_rate=sample_rate,
+        channels=channels,
+        target_bit_depth=target_bit_depth,
+        resampler_cache=resampler_cache,
+    )
+    return _resample_pcm_standalone(state, pcm_data, state.key.source_format, output_ts)
 
 
 def _processing_format_for_roles(
@@ -749,6 +791,13 @@ class PushStream:
         self._transform_key_cache: dict[tuple[int, int], TransformKey] = {}
         # Last encoded input end timestamp per TransformKey for long-gap reset handling.
         self._transform_last_input_end_us: dict[TransformKey, int] = {}
+        # Live encoding runs on a worker thread. Transformer resets from the loop
+        # take this lock so a reset never interleaves with an in-progress encode.
+        self._transformer_lock = threading.Lock()
+        # Overlapping commit_audio() calls run their DSP one at a time, in the order they
+        # reach delivery, so cached resampler and transformer state is never driven from
+        # two threads.
+        self._commit_dsp_lock = asyncio.Lock()
         # Roles awaiting delayed join; excluded from live delivery until join executes.
         self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
         # >0 while commit_audio() is between the _channel_timing advance and _role_chunk_cache
@@ -1449,12 +1498,14 @@ class PushStream:
         ],
         prepared: dict[UUID, tuple[bytes, AudioFormat]],
         channel_play_start: dict[UUID, int],
+        *,
+        commit_generation: int | None = None,
     ) -> dict[tuple[UUID, int, int, int], _ResampledPCM]:
         """Resample PCM once per unique PCM key. Returns (channel, rate, depth, ch) -> (pcm, ts).
 
-        Resampler state (PyAV objects) is cached and must stay on a single thread.
-        Running cached resamplers across a worker pool can deadlock depending on
-        thread scheduling, so resampling runs synchronously on the loop thread.
+        Cache lookups stay on the loop thread; only the resample itself runs on a
+        worker thread, one call at a time, so no resampler state is ever driven
+        from two threads at once.
         """
         if not roles_by_pcm:
             return {}
@@ -1509,9 +1560,12 @@ class PushStream:
                 results[pcm_key] = empty
                 continue
 
-            resampled = _resample_pcm_standalone(
-                state, source_pcm, source_format, input_timestamp_us
+            resampled = await _run_off_loop(
+                _resample_pcm_standalone, state, source_pcm, source_format, input_timestamp_us
             )
+            if not self._is_generation_active(commit_generation):
+                # clear() emptied the cache while we were off-loop; do not repopulate it.
+                return results
             shared_results_by_resampler[resampler_key] = resampled
             results[pcm_key] = resampled
         return results
@@ -1599,6 +1653,29 @@ class PushStream:
         self._transform_last_input_end_us[tkey] = output_ts + duration_us
         return encoded
 
+    def _encode_transforms(
+        self,
+        encode_tasks: dict[TransformKey, tuple[AudioTransformer | None, bytes, int, int]],
+        commit_generation: int | None,
+    ) -> dict[TransformKey, list[tuple[bytes, int, int]]]:
+        """Encode every pending TransformKey. Runs on a worker thread."""
+        transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
+        with self._transformer_lock:
+            # stop()/clear() bump the generation before they take this lock, so a
+            # check inside it guarantees a freshly reset transformer is not
+            # re-dirtied by a commit that already lost the race.
+            if not self._is_generation_active(commit_generation):
+                return transformed
+            for tkey, (transformer, pcm_data, output_ts, duration_us) in encode_tasks.items():
+                transformed[tkey] = self._encode_transform_for_key(
+                    tkey,
+                    transformer,
+                    pcm_data,
+                    output_ts,
+                    duration_us,
+                )
+        return transformed
+
     async def _transform_and_deliver(  # noqa: PLR0915
         self,
         roles_by_pcm: dict[
@@ -1610,7 +1687,7 @@ class PushStream:
     ) -> dict[TransformKey, list[CachedChunk]]:
         """Transform PCM, deliver live chunks to roles, and return cache results.
 
-        Encoding runs sequentially on the event loop, yielding every few keys.
+        Quantization and encoding run on a worker thread; delivery stays on the loop.
         """
         # Collect unique encoding tasks: tkey -> (transformer, pcm_data, output_ts, duration_us)
         encode_tasks: dict[TransformKey, tuple[AudioTransformer | None, bytes, int, int]] = {}
@@ -1629,15 +1706,22 @@ class PushStream:
             # output_start_ts and sample_count ensures downstream timestamps reflect
             # any buffering or trimming introduced by the quantizer graph.
             if resampled.sample_type == "float":
-                edge_quantized = _quantize_float_pcm(
+                quantizer = _quantizer_state(
                     channel_id=channel_id,
-                    pcm_data=pcm_data,
-                    output_ts=output_ts,
                     sample_rate=rate,
                     channels=_channels,
                     target_bit_depth=depth,
                     resampler_cache=self._resamplers,
                 )
+                edge_quantized = await _run_off_loop(
+                    _resample_pcm_standalone,
+                    quantizer,
+                    pcm_data,
+                    quantizer.key.source_format,
+                    output_ts,
+                )
+                if not self._is_generation_active(commit_generation):
+                    return {}
                 pcm_data = edge_quantized.pcm_data
                 output_ts = edge_quantized.output_start_ts
                 duration_us = int(edge_quantized.sample_count * 1_000_000 / rate) if rate > 0 else 0
@@ -1674,23 +1758,11 @@ class PushStream:
         transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
 
         if encode_tasks:
-            for processed, (tkey, (transformer, pcm_data, output_ts, duration_us)) in enumerate(
-                encode_tasks.items(), start=1
-            ):
-                if not self._is_generation_active(commit_generation):
-                    return {}
-                transformed[tkey] = self._encode_transform_for_key(
-                    tkey,
-                    transformer,
-                    pcm_data,
-                    output_ts,
-                    duration_us,
-                )
-                if processed % 2 == 0:
-                    # Keep the loop responsive during large multi-role commits.
-                    await asyncio.sleep(0)
-                    if not self._is_generation_active(commit_generation):
-                        return {}
+            transformed = await _run_off_loop(
+                self._encode_transforms, encode_tasks, commit_generation
+            )
+            if not self._is_generation_active(commit_generation):
+                return {}
 
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
         active_roles = {role for _client, role in self._get_audio_roles()}
@@ -1751,20 +1823,22 @@ class PushStream:
         Returns:
             Dict of TransformKey -> list of CachedChunk for late joiners.
         """
-        roles_by_pcm = self._group_roles_by_pcm_requirements(prepared)
-        if not roles_by_pcm:
-            return {}
-
-        if not self._is_generation_active(commit_generation):
-            return {}
-        resampled = await self._resample_for_roles(roles_by_pcm, prepared, channel_play_start)
-        if not self._is_generation_active(commit_generation):
-            return {}
-        return await self._transform_and_deliver(
-            roles_by_pcm,
-            resampled,
-            commit_generation=commit_generation,
-        )
+        async with self._commit_dsp_lock:
+            if not self._is_generation_active(commit_generation):
+                return {}
+            roles_by_pcm = self._group_roles_by_pcm_requirements(prepared)
+            if not roles_by_pcm:
+                return {}
+            resampled = await self._resample_for_roles(
+                roles_by_pcm, prepared, channel_play_start, commit_generation=commit_generation
+            )
+            if not self._is_generation_active(commit_generation):
+                return {}
+            return await self._transform_and_deliver(
+                roles_by_pcm,
+                resampled,
+                commit_generation=commit_generation,
+            )
 
     def _prune_role_chunk_cache(self) -> None:
         """Remove old chunks from the role-based cache."""
@@ -1854,7 +1928,8 @@ class PushStream:
                 self._role_chunk_cache.pop(tkey, None)
                 self._transform_last_input_end_us.pop(tkey, None)
                 if req.transformer is not None:
-                    req.transformer.reset()
+                    with self._transformer_lock:
+                        req.transformer.reset()
             if not self._other_roles_share_resampler_shape(req, channel_id, role):
                 # Drop orphan resampler so a rejoin sees no stale FIR state.
                 for rkey in list(self._resamplers.keys()):
@@ -1908,7 +1983,8 @@ class PushStream:
                 self._role_chunk_cache.pop(stale_tkey, None)
                 transformer = self._group.transformer_pool.get(stale_tkey)
                 if transformer is not None:
-                    transformer.reset()
+                    with self._transformer_lock:
+                        transformer.reset()
 
         # Clean up any catchup state referencing this role
         for tkey in list(self._catchup_roles.keys()):
@@ -2547,7 +2623,8 @@ class PushStream:
                 self._role_chunk_cache.pop(cache_key, None)
                 self._transform_last_input_end_us.pop(cache_key, None)
                 if encoder is not None:
-                    encoder.reset()
+                    with self._transformer_lock:
+                        encoder.reset()
             self._catchup_tasks.pop(cache_key, None)
 
     def _cancel_catchup_tasks(self) -> None:
@@ -2585,8 +2662,9 @@ class PushStream:
                 channel_id = req.channel_id or MAIN_CHANNEL
                 tkey = self._build_transform_key(req, channel_id, role)
                 transformers_by_key.setdefault(tkey, req.transformer)
-        for transformer in transformers_by_key.values():
-            transformer.reset()
+        with self._transformer_lock:
+            for transformer in transformers_by_key.values():
+                transformer.reset()
 
         if not keep_stream:
             # Send stream/end to all roles with audio requirements via hooks
@@ -2630,7 +2708,6 @@ class PushStream:
         self._role_chunk_cache.clear()
         self._pending_join_roles.clear()
         self._pcm_chunk_cache.clear()
-        self._transform_last_input_end_us.clear()
         self._cancel_catchup_tasks()
 
         # Reset inline resamplers
@@ -2645,8 +2722,10 @@ class PushStream:
                 tkey = self._build_transform_key(req, channel_id, role)
                 reset_transformers.setdefault(tkey, req.transformer)
 
-        for transformer in reset_transformers.values():
-            transformer.reset()
+        with self._transformer_lock:
+            for transformer in reset_transformers.values():
+                transformer.reset()
+            self._transform_last_input_end_us.clear()
 
         # Clear role tracking state
         self._started_roles.clear()
