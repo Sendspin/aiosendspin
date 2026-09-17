@@ -1113,6 +1113,9 @@ class SendspinClient:
     def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:
         """Add a listener for server/state messages with metadata.
 
+        The callback receives None when a server/activate removes the metadata role and its
+        state is discarded.
+
         Returns:
             A function that removes this listener when called.
         """
@@ -1139,6 +1142,9 @@ class SendspinClient:
     ) -> Callable[[], None]:
         """Add a listener for server/state messages.
 
+        The callback receives None when a server/activate removes the controller role and its
+        state is discarded.
+
         Returns:
             A function that removes this listener when called.
         """
@@ -1151,6 +1157,9 @@ class SendspinClient:
 
     def add_color_listener(self, callback: ColorCallback) -> Callable[[], None]:
         """Add a listener for server/state messages with color.
+
+        The callback receives None when a server/activate removes the color role and its
+        state is discarded.
 
         Returns:
             A function that removes this listener when called.

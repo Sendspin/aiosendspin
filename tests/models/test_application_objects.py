@@ -119,12 +119,12 @@ def test_server_state_merge_keeps_application_objects_per_key() -> None:
         )
     )
     incoming = ServerStateMessage(
-        payload=ServerStatePayload(application_objects={"_b": {"v": 2}, "_c": None})
+        payload=ServerStatePayload(application_objects={"_b": {"v": 2}, "_c": {"v": 3}})
     )
 
     merged = existing.merge(incoming)
 
     assert isinstance(merged, ServerStateMessage)
     assert merged.payload.metadata == SessionUpdateMetadata(timestamp=100, title="Song")
-    assert merged.payload.application_objects == {"_a": {"v": 1}, "_b": {"v": 2}, "_c": None}
+    assert merged.payload.application_objects == {"_a": {"v": 1}, "_b": {"v": 2}, "_c": {"v": 3}}
     assert existing.payload.application_objects == {"_a": {"v": 1}, "_b": {"v": 1}}
