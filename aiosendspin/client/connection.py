@@ -1193,7 +1193,14 @@ class SendspinConnection:
             await self._send_bytes_locked(header + frame)
 
     async def send_source_signal(self, signal: SignalState) -> None:
-        """Report source signal presence."""
+        """
+        Report source signal presence.
+
+        Raises RuntimeError unless the client advertised the ``line_sense`` feature.
+        """
+        support = self._client.source_support
+        if support is None or support.features is None or not support.features.line_sense:
+            raise RuntimeError("Source signal requires the line_sense feature")
         self._ensure_source_authorized()
         self._reported_source_signal = signal
         if not self.is_time_synchronized():
