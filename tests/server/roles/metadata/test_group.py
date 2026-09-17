@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aiosendspin.clock import ManualClock
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
@@ -556,3 +557,195 @@ def test_repeat_and_shuffle_are_accepted_but_never_sent() -> None:
     mgr.set_metadata(Metadata(title="Song", repeat=RepeatMode.ONE, shuffle=False))
 
     member.send_message.assert_not_called()
+
+
+def _make_scheduling_group() -> tuple[MagicMock, ManualClock]:
+    clock = ManualClock(now_us_value=1_000_000)
+    group = MagicMock()
+    group._server.clock = clock  # noqa: SLF001
+    group.has_active_stream = True
+    return group, clock
+
+
+def _all_sent_metadata(member: MagicMock) -> list[dict[str, object] | None]:
+    return [
+        call.args[0].payload.to_dict()["metadata"] for call in member.send_message.call_args_list
+    ]
+
+
+def _track(title: str, progress: int, timestamp_us: int | None = None) -> Metadata:
+    return Metadata(
+        title=title,
+        track_progress=progress,
+        track_duration=180_000,
+        playback_speed=1000,
+        timestamp_us=timestamp_us,
+    )
+
+
+def test_future_metadata_is_sent_and_takes_effect_later() -> None:
+    """Metadata with a future timestamp is sent as is and becomes current once due."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Now", 30_000))
+
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+
+    assert _all_sent_metadata(member)[-1] == {
+        "timestamp": 1_500_000,
+        "title": "Next",
+        "progress": {"track_progress": 0, "track_duration": 180_000, "playback_speed": 1000},
+    }
+    event = group._signal_event.call_args.args[0]  # noqa: SLF001
+    assert isinstance(event, MetadataUpdatedEvent)
+    assert event.timestamp_us == 1_500_000
+    assert event.previous_metadata is not None
+    assert event.previous_metadata.title == "Now"
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Now"
+
+    clock.advance_us(600_000)
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Next"
+    assert mgr.track_progress == 100
+
+
+def test_late_join_gets_current_then_scheduled_metadata() -> None:
+    """A joining member gets the current metadata as of now, then the scheduled one."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(_track("Now", 30_000))
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+    clock.advance_us(200_000)
+
+    member = _member(legacy=False)
+    mgr.on_member_join(member)
+
+    sent = _all_sent_metadata(member)
+    assert sent[0] == {
+        "timestamp": 1_200_000,
+        "title": "Now",
+        "progress": {"track_progress": 30_200, "track_duration": 180_000, "playback_speed": 1000},
+    }
+    assert sent[1] is not None
+    assert sent[1]["timestamp"] == 1_500_000
+    assert sent[1]["title"] == "Next"
+
+
+def test_later_scheduled_metadata_replaces_earlier_by_arrival() -> None:
+    """The last scheduled metadata wins even when its timestamp is earlier."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(_track("A", 0, timestamp_us=1_800_000))
+    mgr.set_metadata(_track("B", 0, timestamp_us=1_400_000))
+
+    clock.advance_us(1_000_000)
+
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "B"
+
+
+def test_present_metadata_cancels_scheduled_even_when_unchanged() -> None:
+    """Unchanged metadata set now is still sent, since it cancels the scheduled track."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Now", 30_000))
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+
+    mgr.update(title="Now")
+
+    assert len(member.send_message.call_args_list) == 3
+    clock.advance_us(600_000)
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Now"
+
+
+def test_cancel_scheduled_metadata_resends_current_now() -> None:
+    """cancel_scheduled() re-sends the current metadata as of now."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Now", 30_000))
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+    clock.advance_us(100_000)
+
+    mgr.cancel_scheduled()
+    mgr.cancel_scheduled()
+
+    assert _all_sent_metadata(member)[2:] == [
+        {
+            "timestamp": 1_100_000,
+            "title": "Now",
+            "progress": {
+                "track_progress": 30_100,
+                "track_duration": 180_000,
+                "playback_speed": 1000,
+            },
+        }
+    ]
+    clock.advance_us(600_000)
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Now"
+    assert mgr.track_progress == 30_700
+
+
+def test_clear_discards_scheduled_metadata() -> None:
+    """clear() sends null at once and the scheduled metadata never takes effect."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+
+    mgr.clear()
+    clock.advance_us(600_000)
+
+    assert _all_sent_metadata(member)[-1] == {"timestamp": 1_000_000}
+    assert mgr.metadata is None
+
+
+def test_metadata_beyond_lead_limit_is_sent_20s_ahead() -> None:
+    """Metadata more than 20 s ahead is sent only 20 s ahead, and not to joiners before."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+
+    mgr.set_metadata(_track("Next", 0, timestamp_us=31_000_000))
+
+    member.send_message.assert_not_called()
+    (delay_s, send), _kwargs = group._server.loop.call_later.call_args  # noqa: SLF001
+    assert delay_s == 10.0
+    joiner = _member(legacy=False)
+    mgr.on_member_join(joiner)
+    assert _all_sent_metadata(joiner) == [{"timestamp": 1_000_000}]
+
+    clock.advance_us(10_000_000)
+    send()
+    sent = _all_sent_metadata(member)
+    assert len(sent) == 1
+    assert sent[0] is not None
+    assert sent[0]["timestamp"] == 31_000_000
+
+
+def test_sent_metadata_replaced_by_deferred_one_is_cancelled() -> None:
+    """Replacing sent metadata with metadata sent only later restates the current metadata now."""
+    group, _clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = _member(legacy=False)
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Now", 30_000))
+    mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
+
+    mgr.set_metadata(_track("Much later", 0, timestamp_us=31_000_000))
+
+    sent = _all_sent_metadata(member)
+    assert len(sent) == 3
+    assert sent[2] is not None
+    assert sent[2]["timestamp"] == 1_000_000
+    assert sent[2]["title"] == "Now"

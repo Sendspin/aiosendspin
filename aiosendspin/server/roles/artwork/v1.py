@@ -67,11 +67,15 @@ class ArtworkV1Role(Role):
         self._group_role: ArtworkGroupRole | None = None
         # Channels of the active stream, positional; an index past the end is not streamed.
         self._channels: list[ArtworkChannel] = []
-        # Images waiting for their transfer: channel -> (image, timestamp_us). The first
-        # queued image already due to be announced is sent next.
-        self._queued: dict[int, tuple[bytes, int]] = {}
-        # Channel of the transfer announced and not yet fully sent.
+        # Images waiting for their transfer: channel -> [(image, timestamp_us)], a current
+        # image before a scheduled one. The first channel whose next image is due to be
+        # announced is sent next.
+        self._queued: dict[int, list[tuple[bytes, int]]] = {}
+        # Channel and timestamp of the transfer announced and not yet fully sent.
         self._in_flight: int | None = None
+        self._in_flight_timestamp_us = 0
+        # Channels whose last announced image was scheduled and may be pending on the client.
+        self._scheduled_announced: set[int] = set()
         self._transfer_task: asyncio.Task[None] | None = None
         self._queue_changed = asyncio.Event()
 
@@ -156,8 +160,9 @@ class ArtworkV1Role(Role):
         """
         Send an image for a channel.
 
-        The image replaces one still queued or in flight for the channel. Does nothing
-        when the channel is not currently streamed.
+        An image with a future timestamp replaces only a scheduled image still queued or
+        in flight for the channel; any other image replaces every one. Does nothing when
+        the channel is not currently streamed.
 
         Args:
             channel: Channel number (0-3).
@@ -167,15 +172,24 @@ class ArtworkV1Role(Role):
         # TODO: should we raise instead of swallowing when no transport?
         if not self.has_connection() or channel not in self.get_channel_configs():
             return
+        now_us = self._client._server.clock.now_us()  # noqa: SLF001
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-        if self._uses_single_message_framing():
-            self._send_single_message(channel, image_data, timestamp_us)
+        if self.uses_single_message_framing():
+            self._queued.pop(channel, None)
+            if timestamp_us - MAX_ANNOUNCE_LEAD_US <= now_us:
+                self._send_single_message(channel, image_data, timestamp_us)
+            else:
+                self._queued[channel] = [(image_data, timestamp_us)]
+                self._start_transfers()
             return
-        if channel == self._in_flight:
-            self._cancel_in_flight()
-            self._queued = {channel: (image_data, timestamp_us), **self._queued}
+        scheduled = timestamp_us > now_us
+        queued = self._current_queued(channel, now_us) if scheduled else []
+        queued.append((image_data, timestamp_us))
+        if self._discard_client_scheduled(channel, now_us, keep_current=scheduled):
+            self._queued.pop(channel, None)
+            self._queued = {channel: queued, **self._queued}
         else:
-            self._queued[channel] = (image_data, timestamp_us)
+            self._queued[channel] = queued
         self._start_transfers()
 
     def send_artwork_cleared(self, channel: int, timestamp_us: int) -> None:
@@ -189,6 +203,33 @@ class ArtworkV1Role(Role):
             timestamp_us: Server time in microseconds when the channel should clear.
         """
         self.send_artwork(channel, b"", timestamp_us)
+
+    def cancel_scheduled_artwork(self, channel: int) -> bool:
+        """
+        Discard the channel's scheduled image, keeping its current one.
+
+        Returns False when the client can only drop a scheduled image by receiving the
+        current image again, which the caller then sends.
+        """
+        if not self.has_connection() or channel not in self.get_channel_configs():
+            return True
+        # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+        if self.uses_single_message_framing():
+            self._queued.pop(channel, None)
+            return False
+        now_us = self._client._server.clock.now_us()  # noqa: SLF001
+        if queued := self._current_queued(channel, now_us):
+            self._queued[channel] = queued
+        else:
+            self._queued.pop(channel, None)
+        if self._discard_client_scheduled(channel, now_us, keep_current=True):
+            self._start_transfers()
+        return True
+
+    # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+    def uses_single_message_framing(self) -> bool:
+        """Whether the client predates transfers, having declared its channels in the hello."""
+        return self._client.info.artwork_support is not None
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def on_stream_request_format(
@@ -290,13 +331,9 @@ class ArtworkV1Role(Role):
         self._stop_transfer_task()
         self._queued.clear()
         self._in_flight = None
+        self._scheduled_announced.clear()
         self._stream_started = False
         self._channels = []
-
-    # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-    def _uses_single_message_framing(self) -> bool:
-        """Whether the client predates transfers, having declared its channels in the hello."""
-        return self._client.info.artwork_support is not None
 
     # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
     def _send_single_message(self, channel: int, image_data: bytes, timestamp_us: int) -> None:
@@ -312,7 +349,7 @@ class ArtworkV1Role(Role):
     def _send_clear_now(self, channel: int, timestamp_us: int) -> None:
         """Enqueue a clear for `channel` at once; no transfer may be in flight."""
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-        if self._uses_single_message_framing():
+        if self.uses_single_message_framing():
             self._send_single_message(channel, b"", timestamp_us)
             return
         self._send_transfer_message(channel, pack_artwork_announce(channel, timestamp_us, 0))
@@ -328,6 +365,28 @@ class ArtworkV1Role(Role):
             message_type=artwork_message_type(channel),
             epoch_exempt=epoch_exempt,
         )
+
+    def _current_queued(self, channel: int, now_us: int) -> list[tuple[bytes, int]]:
+        """Return the channel's latest queued image that is already due, if any."""
+        return [entry for entry in self._queued.get(channel, []) if entry[1] <= now_us][-1:]
+
+    def _discard_client_scheduled(self, channel: int, now_us: int, *, keep_current: bool) -> bool:
+        """
+        Make the client discard the channel's scheduled image.
+
+        Cancels the channel's transfer in flight unless `keep_current` and it carries a
+        current image. Returns whether a transfer was cancelled.
+        """
+        if channel == self._in_flight:
+            if keep_current and self._in_flight_timestamp_us <= now_us:
+                return False
+            self._cancel_in_flight()
+            return True
+        if channel in self._scheduled_announced:
+            self._scheduled_announced.discard(channel)
+            # Must survive a later cancel dropping the role's queued binary.
+            self._send_transfer_message(channel, pack_artwork_cancel(channel), epoch_exempt=True)
+        return False
 
     def _start_transfers(self) -> None:
         """Run the transfer task, or wake it to reconsider the queue."""
@@ -351,6 +410,7 @@ class ArtworkV1Role(Role):
             self._send_transfer_message(
                 self._in_flight, pack_artwork_cancel(self._in_flight), epoch_exempt=True
             )
+            self._scheduled_announced.discard(self._in_flight)
             self._in_flight = None
 
     async def _run_transfers(self) -> None:
@@ -360,8 +420,8 @@ class ArtworkV1Role(Role):
             self._queue_changed.clear()
             now_us = clock.now_us()
             due = [
-                (timestamp_us - MAX_ANNOUNCE_LEAD_US, channel)
-                for channel, (_, timestamp_us) in self._queued.items()
+                (queued[0][1] - MAX_ANNOUNCE_LEAD_US, channel)
+                for channel, queued in self._queued.items()
             ]
             channel = next((channel for announce_us, channel in due if announce_us <= now_us), None)
             if channel is None:
@@ -369,8 +429,20 @@ class ArtworkV1Role(Role):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self._queue_changed.wait(), wait_s)
                 continue
-            image, timestamp_us = self._queued.pop(channel)
+            queued = self._queued[channel]
+            image, timestamp_us = queued.pop(0)
+            if not queued:
+                del self._queued[channel]
+            # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+            if self.uses_single_message_framing():
+                self._send_single_message(channel, image, timestamp_us)
+                continue
             self._in_flight = channel
+            self._in_flight_timestamp_us = timestamp_us
+            if timestamp_us > clock.now_us():
+                self._scheduled_announced.add(channel)
+            else:
+                self._scheduled_announced.discard(channel)
             self._send_transfer_message(
                 channel, pack_artwork_announce(channel, timestamp_us, len(image))
             )

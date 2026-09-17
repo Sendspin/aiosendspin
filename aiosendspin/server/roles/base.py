@@ -135,6 +135,9 @@ class GroupRole(ABC):
     def on_client_removed(self, client: SendspinClient) -> None:  # noqa: B027
         """Handle a client being removed from this group."""
 
+    def on_group_deleted(self) -> None:  # noqa: B027
+        """Handle the group being deleted after its last client left."""
+
     def emit_group_event(self, event: GroupRoleEvent) -> None:
         """Emit a GroupRole event on the owning group's event stream."""
         self._group._signal_event(event)  # noqa: SLF001
@@ -154,6 +157,10 @@ class GroupRole(ABC):
     def set_group_muted(self, _muted: bool) -> bool | None:  # noqa: FBT001
         """Set group mute state if supported, return True/False or None if unsupported."""
         return None
+
+    def _now_us(self) -> int:
+        """Return the server clock time in microseconds."""
+        return self._group._server.clock.now_us()  # noqa: SLF001
 
 
 @dataclass(frozen=True)

@@ -644,6 +644,7 @@ def test_handle_seek_relative_command_emits_event() -> None:
 def _seek_relative_group(position_ms: int | None) -> tuple[MagicMock, ControllerGroupRole]:
     """Create a group whose metadata reports the given playback position."""
     group = MagicMock()
+    group._server.clock.now_us.return_value = 1_000_000  # noqa: SLF001
     group.has_active_stream = False
     metadata_group_role = MetadataGroupRole(group)
     if position_ms is not None:

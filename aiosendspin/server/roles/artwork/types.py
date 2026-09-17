@@ -27,3 +27,12 @@ class ArtworkRoleProtocol(Protocol):
     def send_artwork_cleared(self, channel: int, timestamp_us: int) -> None:
         """Clear artwork for a channel."""
         ...
+
+    def cancel_scheduled_artwork(self, channel: int) -> bool:
+        """Discard a channel's scheduled image, returning False if the current must be resent."""
+        ...
+
+    # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
+    def uses_single_message_framing(self) -> bool:
+        """Whether the client gets each image as one message, without transfers."""
+        ...

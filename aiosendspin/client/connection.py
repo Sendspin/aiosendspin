@@ -6,11 +6,11 @@ import asyncio
 import base64
 import logging
 import struct
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal, NoReturn, assert_never
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, assert_never
 
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -229,6 +229,19 @@ class _PendingArtwork:
     show_handle: asyncio.TimerHandle | None = None
 
 
+# server/state role objects whose future timestamp schedules them.
+_SCHEDULABLE_ROLE_OBJECTS: tuple[str, ...] = ("metadata", "color")
+
+
+@dataclass(slots=True)
+class _PendingState:
+    """A server/state role object held until its timestamp is reached on the local clock."""
+
+    payload: ServerStatePayload
+    timestamp_us: int
+    apply_handle: asyncio.TimerHandle
+
+
 def _malformed_artwork_message(payload: bytes) -> str | None:
     """Return why `payload` is a malformed artwork message, or None when it is well formed."""
     length = len(payload)
@@ -345,7 +358,9 @@ class SendspinConnection:
     _group_state: GroupUpdateServerPayload | None = None
     """Latest group state received from server."""
     _server_state: ServerStatePayload | None = None
-    """Latest state of each role object received from server."""
+    """Current state of each role object received from server."""
+    _pending_state: dict[str, _PendingState]
+    """Scheduled metadata and color updates, by role object name."""
 
     def __init__(self, client: SendspinClient) -> None:
         """Create a connection owned by ``client``, seeding per-connection state."""
@@ -373,6 +388,7 @@ class SendspinConnection:
         self._closed = asyncio.Event()
         self._artwork_pending = {}
         self._artwork_shown = set()
+        self._pending_state = {}
 
     @property
     def connected(self) -> bool:
@@ -1021,6 +1037,8 @@ class SendspinConnection:
         if not self._connected:
             return
         self._connected = False
+        for name in list(self._pending_state):
+            self._discard_pending_state(name)
 
         current_task = asyncio.current_task(loop=self._client.loop)
         if self._pairing_task is not None and self._pairing_task is not current_task:
@@ -1596,6 +1614,11 @@ class SendspinConnection:
             - (payload.server_transmitted - payload.server_received)
         ) / 2
         self._time_filter.update(round(offset), round(delay), now_us)
+        for name, pending in self._pending_state.items():
+            pending.apply_handle.cancel()
+            pending.apply_handle = self._call_at_server_time(
+                pending.timestamp_us, partial(self._apply_pending_state, name)
+            )
         if (
             not was_synchronized
             and self._time_filter.is_synchronized
@@ -1723,7 +1746,7 @@ class SendspinConnection:
         self._client.notify_group_callback(payload)
 
     def _discard_removed_role_state(self, active_roles: list[str]) -> None:
-        """Discard the server/state object of every active role missing from `active_roles`."""
+        """Discard current and scheduled server/state of every role missing from `active_roles`."""
         state = self._server_state
         removed = {role_family(role_id) for role_id in set(self._active_roles) - set(active_roles)}
         if state is None or not removed:
@@ -1733,10 +1756,14 @@ class SendspinConnection:
             "controller": self._client.notify_controller_callback,
             "color": self._client.notify_color_callback,
         }
+        scheduled = [family for family in removed if family in self._pending_state]
+        for family in scheduled:
+            self._discard_pending_state(family)
         discarded = [
             family
             for family in notifiers
-            if family in removed and not isinstance(getattr(state, family), UndefinedField)
+            if family in removed
+            and (family in scheduled or not isinstance(getattr(state, family), UndefinedField))
         ]
         self._server_state = replace(
             state,
@@ -1749,15 +1776,64 @@ class SendspinConnection:
             notifiers[family](None)
 
     def _handle_server_state(self, payload: ServerStatePayload) -> None:
+        current = payload
+        for name in _SCHEDULABLE_ROLE_OBJECTS:
+            state = getattr(payload, name)
+            if isinstance(state, UndefinedField):
+                continue
+            self._discard_pending_state(name)
+            if self._local_delay_us(state.timestamp) <= 0:
+                continue
+            self._pending_state[name] = _PendingState(
+                payload=payload,
+                timestamp_us=state.timestamp,
+                apply_handle=self._call_at_server_time(
+                    state.timestamp, partial(self._apply_pending_state, name)
+                ),
+            )
+            undefined: dict[str, Any] = {name: undefined_field()}
+            current = replace(current, **undefined)
+            if name == "metadata":
+                self._client.notify_scheduled_metadata(payload)
+            else:
+                self._client.notify_scheduled_color(payload)
+        self._apply_server_state(current, payload)
+
+    def _apply_server_state(self, current: ServerStatePayload, payload: ServerStatePayload) -> None:
+        """Make the role objects in `current` current, notifying listeners with `payload`."""
         self._server_state = (
-            payload if self._server_state is None else self._server_state.merge(payload)
+            current if self._server_state is None else self._server_state.merge(current)
         )
-        if not isinstance(payload.controller, UndefinedField):
+        if not isinstance(current.controller, UndefinedField):
             self._client.notify_controller_callback(payload)
-        if not isinstance(payload.metadata, UndefinedField):
+        if not isinstance(current.metadata, UndefinedField):
             self._client.notify_metadata_callback(payload)
-        if not isinstance(payload.color, UndefinedField):
+        if not isinstance(current.color, UndefinedField):
             self._client.notify_color_callback(payload)
+
+    def _apply_pending_state(self, name: str) -> None:
+        """Make the scheduled update of role object `name` current."""
+        pending = self._pending_state.pop(name)
+        state = getattr(pending.payload, name)
+        self._apply_server_state(ServerStatePayload(**{name: state}), pending.payload)
+
+    def _discard_pending_state(self, name: str) -> None:
+        """Discard the scheduled update of role object `name`, if any."""
+        if (pending := self._pending_state.pop(name, None)) is not None:
+            pending.apply_handle.cancel()
+
+    def _local_delay_us(self, server_timestamp_us: int) -> int:
+        """Return how long until `server_timestamp_us` on the local clock, 0 when unsynced."""
+        if self._time_filter.count == 0:
+            return 0
+        return self._time_filter.compute_client_time(server_timestamp_us) - self.now_us()
+
+    def _call_at_server_time(
+        self, server_timestamp_us: int, callback: Callable[[], None]
+    ) -> asyncio.TimerHandle:
+        """Call `callback` once `server_timestamp_us` is reached on the local clock."""
+        delay_us = max(self._local_delay_us(server_timestamp_us), 0)
+        return self._client.loop.call_later(delay_us / 1_000_000, callback)
 
     async def _handle_server_command(self, payload: ServerCommandPayload) -> None:
         """Handle server/command message."""
@@ -2065,9 +2141,9 @@ class SendspinConnection:
     def current_track_position(self) -> int | None:
         """Return the playback position in milliseconds as of now, or None when unknown.
 
-        The position is extrapolated from the progress in the latest metadata received,
-        including metadata whose timestamp is still in the future. Returns None without
-        progress or before time synchronization has converged.
+        The position is extrapolated from the progress in the current metadata, never from
+        scheduled metadata. Returns None without progress or before time synchronization has
+        converged.
         """
         metadata = None if self._server_state is None else self._server_state.metadata
         if (

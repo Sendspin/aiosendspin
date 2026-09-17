@@ -29,6 +29,7 @@ from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.artwork.v1 import MAX_ANNOUNCE_LEAD_US, ArtworkV1Role
+from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
 
 _NOW_US = 1_000_000
 
@@ -110,10 +111,10 @@ def _record(client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     group = MagicMock()
     group._server.clock.now_us.return_value = _NOW_US  # noqa: SLF001
     group_role = ArtworkGroupRole(group)
-    group_role._current_artwork = {  # noqa: SLF001
-        ArtworkSource.ALBUM: Image.new("RGB", (10, 10)),
-        ArtworkSource.ARTIST: Image.new("RGB", (10, 10)),
-    }
+    for source in (ArtworkSource.ALBUM, ArtworkSource.ARTIST):
+        state: ScheduledRoleState[Image.Image] = ScheduledRoleState()
+        state.apply(Image.new("RGB", (10, 10)))
+        group_role._artwork[source] = state  # noqa: SLF001
     client.group.group_role.return_value = group_role
 
     events: list[Any] = []
@@ -133,13 +134,13 @@ def _record(client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         else:
             events.append(("binary", kwargs["message_type"] - 8, len(data)))
 
-    def _schedule(_role: object, _image: object, channel: int, _config: object) -> None:
+    def _schedule(_role: object, channel: int, _config: object) -> None:
         events.append(("image", channel))
 
     client.send_role_message.side_effect = _message
     client.send_binary.side_effect = _binary
     client.drop_pending_binary.side_effect = lambda roles: events.append(("drop", roles))
-    monkeypatch.setattr(group_role, "_schedule_send_artwork", _schedule)
+    monkeypatch.setattr(group_role, "_schedule_replay", _schedule)
     return events
 
 
@@ -245,10 +246,12 @@ async def test_artwork_encoded_for_old_configuration_is_discarded(
     events.clear()
     image = Image.new("RGB", (10, 10))
 
-    await group_role._send_artwork_to_role_channel(role, image, 0, _ALBUM)  # noqa: SLF001
+    await group_role._send_artwork_to_role_channel(role, image, 0, _ALBUM, _NOW_US)  # noqa: SLF001
     assert events == []
 
-    await group_role._send_artwork_to_role_channel(role, image, 0, png_album)  # noqa: SLF001
+    await group_role._send_artwork_to_role_channel(  # noqa: SLF001
+        role, image, 0, png_album, _NOW_US
+    )
     assert [event[:2] for event in events] == [("announce", 0), ("part", 0)]
 
 
@@ -631,6 +634,188 @@ async def test_artwork_scheduled_image_is_announced_at_most_20s_ahead(
     assert announced_at[2] >= scheduled_us - MAX_ANNOUNCE_LEAD_US
 
 
+_LATER_US = _NOW_US + 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_artwork_scheduled_image_waits_for_current_image_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled image leaves the channel's current image in flight to complete first."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    written = _gate_writes(client)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM))
+    events.clear()
+
+    role.send_artwork(0, b"now", _NOW_US)
+    role.send_artwork(0, b"next", _LATER_US)
+    await _write(written, 3)
+
+    assert events == [
+        ("announce", 0, _NOW_US, 3),
+        ("part", 0, b"now"),
+        ("announce", 0, _LATER_US, 4),
+        ("part", 0, b"next"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_artwork_queued_current_image_is_announced_before_scheduled_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queued behind another channel, a current image still goes before a scheduled one."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    written = _gate_writes(client)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM, _ARTIST))
+    events.clear()
+
+    role.send_artwork(1, b"artist", _NOW_US)
+    role.send_artwork(0, b"old", _NOW_US)
+    role.send_artwork(0, b"next", _LATER_US)
+    role.send_artwork(0, b"now", _NOW_US)
+    role.send_artwork(0, b"later", _LATER_US)
+    await _write(written, 6)
+
+    assert [event[:3] for event in events] == [
+        ("announce", 1, _NOW_US),
+        ("part", 1, b"artist"),
+        ("announce", 0, _NOW_US),
+        ("part", 0, b"now"),
+        ("announce", 0, _LATER_US),
+        ("part", 0, b"later"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("timestamp_us", "image"), [(_LATER_US, b"other"), (_NOW_US, b"now")])
+async def test_artwork_scheduled_image_in_flight_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, timestamp_us: int, image: bytes
+) -> None:
+    """Any new image for the channel cancels its scheduled image in flight."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    written = _gate_writes(client)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM))
+    events.clear()
+
+    role.send_artwork(0, b"next", _LATER_US)
+    role.send_artwork(0, image, timestamp_us)
+    await _write(written, 2)
+
+    assert events == [
+        ("announce", 0, _LATER_US, 4),
+        ("drop", ["artwork"]),
+        ("exempt", ("cancel", 0)),
+        ("announce", 0, timestamp_us, len(image)),
+        ("part", 0, image),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_artwork_cancel_scheduled_image_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling a scheduled image in flight cancels its transfer and keeps others queued."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    written = _gate_writes(client)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM, _ARTIST))
+    events.clear()
+
+    role.send_artwork(0, b"next", _LATER_US)
+    role.send_artwork(1, b"artist", _NOW_US)
+    assert role.cancel_scheduled_artwork(0)
+    await _write(written, 2)
+
+    assert events == [
+        ("announce", 0, _LATER_US, 4),
+        ("drop", ["artwork"]),
+        ("exempt", ("cancel", 0)),
+        ("announce", 1, _NOW_US, 6),
+        ("part", 1, b"artist"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_artwork_cancel_drops_queued_scheduled_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a scheduled image not yet announced only drops it from the queue."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    written = _gate_writes(client)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM, _ARTIST))
+    events.clear()
+
+    role.send_artwork(1, b"artist", _NOW_US)
+    role.send_artwork(0, b"now", _NOW_US)
+    role.send_artwork(0, b"next", _LATER_US)
+    assert role.cancel_scheduled_artwork(0)
+    await _write(written, 4)
+
+    assert [event[:3] for event in events] == [
+        ("announce", 1, _NOW_US),
+        ("part", 1, b"artist"),
+        ("announce", 0, _NOW_US),
+        ("part", 0, b"now"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_us", [None, _NOW_US + MAX_ANNOUNCE_LEAD_US + 1])
+async def test_artwork_announced_scheduled_image_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch, replacement_us: int | None
+) -> None:
+    """A sent scheduled image is cancelled when cancelled or replaced by a later announce."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    written = _gate_writes(client)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM))
+    role.send_artwork(0, b"next", _LATER_US)
+    await _write(written, 2)
+    events.clear()
+
+    if replacement_us is None:
+        assert role.cancel_scheduled_artwork(0)
+    else:
+        role.send_artwork(0, b"much later", replacement_us)
+    await _write(written)
+
+    assert events == [("exempt", ("cancel", 0))]
+
+
+@pytest.mark.asyncio
+async def test_artwork_cancel_keeps_current_image_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A current image in flight already discarded the scheduled one, so nothing is sent."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    written = _gate_writes(client)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_client_state(_state(_ALBUM))
+    events.clear()
+
+    role.send_artwork(0, b"now", _NOW_US)
+    assert role.cancel_scheduled_artwork(0)
+    await _write(written)
+
+    assert events == [("announce", 0, _NOW_US, 3), ("part", 0, b"now")]
+
+
 @pytest.mark.asyncio
 async def test_artwork_transfers_continue_for_unavailable_client(
     monkeypatch: pytest.MonkeyPatch,
@@ -767,6 +952,48 @@ def test_legacy_hello_client_gets_single_message_artwork() -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_legacy_hello_client_gets_scheduled_artwork_at_most_20s_ahead() -> None:
+    """A single-message client gets a far-future image only 20 s ahead, unless replaced."""
+    client = _make_legacy_client_stub(_ALBUM)
+    clock = client._server.clock  # noqa: SLF001
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    client.send_binary.reset_mock()
+    later_us = _NOW_US + MAX_ANNOUNCE_LEAD_US + 1_000
+
+    role.send_artwork(channel=0, image_data=b"later", timestamp_us=later_us)
+    await asyncio.sleep(0)
+    client.send_binary.assert_not_called()
+
+    clock.advance_us(1_000)
+    role._queue_changed.set()  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert [call.args[0] for call in client.send_binary.call_args_list] == [
+        pack_binary_header_raw(8, later_us) + b"later"
+    ]
+
+    role.send_artwork(channel=0, image_data=b"much later", timestamp_us=later_us + 1_000)
+    role.send_artwork(channel=0, image_data=b"now", timestamp_us=clock.now_us())
+    clock.advance_us(1_000)
+    role._queue_changed.set()  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert [call.args[0] for call in client.send_binary.call_args_list][1:] == [
+        pack_binary_header_raw(8, _NOW_US + 1_000) + b"now"
+    ]
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_legacy_hello_client_cannot_cancel_scheduled_artwork() -> None:
+    """A single-message client needs the current image re-sent to drop a scheduled one."""
+    client = _make_legacy_client_stub()
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+
+    assert not role.cancel_scheduled_artwork(0)
+    client.send_binary.assert_not_called()
+
+
 def test_legacy_initial_state_without_artwork_is_not_a_deviation() -> None:
     """A client configured by its hello needs no artwork object in the initial state."""
     client = _make_legacy_client_stub()

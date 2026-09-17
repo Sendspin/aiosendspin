@@ -74,9 +74,12 @@ def _validate_decodable_formats(player_support: ClientHelloPlayerSupport) -> Non
         )
 
 
-# Callback invoked when server state metadata updates are received, or with None when
+# Callback invoked when server state metadata becomes current, or with None when
 # a server/activate removed the metadata role and its state was discarded.
 MetadataCallback = Callable[[ServerStatePayload | None], None]
+
+# Callback invoked when server state metadata is scheduled.
+ScheduledMetadataCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when group state updates are received.
 GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
@@ -85,9 +88,12 @@ GroupUpdateCallback = Callable[[GroupUpdateServerPayload], None]
 # a server/activate removed the controller role and its state was discarded.
 ControllerStateCallback = Callable[[ServerStatePayload | None], None]
 
-# Callback invoked when server state color updates are received, or with None when
+# Callback invoked when server state color becomes current, or with None when
 # a server/activate removed the color role and its state was discarded.
 ColorCallback = Callable[[ServerStatePayload | None], None]
+
+# Callback invoked when server state color is scheduled.
+ScheduledColorCallback = Callable[[ServerStatePayload], None]
 
 # Callback invoked when audio streaming begins.
 StreamStartCallback = Callable[[StreamStartMessage], None]
@@ -207,13 +213,17 @@ class SendspinClient:
     """server_id of the last server admitted with the playback activity; the discovery tiebreak."""
 
     _metadata_callbacks: list[MetadataCallback]
-    """Callbacks invoked on server/state messages with metadata."""
+    """Callbacks invoked when server/state metadata becomes current."""
+    _scheduled_metadata_callbacks: list[ScheduledMetadataCallback]
+    """Callbacks invoked when server/state metadata is scheduled."""
     _group_callbacks: list[GroupUpdateCallback]
     """Callbacks invoked on group/update messages."""
     _controller_callbacks: list[ControllerStateCallback]
     """Callbacks invoked on server/state messages."""
     _color_callbacks: list[ColorCallback]
-    """Callbacks invoked on server/state messages with color."""
+    """Callbacks invoked when server/state color becomes current."""
+    _scheduled_color_callbacks: list[ScheduledColorCallback]
+    """Callbacks invoked when server/state color is scheduled."""
     _stream_start_callbacks: list[StreamStartCallback]
     """Callbacks invoked when a stream starts."""
     _stream_end_callbacks: list[StreamEndCallback]
@@ -343,9 +353,11 @@ class SendspinClient:
 
         # Initialize callback lists
         self._metadata_callbacks = []
+        self._scheduled_metadata_callbacks = []
         self._group_callbacks = []
         self._controller_callbacks = []
         self._color_callbacks = []
+        self._scheduled_color_callbacks = []
         self._stream_start_callbacks = []
         self._stream_end_callbacks = []
         self._stream_clear_callbacks = []
@@ -1112,10 +1124,11 @@ class SendspinClient:
     # --- Listener registration ---
 
     def add_metadata_listener(self, callback: MetadataCallback) -> Callable[[], None]:
-        """Add a listener for server/state messages with metadata.
+        """Add a listener for server/state metadata becoming current.
 
-        The callback receives None when a server/activate removes the metadata role and its
-        state is discarded.
+        A scheduled update is passed once its timestamp is reached, with the message that
+        carried it. The callback receives None when a server/activate removes the metadata
+        role and its current and scheduled state are discarded.
 
         Returns:
             A function that removes this listener when called.
@@ -1124,6 +1137,25 @@ class SendspinClient:
         return lambda: (
             self._metadata_callbacks.remove(callback)
             if callback in self._metadata_callbacks
+            else None
+        )
+
+    def add_scheduled_metadata_listener(
+        self, callback: ScheduledMetadataCallback
+    ) -> Callable[[], None]:
+        """Add a listener for server/state metadata scheduled to take effect later.
+
+        At most one update is scheduled; each call replaces the previous one. The
+        scheduled update is dropped once the metadata listener fires or the connection
+        closes.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._scheduled_metadata_callbacks.append(callback)
+        return lambda: (
+            self._scheduled_metadata_callbacks.remove(callback)
+            if callback in self._scheduled_metadata_callbacks
             else None
         )
 
@@ -1157,10 +1189,11 @@ class SendspinClient:
         )
 
     def add_color_listener(self, callback: ColorCallback) -> Callable[[], None]:
-        """Add a listener for server/state messages with color.
+        """Add a listener for server/state color becoming current.
 
-        The callback receives None when a server/activate removes the color role and its
-        state is discarded.
+        A scheduled update is passed once its timestamp is reached, with the message that
+        carried it. The callback receives None when a server/activate removes the color role
+        and its current and scheduled state are discarded.
 
         Returns:
             A function that removes this listener when called.
@@ -1168,6 +1201,23 @@ class SendspinClient:
         self._color_callbacks.append(callback)
         return lambda: (
             self._color_callbacks.remove(callback) if callback in self._color_callbacks else None
+        )
+
+    def add_scheduled_color_listener(self, callback: ScheduledColorCallback) -> Callable[[], None]:
+        """Add a listener for server/state color scheduled to take effect later.
+
+        At most one update is scheduled; each call replaces the previous one. The
+        scheduled update is dropped once the color listener fires or the connection
+        closes.
+
+        Returns:
+            A function that removes this listener when called.
+        """
+        self._scheduled_color_callbacks.append(callback)
+        return lambda: (
+            self._scheduled_color_callbacks.remove(callback)
+            if callback in self._scheduled_color_callbacks
+            else None
         )
 
     def add_stream_start_listener(self, callback: StreamStartCallback) -> Callable[[], None]:
@@ -1352,12 +1402,20 @@ class SendspinClient:
     # --- Listener dispatch ---
 
     def notify_metadata_callback(self, payload: ServerStatePayload | None) -> None:
-        """Dispatch a server/state with metadata, or None on discard, to the listeners."""
+        """Dispatch current metadata, or None on discard, to the listeners."""
         for callback in list(self._metadata_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in metadata callback %s", callback)
+
+    def notify_scheduled_metadata(self, payload: ServerStatePayload) -> None:
+        """Dispatch a server/state with scheduled metadata to the registered listeners."""
+        for callback in list(self._scheduled_metadata_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in scheduled metadata callback %s", callback)
 
     def notify_group_callback(self, payload: GroupUpdateServerPayload) -> None:
         """Dispatch a group/update to the registered listeners."""
@@ -1376,12 +1434,20 @@ class SendspinClient:
                 logger.exception("Error in controller callback %s", callback)
 
     def notify_color_callback(self, payload: ServerStatePayload | None) -> None:
-        """Dispatch a server/state with color, or None on discard, to the listeners."""
+        """Dispatch current color, or None on discard, to the listeners."""
         for callback in list(self._color_callbacks):
             try:
                 callback(payload)
             except Exception:
                 logger.exception("Error in color callback %s", callback)
+
+    def notify_scheduled_color(self, payload: ServerStatePayload) -> None:
+        """Dispatch a server/state with scheduled color to the registered listeners."""
+        for callback in list(self._scheduled_color_callbacks):
+            try:
+                callback(payload)
+            except Exception:
+                logger.exception("Error in scheduled color callback %s", callback)
 
     def notify_stream_start(self, message: StreamStartMessage) -> None:
         """Dispatch a stream/start to the registered listeners."""

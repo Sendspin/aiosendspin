@@ -13,9 +13,12 @@ import pytest
 
 from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.artwork import pack_artwork_cancel, pack_artwork_parts
+from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
+    ServerStateMessage,
+    ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
     StreamEndMessage,
@@ -23,6 +26,7 @@ from aiosendspin.models.core import (
     StreamStartMessage,
     StreamStartPayload,
 )
+from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.models.player import (
     PLAYER_AUDIO_HEADER_SIZE,
     SEND_AHEAD_MAX,
@@ -1382,3 +1386,63 @@ async def test_paced_artwork_parts_interleave_with_queued_audio() -> None:
     assert kinds == ["part", "audio", "part", "audio", "part", "audio"]
 
     await conn.disconnect(retry_connection=False)
+
+
+_STATE_NOW_US = 1_000_000
+
+
+def _state(**roles: SessionUpdateColor | SessionUpdateMetadata) -> ServerStateMessage:
+    return ServerStateMessage(ServerStatePayload(**roles))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("existing", "incoming", "merges"),
+    [
+        (SessionUpdateColor(timestamp=_STATE_NOW_US), SessionUpdateColor(timestamp=2), True),
+        (
+            SessionUpdateColor(timestamp=_STATE_NOW_US + 1),
+            SessionUpdateColor(timestamp=_STATE_NOW_US + 2),
+            True,
+        ),
+        (
+            SessionUpdateColor(timestamp=_STATE_NOW_US + 1),
+            SessionUpdateColor(timestamp=_STATE_NOW_US),
+            True,
+        ),
+        (
+            SessionUpdateColor(timestamp=_STATE_NOW_US),
+            SessionUpdateColor(timestamp=_STATE_NOW_US + 1),
+            False,
+        ),
+    ],
+)
+def test_state_merge_keeps_current_state_ahead_of_scheduled(
+    existing: SessionUpdateColor, incoming: SessionUpdateColor, *, merges: bool
+) -> None:
+    """Queued state is merged unless a scheduled object would replace a current one.
+
+    The client must apply the current state first; spec messaging.md requires the first
+    server/state after activation to carry a past or present timestamp.
+    """
+    conn = SendspinConnection.__new__(SendspinConnection)
+    conn._server = MagicMock()  # noqa: SLF001
+    conn._server.clock = ManualClock(now_us_value=_STATE_NOW_US)  # noqa: SLF001
+
+    merged = conn._merge_state_messages(_state(color=existing), _state(color=incoming))  # noqa: SLF001
+
+    assert (merged == _state(color=incoming)) is merges
+    assert (merged is None) is not merges
+
+
+def test_state_merge_checks_each_scheduled_role_object() -> None:
+    """A scheduled metadata object over current metadata blocks the merge too."""
+    conn = SendspinConnection.__new__(SendspinConnection)
+    conn._server = MagicMock()  # noqa: SLF001
+    conn._server.clock = ManualClock(now_us_value=_STATE_NOW_US)  # noqa: SLF001
+
+    merged = conn._merge_state_messages(  # noqa: SLF001
+        _state(metadata=SessionUpdateMetadata(timestamp=1), color=SessionUpdateColor(timestamp=1)),
+        _state(metadata=SessionUpdateMetadata(timestamp=_STATE_NOW_US + 1)),
+    )
+
+    assert merged is None

@@ -445,6 +445,8 @@ class SendspinGroup:
 
     def _finalize_empty_group(self) -> None:
         """Tear down a group with no remaining clients."""
+        for group_role in self._group_roles.values():
+            group_role.on_group_deleted()
         self._signal_event(GroupDeletedEvent())
 
     async def add_client(self, client: SendspinClient) -> None:
