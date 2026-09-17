@@ -263,10 +263,10 @@ async def test_unrecognized_activation_format_aborts() -> None:
     assert abort.payload.reason is PairAbortReason.METHOD_NOT_SUPPORTED
 
 
-async def test_held_back_attempt_consumes_open_window_and_resets_rounds(
+async def test_held_back_attempt_spends_open_window_on_resetting_rounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With a window already open, a held-back attempt skips pair-pending, consumes it, resets."""
+    """With a window already open, a held-back attempt skips pair-pending and spends it."""
     connection, ws = _dynamic_pairing_code_connection()
     client = connection._client  # noqa: SLF001
     store = client.pairing_store
@@ -284,38 +284,14 @@ async def test_held_back_attempt_consumes_open_window_and_resets_rounds(
 
     await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
-    assert not client.pairing_window_open  # consumed by the attempt
+    assert not client.pairing_window_open  # the operator action lifted the hold-back
     assert await store.pairing_round_count() == 0  # the operator action resets the count
 
 
-async def test_static_pairing_code_attempt_consumes_a_pre_open_window(
+async def test_ungated_dynamic_attempt_leaves_an_open_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A static-pairing-code attempt spends a window that is already open."""
-    connection, ws = _static_pairing_code_connection()
-    client = connection._client  # noqa: SLF001
-    await client.pairing_store.set_static_pairing_code("12345678")
-    config = await client.pairing_store.get_pairing_config()
-    await client.pairing_store.store_pairing_config(
-        replace(config, static_pairing_code_enabled=True)
-    )
-    client.open_pairing_window()
-    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
-        method=PairMethod.STATIC_PAIRING_CODE
-    )
-
-    async def fake_run(_ws: object, **kwargs: object) -> None:
-        pass
-
-    monkeypatch.setattr("aiosendspin.client.connection.run_static_pairing_code_client", fake_run)
-
-    await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
-    assert ws.sent == []  # no pair-pending
-    assert not client.pairing_window_open
-
-
-async def test_ungated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An ungated attempt still spends an open window: its lifetime ends at pair-init."""
+    """Below the round limit a dynamic attempt neither needs nor spends an open window."""
     connection, ws = _dynamic_pairing_code_connection()
     client = connection._client  # noqa: SLF001
     client.open_pairing_window()
@@ -330,7 +306,202 @@ async def test_ungated_attempt_consumes_open_window(monkeypatch: pytest.MonkeyPa
 
     await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
     assert ws.sent == []  # no pair-pending
-    assert not client.pairing_window_open  # spent by the attempt
+    assert client.pairing_window_open
+
+
+async def _static_attempt_connection() -> tuple[SendspinConnection, _FakeWS]:
+    """Build a connection whose client has a static pairing code configured and selected."""
+    connection, ws = _static_pairing_code_connection()
+    store = connection._client.pairing_store  # noqa: SLF001
+    await store.set_static_pairing_code("12345678")
+    config = await store.get_pairing_config()
+    await store.store_pairing_config(replace(config, static_pairing_code_enabled=True))
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.STATIC_PAIRING_CODE
+    )
+    return connection, ws
+
+
+def _sibling_connection(connection: SendspinConnection) -> tuple[SendspinConnection, _FakeWS]:
+    """Build another static-pairing-code connection of the same client."""
+    sibling = SendspinConnection(connection._client)  # noqa: SLF001
+    ws = _FakeWS()
+    sibling._ws = ws  # type: ignore[assignment]  # noqa: SLF001
+    sibling._server_id = "server-2"  # noqa: SLF001
+    sibling._handshake_hash = b"\x00" * 32  # noqa: SLF001
+    sibling._noise_psk = connection._noise_psk  # noqa: SLF001
+    sibling._selected_pairing = connection._selected_pairing  # noqa: SLF001
+    return sibling, ws
+
+
+def _fake_static_runs(
+    monkeypatch: pytest.MonkeyPatch, outcomes: list[BaseException | None]
+) -> None:
+    """Make each static-pairing-code exchange end with the next outcome (``None``: paired)."""
+
+    async def fake_run(_ws: object, **_kwargs: object) -> None:
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_static_pairing_code_client", fake_run)
+
+
+async def _run_static_attempt(
+    connection: SendspinConnection, ws: _FakeWS, outcome: BaseException | None
+) -> None:
+    if outcome is None:
+        await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+        return
+    with pytest.raises(type(outcome)):
+        await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+
+
+async def test_static_pairing_code_attempt_under_an_open_window_closes_it_on_pairing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt under an open window skips pair-pending; its pairing closes the window."""
+    connection, ws = await _static_attempt_connection()
+    client = connection._client  # noqa: SLF001
+    client.open_pairing_window()
+    _fake_static_runs(monkeypatch, [None])
+
+    await _run_static_attempt(connection, ws, None)
+    assert ws.sent == []  # no pair-pending
+    assert not client.pairing_window_open
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(LocalPairingAbortError(PairAbortReason.ATTEMPT_TIMEOUT), id="timed_out"),
+        pytest.param(RemotePairingAbortError(PairAbortReason.USER_CANCELLED), id="cancelled"),
+        pytest.param(
+            RemotePairingAbortError(PairAbortReason.PAIRING_CODE_MISMATCH), id="server_kc_ok"
+        ),
+        pytest.param(asyncio.CancelledError(), id="abandoned"),
+        pytest.param(PairingError("malformed"), id="protocol_error"),
+    ],
+)
+async def test_static_attempt_ending_otherwise_keeps_the_window(
+    monkeypatch: pytest.MonkeyPatch, outcome: BaseException
+) -> None:
+    """An attempt that ends without a pairing or a server_kc failure leaves the window open."""
+    connection, ws = await _static_attempt_connection()
+    client = connection._client  # noqa: SLF001
+    client.open_pairing_window()
+    _fake_static_runs(monkeypatch, [outcome] * 5)
+
+    for _ in range(5):
+        await _run_static_attempt(connection, ws, outcome)
+    assert client.pairing_window_admits(connection)
+    assert ws.sent == []  # each later attempt ran under the same window
+
+
+async def test_fifth_server_kc_failure_closes_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four failed attempts keep the window; the fifth closes it and gates the next attempt."""
+    connection, ws = await _static_attempt_connection()
+    client = connection._client  # noqa: SLF001
+    client.open_pairing_window()
+    mismatch = LocalPairingAbortError(PairAbortReason.PAIRING_CODE_MISMATCH)
+    _fake_static_runs(monkeypatch, [mismatch] * 5)
+
+    for _ in range(4):
+        await _run_static_attempt(connection, ws, mismatch)
+    assert client.pairing_window_open
+    await _run_static_attempt(connection, ws, mismatch)
+    assert not client.pairing_window_open
+
+    client.open_pairing_window()  # a new window starts a fresh count
+    _fake_static_runs(monkeypatch, [mismatch])
+    await _run_static_attempt(connection, ws, mismatch)
+    assert client.pairing_window_open
+    assert ws.sent == []
+
+
+async def test_window_admits_only_the_connection_of_its_first_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another connection waits until the bound window closes and a new one opens."""
+    first, first_ws = await _static_attempt_connection()
+    second, second_ws = _sibling_connection(first)
+    client = first._client  # noqa: SLF001
+    client.open_pairing_window()
+    timeout = LocalPairingAbortError(PairAbortReason.ATTEMPT_TIMEOUT)
+    _fake_static_runs(monkeypatch, [timeout, None])
+    await _run_static_attempt(first, first_ws, timeout)
+
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    second_ws.receive = queue.get  # type: ignore[attr-defined]
+    waiting = asyncio.create_task(
+        second._run_pairing_protocol(_as_ews(second_ws), 1)  # noqa: SLF001
+    )
+    async with asyncio.timeout(1):
+        while not second_ws.sent:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    assert ClientPairPendingMessage.from_json(second_ws.sent[0]).payload.pairing_index == 1
+    client.open_pairing_window()  # no-op: the window is open, bound to the first connection
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    client.on_connection_closed(first)
+    assert not client.pairing_window_open
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    client.open_pairing_window()
+    await asyncio.wait_for(waiting, timeout=1)
+    assert not client.pairing_window_open  # the second connection paired under it
+
+
+async def test_close_pairing_window_ends_a_bound_window() -> None:
+    """Operator cancellation closes the window and releases its connection."""
+    connection, _ws = await _static_attempt_connection()
+    sibling, _sibling_ws = _sibling_connection(connection)
+    client = connection._client  # noqa: SLF001
+    client.open_pairing_window()
+    await client.await_pairing_window(connection)
+    assert not client.pairing_window_admits(sibling)
+
+    client.close_pairing_window()
+    assert not client.pairing_window_open
+    client.open_pairing_window()
+    assert client.pairing_window_admits(sibling)
+
+
+async def test_attempt_in_progress_outlives_window_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lifetime runs during an attempt, which completes; the next attempt is gated again."""
+    monkeypatch.setattr("aiosendspin.client.client._PAIRING_WINDOW_LIFETIME_S", 0.05)
+    connection, ws = await _static_attempt_connection()
+    client = connection._client  # noqa: SLF001
+    client.open_pairing_window()
+    timeout = LocalPairingAbortError(PairAbortReason.ATTEMPT_TIMEOUT)
+
+    async def slow_run(_ws: object, **_kwargs: object) -> None:
+        await asyncio.sleep(0.1)
+        raise timeout
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_static_pairing_code_client", slow_run)
+    await _run_static_attempt(connection, ws, timeout)
+    assert ws.sent == []
+    assert not client.pairing_window_open
+
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    ws.receive = queue.get  # type: ignore[attr-defined]
+    gated = asyncio.create_task(
+        connection._run_pairing_protocol(_as_ews(ws), 2)  # noqa: SLF001
+    )
+    async with asyncio.timeout(1):
+        while not ws.sent:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    gated.cancel()
+    with suppress(asyncio.CancelledError):
+        await gated
+    assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 2
 
 
 async def test_open_pairing_window_is_noop_while_open() -> None:
@@ -343,7 +514,7 @@ async def test_open_pairing_window_is_noop_while_open() -> None:
 
 
 async def test_pairing_window_expires(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unconsumed window closes silently after its lifetime."""
+    """A window closes silently after its lifetime."""
     monkeypatch.setattr("aiosendspin.client.client._PAIRING_WINDOW_LIFETIME_S", 0.01)
     client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER])
     client.open_pairing_window()
@@ -364,7 +535,7 @@ async def test_await_pairing_window_prompts_for_gesture() -> None:
         roles=[Roles.CONTROLLER],
         pairing_support=PairingSupport(gesture_prompt=prompt),
     )
-    waiter = asyncio.ensure_future(client.await_pairing_window())
+    waiter = asyncio.ensure_future(client.await_pairing_window(SendspinConnection(client)))
     await asyncio.sleep(0)
     assert not waiter.done()
     assert prompts == [True]
@@ -385,7 +556,7 @@ async def test_await_pairing_window_clears_prompt_on_cancel() -> None:
         roles=[Roles.CONTROLLER],
         pairing_support=PairingSupport(gesture_prompt=prompt),
     )
-    waiter = asyncio.ensure_future(client.await_pairing_window())
+    waiter = asyncio.ensure_future(client.await_pairing_window(SendspinConnection(client)))
     await asyncio.sleep(0)
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -481,17 +652,21 @@ async def test_pairing_code_speaker_alone_enables_dynamic_pairing_code() -> None
     assert client.pairing_code_out_channels == ("speaker",)
 
 
-async def test_one_window_admits_a_single_attempt() -> None:
-    """One window releases one waiter, the rest wait for a fresh gesture."""
+async def test_one_window_is_bound_to_the_first_waiting_connection() -> None:
+    """One window releases the first connection's waits; others wait for its successor."""
     client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER])
-    first = asyncio.ensure_future(client.await_pairing_window())
-    second = asyncio.ensure_future(client.await_pairing_window())
+    connection = SendspinConnection(client)
+    other = SendspinConnection(client)
+    first = asyncio.ensure_future(client.await_pairing_window(connection))
+    second = asyncio.ensure_future(client.await_pairing_window(other))
     await asyncio.sleep(0)
     client.open_pairing_window()
     await asyncio.wait_for(first, timeout=1)
     await asyncio.sleep(0)
     assert not second.done()
-    assert not client.pairing_window_open
+    assert client.pairing_window_open
+    await asyncio.wait_for(client.await_pairing_window(connection), timeout=1)
+    client.close_pairing_window()
     client.open_pairing_window()
     await asyncio.wait_for(second, timeout=1)
 
@@ -508,8 +683,8 @@ async def test_overlapping_window_waits_share_the_prompt() -> None:
         roles=[Roles.CONTROLLER],
         pairing_support=PairingSupport(gesture_prompt=prompt),
     )
-    first = asyncio.ensure_future(client.await_pairing_window())
-    second = asyncio.ensure_future(client.await_pairing_window())
+    first = asyncio.ensure_future(client.await_pairing_window(SendspinConnection(client)))
+    second = asyncio.ensure_future(client.await_pairing_window(SendspinConnection(client)))
     await asyncio.sleep(0)
     assert prompts == [True]
     first.cancel()  # a displaced connection's wait unwinding
@@ -524,12 +699,14 @@ async def test_overlapping_window_waits_share_the_prompt() -> None:
 async def test_await_pairing_window_resolves_on_explicit_open() -> None:
     """open_pairing_window (gesture handler or management) satisfies the wait directly."""
     client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER])
-    waiter = asyncio.ensure_future(client.await_pairing_window())
+    connection = SendspinConnection(client)
+    waiter = asyncio.ensure_future(client.await_pairing_window(connection))
     await asyncio.sleep(0)
     assert not waiter.done()
     client.open_pairing_window()
     await asyncio.wait_for(waiter, timeout=1)
-    assert not client.pairing_window_open
+    assert client.pairing_window_open
+    assert not client.pairing_window_admits(SendspinConnection(client))
 
 
 async def _cancel_time_task(connection: SendspinConnection) -> None:

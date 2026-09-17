@@ -56,6 +56,7 @@ from .source import SourceCapture
 logger = logging.getLogger(__name__)
 
 _PAIRING_WINDOW_LIFETIME_S: float = 300.0
+_PAIRING_WINDOW_MAX_FAILURES = 5
 
 # Every server accepts these; a server predating the codec list in server/hello
 # activates the source role without sending one.
@@ -179,6 +180,10 @@ class SendspinClient:
     """Set when a pairing window opens; wakes a gated attempt's wait."""
     _pairing_window_deadline: float | None = None
     """Loop-time deadline of the open pairing window, if one is open."""
+    _pairing_window_connection: SendspinConnection | None = None
+    """Connection that carried the window's first attempt; only it starts further ones."""
+    _pairing_window_failures: int = 0
+    """Attempts under the window whose ``server_kc`` failed to verify."""
     _pairing_window_waiters: int = 0
     """Gated attempts currently waiting for a window; refcounts the gesture prompt."""
 
@@ -469,9 +474,17 @@ class SendspinClient:
         deadline = self._pairing_window_deadline
         return deadline is not None and self._loop.time() < deadline
 
-    async def await_pairing_window(self) -> None:
-        """Claim a pairing window for the caller's attempt, prompting for a gesture meanwhile."""
-        if self._claim_pairing_window():
+    def pairing_window_admits(self, connection: SendspinConnection) -> bool:
+        """Whether an open pairing window admits an attempt on ``connection``."""
+        owner = self._pairing_window_connection
+        return self.pairing_window_open and (owner is None or owner is connection)
+
+    async def await_pairing_window(self, connection: SendspinConnection) -> None:
+        """Wait until a pairing window admits an attempt on ``connection``, binding it there.
+
+        Prompts for a gesture meanwhile.
+        """
+        if self._claim_pairing_window(connection):
             return
         support = self._pairing_support
         prompt = support.gesture_prompt if support is not None else None
@@ -479,7 +492,7 @@ class SendspinClient:
         try:
             if self._pairing_window_waiters == 1 and prompt is not None:
                 await prompt(True)  # noqa: FBT003
-            while not self._claim_pairing_window():
+            while not self._claim_pairing_window(connection):
                 self._pairing_window_opened.clear()
                 await self._pairing_window_opened.wait()
         finally:
@@ -487,26 +500,49 @@ class SendspinClient:
             if self._pairing_window_waiters == 0 and prompt is not None:
                 await prompt(False)  # noqa: FBT003
 
-    def _claim_pairing_window(self) -> bool:
-        """Close an open pairing window for one attempt, reporting whether one was open."""
-        if not self.pairing_window_open:
+    def _claim_pairing_window(self, connection: SendspinConnection) -> bool:
+        """Bind an admitting pairing window to ``connection``, reporting whether one admits it."""
+        if not self.pairing_window_admits(connection):
             return False
-        self.consume_pairing_window()
+        self._pairing_window_connection = connection
         return True
 
-    def consume_pairing_window(self) -> None:
-        """Close the pairing window as a pairing attempt starts."""
+    def record_pairing_window_attempt(
+        self,
+        connection: SendspinConnection,
+        *,
+        paired: bool,
+    ) -> None:
+        """Record a gated attempt on ``connection`` that paired or whose ``server_kc`` failed.
+
+        A pairing, or the fifth failure, closes the window the attempt ran under.
+        """
+        if connection is not self._pairing_window_connection:
+            return
+        if not paired:
+            self._pairing_window_failures += 1
+        if paired or self._pairing_window_failures >= _PAIRING_WINDOW_MAX_FAILURES:
+            self.close_pairing_window()
+
+    def close_pairing_window(self) -> None:
+        """Close the pairing window, as on operator cancellation.
+
+        An attempt already in progress runs to its own end.
+        """
         self._pairing_window_deadline = None
+        self._pairing_window_connection = None
+        self._pairing_window_failures = 0
         self._pairing_window_opened.clear()
 
     def open_pairing_window(self) -> None:
-        """Open a pairing window admitting one gesture-gated pairing attempt.
+        """Open a pairing window admitting gesture-gated pairing attempts until it closes.
 
         Called on an operator gesture, or by a paired server through
         ``management/open-pairing-window``. A no-op while a window is already open.
         """
         if self.pairing_window_open:
             return
+        self.close_pairing_window()
         self._pairing_window_deadline = self._loop.time() + _PAIRING_WINDOW_LIFETIME_S
         self._pairing_window_opened.set()
 
@@ -863,6 +899,8 @@ class SendspinClient:
     def on_connection_closed(self, connection: SendspinConnection) -> None:
         """Report a disconnect only when the admitted connection (not a provisional one) closes."""
         self._provisional_connections.discard(connection)
+        if self._pairing_window_connection is connection:
+            self.close_pairing_window()
         if self._admitted_connection is connection:
             self._admitted_connection = None
             self.notify_disconnect_callback()
