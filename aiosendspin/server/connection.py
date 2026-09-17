@@ -2455,7 +2455,12 @@ class SendspinConnection:
 
         # Applied before the initial state joins the stream, which must see this availability.
         if payload.available is not None and payload.available != self._client.available:
-            await self._client.handle_availability_change(available=payload.available)
+            if is_initial:
+                # The state a connection opens with is not a change: a client still
+                # syncing its clock reports unavailable and keeps its group.
+                await self._client.set_availability(available=payload.available)
+            else:
+                await self._client.handle_availability_change(available=payload.available)
 
         if is_initial:
             self._initial_state_received = True

@@ -10,7 +10,9 @@ from typing import Any
 import pytest
 
 from aiosendspin.models.core import ClientStatePayload, StreamStartMessage
-from aiosendspin.models.types import Roles
+from aiosendspin.models.source import SourceStatePayload
+from aiosendspin.models.types import PlaybackStateType, Roles
+from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
@@ -164,4 +166,121 @@ async def test_initial_state_timing_applies_before_the_stream_join(
     binary = [entry for entry in _queued_player_entries(conn) if entry.binary is not None]
     assert binary
     assert min(entry.timestamp_us for entry in binary) >= now_us + lead_ms * 1_000
+    stream.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reconnect_roles",
+    [[Roles.PLAYER.value], [Roles.PLAYER.value, Roles.CONTROLLER.value]],
+    ids=["warm", "cold"],
+)
+async def test_reconnecting_player_keeps_its_group_and_resumes_audio(
+    reconnect_roles: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The available: false that opens a reconnect keeps the group; audio follows the true."""
+    conn, stream = await _joiner_in_playing_group(monkeypatch, audio_s=2)
+    joiner = _client(conn)
+    group = joiner.group
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+    await conn.disconnect()
+    # The cold reconnect's changed hello calls a hook the mock server lacks.
+    monkeypatch.setattr(
+        conn._server,  # noqa: SLF001
+        "_signal_client_updated",
+        lambda _client_id: None,
+        raising=False,
+    )
+
+    conn, _fake = await _connect(
+        _hello(reconnect_roles),
+        send_state=False,
+        server=conn._server,  # type: ignore[arg-type]  # noqa: SLF001
+    )
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, player=_PLAYER_STATE)
+    )
+    await _commit(stream)
+
+    assert joiner.group is group
+    assert _queued_player_entries(conn) == []
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+    await _commit(stream)
+
+    queued = _queued_player_entries(conn)
+    assert len([e for e in queued if isinstance(e.json_message, StreamStartMessage)]) == 1
+    assert any(entry.binary is not None for entry in queued)
+    stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_initial_unavailable_state_leaves_a_solo_group_playing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The available: false that opens a connection does not stop the client's solo group."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    monkeypatch.setattr(
+        conn._server,  # noqa: SLF001
+        "request_client_playback_connection",
+        lambda _client_id: False,
+        raising=False,
+    )
+    group = _client(conn).group
+    stream = group.start_stream()
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, player=_PLAYER_STATE)
+    )
+
+    assert not _client(conn).available
+    assert group.state == PlaybackStateType.PLAYING
+    stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_initial_unavailable_state_keeps_a_source_in_its_group() -> None:
+    """The available: false that opens a source's connection keeps it in a shared group."""
+    conn, _fake = await _connect(
+        _hello([Roles.SOURCE.value]), send_state=False, category=PskCategory.LONG_TERM
+    )
+    source = _client(conn)
+    owner = SendspinClient(conn._server, client_id="owner")  # type: ignore[arg-type]  # noqa: SLF001
+    group = SendspinGroup(conn._server, owner)  # type: ignore[arg-type]  # noqa: SLF001
+    await group.add_client(source)
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, source=SourceStatePayload())
+    )
+
+    assert source.group is group
+    assert not source.available
+
+
+@pytest.mark.asyncio
+async def test_unavailable_after_the_initial_state_leaves_the_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later available: false moves the client to a solo group it stays in once available."""
+    conn, stream = await _joiner_in_playing_group(monkeypatch, audio_s=2)
+    joiner = _client(conn)
+    group = joiner.group
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, player=_PLAYER_STATE)
+    )
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+
+    assert joiner.group is not group
+    assert joiner.group.clients == [joiner]
     stream.stop()

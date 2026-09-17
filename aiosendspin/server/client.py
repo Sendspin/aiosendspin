@@ -286,8 +286,11 @@ class SendspinClient:
         """Return whether the client is available to participate, per `client/state`."""
         return self._available
 
-    async def handle_availability_change(self, available: bool) -> None:  # noqa: FBT001
-        """Handle a client availability change by notifying all roles."""
+    async def set_availability(self, available: bool) -> None:  # noqa: FBT001
+        """Record the availability a `client/state` reports and notify all roles.
+
+        Group membership is left unchanged.
+        """
         old_available = self._available
         self._available = available
 
@@ -297,6 +300,9 @@ class SendspinClient:
             if coro is not None:
                 await coro
 
+    async def handle_availability_change(self, available: bool) -> None:  # noqa: FBT001
+        """Handle a client availability change; becoming unavailable leaves any shared group."""
+        await self.set_availability(available)
         if not available:
             await self._leave_to_solo_group()
 
