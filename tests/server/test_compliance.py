@@ -172,6 +172,8 @@ async def test_management_connection_reason_warns_on_wait_too() -> None:
         # Terminal escapes and NUL would let a client rewrite or truncate what an operator sees.
         (_hello("Kitchen\x1b[2K\x1b[1A"), "dev-1", "Kitchen[2K[1A"),
         (_hello("Kitchen", DeviceInfo(manufacturer="Acme\x00Corp")), "dev-1", "Kitchen (AcmeCorp)"),
+        # A part of nothing but control characters and spaces drops out entirely.
+        (_hello("\x00 \x00", DeviceInfo(manufacturer="Acme")), "dev-1", "dev-1 (Acme)"),
         # Unbounded client input is capped per part.
         (_hello("N" * 200), "dev-1", "N" * 64),
     ],
@@ -302,3 +304,46 @@ async def test_hello_time_deviation_names_the_device_before_attach(
         )
         for r in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_unimplemented_roles_notice_names_the_device(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The unimplemented-roles notice names the device, sanitized like every other line."""
+    server = _make_server()
+    raw = orjson.dumps(
+        {
+            "type": "client/hello",
+            "payload": {
+                "name": "Kitchen\nERROR forged",
+                "supported_roles": ["player@v1", "player@v99"],
+                "device_info": {"manufacturer": "Acme", "software_version": "1.2.3"},
+                "player_support": {
+                    "supported_formats": [
+                        {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+                    ],
+                    "buffer_capacity": 100_000,
+                    "supported_commands": [],
+                },
+            },
+        }
+    ).decode()
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    psk = generate_psk()
+    conn._client_id = "dev"  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk),
+        psk=psk,
+        category=PskCategory.LONG_TERM,
+        counterparty_id="dev",
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert await conn._ingest_client_hello_checked(raw) is True  # noqa: SLF001
+    await server.close()
+
+    assert (
+        "Client Kitchen ERROR forged (Acme, software 1.2.3) offered roles/versions "
+        "this server does not implement: ['player@v99']"
+    ) in caplog.messages
