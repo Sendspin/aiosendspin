@@ -14,9 +14,11 @@ from aiohttp import WSMsgType
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.models import PairingSupport, ServerInfo
+from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.core import (
     ActivatePairing,
     ServerActivatePayload,
+    ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
 )
@@ -27,6 +29,7 @@ from aiosendspin.models.types import (
     PairAbortReason,
     PairingCodeFormat,
     PairMethod,
+    RepeatMode,
     Roles,
 )
 from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
@@ -143,6 +146,16 @@ async def test_app_and_time_sends_suppressed_during_exchange() -> None:
     """
     connection, ws = _client_with(PskCategory.LONG_TERM)
     connection._connected = True  # noqa: SLF001
+
+    connection._server_state = ServerStatePayload(  # noqa: SLF001
+        controller=ControllerStatePayload(
+            supported_commands=[MediaCommand.PLAY],
+            volume=100,
+            muted=False,
+            repeat=RepeatMode.OFF,
+            shuffle=False,
+        )
+    )
 
     connection._exchange_in_progress = True  # noqa: SLF001
     await connection.send_player_state(available=True, volume=7, muted=True)

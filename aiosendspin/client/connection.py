@@ -1097,9 +1097,19 @@ class SendspinConnection:
         position_ms: int | None = None,
         offset_ms: int | None = None,
     ) -> None:
-        """Send a group command (playback control) to the server."""
+        """Send a group command (playback control) to the server.
+
+        Commands are checked against the latest controller state received from the server.
+        Raises ValueError if no controller state was received, if `command` is not in its
+        `supported_commands`, or if a `seek` targets a position outside 0 to `seek_max_ms`.
+        """
         if not self.connected:
             raise RuntimeError("Client is not connected")
+        controller = None if self._server_state is None else self._server_state.controller
+        if controller is None or isinstance(controller, UndefinedField):
+            raise ValueError("No controller state has been received from the server")
+        if command not in controller.supported_commands:
+            raise ValueError(f"Command '{command.value}' is not supported by the server")
         controller_payload = ControllerCommandPayload(
             command=command,
             volume=volume,
@@ -1107,6 +1117,15 @@ class SendspinConnection:
             position_ms=position_ms,
             offset_ms=offset_ms,
         )
+        if (
+            controller_payload.position_ms is not None
+            and controller.seek_max_ms is not None
+            and controller_payload.position_ms > controller.seek_max_ms
+        ):
+            raise ValueError(
+                f"position_ms must be at most seek_max_ms ({controller.seek_max_ms}), "
+                f"got {controller_payload.position_ms}"
+            )
         payload = ClientCommandPayload(controller=controller_payload)
         message = ClientCommandMessage(payload=payload)
         await self._send_message(message.to_json())

@@ -919,7 +919,12 @@ class SendspinClient:
         position_ms: int | None = None,
         offset_ms: int | None = None,
     ) -> None:
-        """Send a group command (playback control) to the server."""
+        """Send a group command (playback control) to the server.
+
+        Commands are checked against the latest controller state received from the server.
+        Raises ValueError if no controller state was received, if `command` is not in its
+        `supported_commands`, or if a `seek` targets a position outside 0 to `seek_max_ms`.
+        """
         if self._admitted_connection is None:
             raise RuntimeError("Client is not connected")
         await self._admitted_connection.send_group_command(
