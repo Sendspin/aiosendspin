@@ -1772,7 +1772,7 @@ class SendspinConnection:
         except Exception:
             logger.exception("Failed to parse visualization frame")
             return
-        if frame is not None:
+        if frame is not None and not self._is_visualization_late(frame.timestamp_us):
             self._client.notify_visualizer_callbacks([frame])
 
     @staticmethod
@@ -1827,9 +1827,18 @@ class SendspinConnection:
         except Exception:
             logger.exception("Failed to parse beat data")
             return
+        if self._is_visualization_late(ts):
+            return
         is_downbeat = bool(payload[8] & 0b0000_0001)
         self._client.notify_visualizer_callbacks(
             [VisualizerFrame(timestamp_us=ts, is_downbeat=is_downbeat)]
+        )
+
+    def _is_visualization_late(self, timestamp_us: int) -> bool:
+        """Return whether visualization data is already past on the local clock."""
+        return (
+            self._time_filter.count > 0
+            and self._time_filter.compute_client_time(timestamp_us) < self.now_us()
         )
 
     def compute_play_time(self, server_timestamp_us: int) -> int:
