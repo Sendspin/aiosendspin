@@ -725,3 +725,27 @@ async def test_connect_failure_after_the_handshake_releases_its_slot(
 
     assert all(ws.closed for ws in sockets)
     assert not client._open_connections
+
+
+async def test_rehandshake_refreshes_the_record_last_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-handshake onto a long-term record counts as a use for eviction order."""
+    store = InMemoryClientPairingStore(record_capacity=5)
+    (record,) = await seed_used_client_records(store, 1)
+    client = make_sdk_client(client_name="c", roles=[Roles.CONTROLLER], pairing_store=store)
+    connection = SendspinConnection(client)
+    connection._ws = MagicMock()
+    connection._server_id = "server-0"
+    connection._handshake_hash = b"hash"
+
+    async def rehandshake(*_: object, **__: object) -> MagicMock:
+        return MagicMock(psk=record.as_resolved(), handshake_hash=b"next")
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_rehandshake_client", rehandshake)
+
+    await connection._rehandshake("hs1")
+
+    refreshed = await store.record_by_psk_id(record.psk_id)
+    assert refreshed is not None
+    assert refreshed.last_used_at > record.last_used_at

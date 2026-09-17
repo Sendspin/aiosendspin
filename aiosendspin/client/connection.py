@@ -1005,6 +1005,8 @@ class SendspinConnection:
         self._resolving_psk_id = None
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
+        if result.psk.category is PskCategory.LONG_TERM:
+            await self._client.pairing_store.mark_record_used(result.psk.psk_id)
 
     async def goodbye_and_disconnect(self, reason: GoodbyeReason) -> None:
         """Send ``client/goodbye`` with ``reason`` and disconnect."""
