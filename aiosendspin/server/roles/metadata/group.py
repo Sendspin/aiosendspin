@@ -64,7 +64,9 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         During an active stream the stored position is extrapolated at the playback speed and
         clamped to the track duration.
         """
-        if self._current_metadata is None or self._current_metadata.track_progress is None:
+        current_time_us = self._now_us()
+        current = self._state.current(current_time_us)
+        if current is None or current.track_progress is None:
             return None
 
         if (
@@ -87,8 +89,7 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
 
     def freeze_progress(self) -> None:
         """Snapshot current progress and stop further client-side progress extrapolation."""
-        self._promote_due_pending(self._group._server.clock.now_us())  # noqa: SLF001
-        metadata = self._current_metadata
+        metadata = self.metadata
         if metadata is None or (current_progress := self.track_progress) is None:
             return
 
@@ -109,8 +110,9 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         Metadata whose `timestamp_us` is in the future is scheduled to take effect then,
         replacing any metadata already scheduled. It is sent to clients at most 20
         seconds ahead, and `MetadataUpdatedEvent` fires now, carrying that timestamp.
-        Metadata taking effect now cancels scheduled metadata; so does `update()`. To show
-        two tracks in sequence, schedule the second only after the first took effect.
+        Metadata taking effect now cancels scheduled metadata; so do `update()` and
+        `seek()`. To show two tracks in sequence, schedule the second only after the first
+        took effect.
         """
         self._apply_metadata(metadata, force=False)
 
@@ -118,11 +120,12 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         """Set the playback position in milliseconds as of now and push it to all members.
 
         Unlike `update`, the new position is sent even when it is close to the current one.
+        Like it, a seek cancels scheduled metadata.
 
         Raises ValueError if there is no metadata with a `playback_speed`, or if
         `track_progress` is negative.
         """
-        metadata = self._current_metadata
+        metadata = self.metadata
         if metadata is None or metadata.playback_speed is None:
             raise ValueError("seek requires metadata with a playback_speed")
         self._apply_metadata(
@@ -187,14 +190,15 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         new_metadata = replace(current, **kwargs)  # type: ignore[arg-type]
         self.set_metadata(new_metadata)
 
-    def clear(self, *, timestamp_us: int | None = None) -> None:
-        """Clear all metadata."""
+    def clear(self) -> None:
+        """Clear all metadata, and any scheduled metadata, at once."""
         self.set_metadata(None)
 
     def _apply_metadata(self, metadata: Metadata | None, *, force: bool) -> None:
-        """Store metadata and push it, skipping unchanged metadata unless `force` is set."""
-        timestamp = self._group._server.clock.now_us()  # noqa: SLF001
-
+        """Apply or schedule metadata and push it, skipping unchanged metadata unless `force`."""
+        now_us = self._now_us()
+        last_metadata = self._state.current(now_us)
+        timestamp = now_us
         if metadata is not None:
             if metadata.timestamp_us is None:
                 metadata = replace(metadata, timestamp_us=timestamp)
@@ -233,3 +237,13 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
                 timestamp_us=timestamp,
             )
         )
+
+    def _state_message(self, state: Metadata | None, timestamp_us: int) -> ServerStateMessage:
+        metadata_update = None if state is None else state.snapshot_update(timestamp_us)
+        return ServerStateMessage(ServerStatePayload(metadata=metadata_update))
+
+    def _current_state(self, now_us: int) -> Metadata | None:
+        current = self._state.current(now_us)
+        if current is None:
+            return None
+        return replace(current, track_progress=self.track_progress, timestamp_us=now_us)

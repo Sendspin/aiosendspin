@@ -109,12 +109,15 @@ class ScheduledStateGroupRole[S](GroupRole):
 
     def _apply(self, state: S | None, timestamp_us: int) -> None:
         """Make `state` current and send it to all members."""
+        message = self._state_message(state, timestamp_us)
         self._state.apply(state)
         self._cancel_send_scheduled()
-        self._send_to_members(self._state_message(state, timestamp_us))
+        self._send_to_members(message)
 
     def _schedule(self, state: S, timestamp_us: int) -> None:
         """Hold `state` as scheduled and send it once it is within the lead limit."""
+        # Building the message first rejects a state that cannot be sent.
+        self._state_message(state, timestamp_us)
         replaced_sent = self._scheduled_sent and self._state.pending_timestamp_us is not None
         self._cancel_send_scheduled()
         self._state.schedule(state, timestamp_us)

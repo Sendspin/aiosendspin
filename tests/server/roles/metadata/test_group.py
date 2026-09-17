@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aiosendspin.clock import ManualClock
 from aiosendspin.models.core import ServerStateMessage
 from aiosendspin.models.types import RepeatMode
 from aiosendspin.server.roles.metadata import Metadata, MetadataClearedEvent, MetadataUpdatedEvent
@@ -608,7 +609,7 @@ def test_future_metadata_is_sent_and_takes_effect_later() -> None:
     clock.advance_us(600_000)
     assert mgr.metadata is not None
     assert mgr.metadata.title == "Next"
-    assert mgr._get_current_track_progress() == 100  # noqa: SLF001
+    assert mgr.track_progress == 100
 
 
 def test_late_join_gets_current_then_scheduled_metadata() -> None:
@@ -690,7 +691,7 @@ def test_cancel_scheduled_metadata_resends_current_now() -> None:
     clock.advance_us(600_000)
     assert mgr.metadata is not None
     assert mgr.metadata.title == "Now"
-    assert mgr._get_current_track_progress() == 30_700  # noqa: SLF001
+    assert mgr.track_progress == 30_700
 
 
 def test_clear_discards_scheduled_metadata() -> None:

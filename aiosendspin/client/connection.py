@@ -2128,9 +2128,9 @@ class SendspinConnection:
     def current_track_position(self) -> int | None:
         """Return the playback position in milliseconds as of now, or None when unknown.
 
-        The position is extrapolated from the progress in the latest metadata received,
-        including metadata whose timestamp is still in the future. Returns None without
-        progress or before time synchronization has converged.
+        The position is extrapolated from the progress in the current metadata, never from
+        scheduled metadata. Returns None without progress or before time synchronization has
+        converged.
         """
         metadata = None if self._server_state is None else self._server_state.metadata
         if (

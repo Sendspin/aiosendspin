@@ -9,6 +9,8 @@ from .client import (
     GroupUpdateCallback,
     MetadataCallback,
     OutputDelayCallback,
+    ScheduledColorCallback,
+    ScheduledMetadataCallback,
     SendspinClient,
     StreamEndCallback,
     StreamStartCallback,

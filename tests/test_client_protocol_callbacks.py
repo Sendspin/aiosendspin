@@ -1066,10 +1066,8 @@ async def test_current_track_position_advances_with_server_clock() -> None:
         (_progress_metadata(30_000, playback_speed=0), 30_000),
         (_progress_metadata(179_000), 180_000),
         (_progress_metadata(179_000, track_duration=0), 181_000),
-        (_progress_metadata(1_000, timestamp=10_000_000), 0),
-        (_progress_metadata(1_000, track_duration=0, timestamp=10_000_000), 0),
     ],
-    ids=["speed", "paused", "clamped-to-duration", "live", "clamped-to-start", "live-to-start"],
+    ids=["speed", "paused", "clamped-to-duration", "live"],
 )
 async def test_current_track_position_formula(
     metadata: SessionUpdateMetadata, expected: int
