@@ -956,6 +956,8 @@ class SendspinConnection:
         """
         if self._pairing_task is None or not self._pairing_cancellable:
             return
+        # A concurrent caller returns above instead of sending a second abort.
+        self._pairing_cancellable = False
         self._client.close_pairing_window()
         # Ending the attempt clears its out-channels and stops its sends before the abort.
         await self._cancel_pairing_attempt()

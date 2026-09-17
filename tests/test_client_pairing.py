@@ -1067,7 +1067,8 @@ async def _next_non_time_message(server_ews: EncryptedWebSocket) -> dict[str, An
 async def _assert_cancelled(connection: SendspinConnection, server_ews: EncryptedWebSocket) -> None:
     """Cancel the attempt and check the abort, the open connection and the closed window."""
     client = connection._client  # noqa: SLF001
-    await client.cancel_pairing()
+    # Concurrent cancellations send a single abort.
+    await asyncio.gather(client.cancel_pairing(), client.cancel_pairing())
 
     assert await _next_non_time_message(server_ews) == {
         "type": "pair/abort",
@@ -1081,6 +1082,9 @@ async def _assert_cancelled(connection: SendspinConnection, server_ews: Encrypte
     # A pairing message the server sent before seeing the abort is discarded.
     await connection._handle_json_message(ServerPairFinalizeMessage().to_json())  # noqa: SLF001
     assert connection.connected
+
+    await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
+    assert (await _next_non_time_message(server_ews))["type"] == "client/goodbye"
 
 
 async def test_cancel_pairing_ends_a_started_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
