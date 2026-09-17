@@ -1696,7 +1696,10 @@ class SendspinConnection:
                 )
             case ManagementSetPairingConfigMessage(payload=request):
                 payload, effect = await handle_set_pairing_config(
-                    store, request, implemented_pair_methods=self._client.implemented_pair_methods
+                    store,
+                    request,
+                    implemented_pair_methods=self._client.implemented_pair_methods,
+                    config_lock=self._client.admission_lock,
                 )
             case ManagementOpenPairingWindowMessage():
                 payload, effect = await handle_open_pairing_window(

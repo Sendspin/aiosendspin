@@ -9,6 +9,7 @@ transport concerns so it is unit-testable against an ``InMemoryClientPairingStor
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING
@@ -160,8 +161,12 @@ async def handle_set_pairing_config(
     payload: ManagementSetPairingConfigPayload,
     *,
     implemented_pair_methods: Container[PairMethod],
+    config_lock: asyncio.Lock,
 ) -> tuple[ManagementResultPayload, ManagementEffect]:
-    """Apply a validated config patch (enabled flags, secrets, record mode, unpaired access)."""
+    """Apply a validated config patch (enabled flags, secrets, record mode, unpaired access).
+
+    The patch is applied under ``config_lock``, which every pairing-config writer holds.
+    """
     methods = (
         (PairMethod.PAIRING_PSK, payload.pairing_psk),
         (PairMethod.STATIC_PAIRING_CODE, payload.static_pairing_code),
@@ -195,30 +200,31 @@ async def handle_set_pairing_config(
     ):
         return _result(ManagementResult.INVALID), ManagementEffect.NONE
     # 3. Apply (all inputs validated; nothing below fails).
-    if payload.record_mode is not None:
-        await store.set_record_mode_psk_id(payload.record_mode.psk_id)
-    config = await store.get_pairing_config()
-    await store.store_pairing_config(
-        replace(
-            config,
-            pairing_psk_enabled=_merge_enabled(
-                payload.pairing_psk, current=config.pairing_psk_enabled
-            ),
-            static_pairing_code_enabled=_merge_enabled(
-                payload.static_pairing_code, current=config.static_pairing_code_enabled
-            ),
-            dynamic_pairing_code_enabled=_merge_enabled(
-                payload.dynamic_pairing_code, current=config.dynamic_pairing_code_enabled
-            ),
-            unpaired_access_enabled=_merge_enabled(
-                payload.unpaired_access, current=config.unpaired_access_enabled
-            ),
+    async with config_lock:
+        if payload.record_mode is not None:
+            await store.set_record_mode_psk_id(payload.record_mode.psk_id)
+        config = await store.get_pairing_config()
+        await store.store_pairing_config(
+            replace(
+                config,
+                pairing_psk_enabled=_merge_enabled(
+                    payload.pairing_psk, current=config.pairing_psk_enabled
+                ),
+                static_pairing_code_enabled=_merge_enabled(
+                    payload.static_pairing_code, current=config.static_pairing_code_enabled
+                ),
+                dynamic_pairing_code_enabled=_merge_enabled(
+                    payload.dynamic_pairing_code, current=config.dynamic_pairing_code_enabled
+                ),
+                unpaired_access_enabled=_merge_enabled(
+                    payload.unpaired_access, current=config.unpaired_access_enabled
+                ),
+            )
         )
-    )
-    if psk_bytes is not None:
-        await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(psk_bytes), psk=psk_bytes))
-    if payload.static_pairing_code is not None and payload.static_pairing_code.code is not None:
-        await store.set_static_pairing_code(payload.static_pairing_code.code)
+        if psk_bytes is not None:
+            await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(psk_bytes), psk=psk_bytes))
+        if payload.static_pairing_code is not None and payload.static_pairing_code.code is not None:
+            await store.set_static_pairing_code(payload.static_pairing_code.code)
     return _result(ManagementResult.OK), ManagementEffect.NONE
 
 

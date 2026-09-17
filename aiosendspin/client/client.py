@@ -415,6 +415,11 @@ class SendspinClient:
         return SourceCapture(self, self._admitted_connection, audio_format)
 
     @property
+    def admission_lock(self) -> asyncio.Lock:
+        """Lock serializing connection admission and pairing-config writes."""
+        return self._admission_lock
+
+    @property
     def pairing_store(self) -> ClientPairingStore:
         """Trust store holding the long-term records and Pairing PSKs."""
         return self._pairing_store

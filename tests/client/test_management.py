@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 from aiosendspin.client.management import (
@@ -286,6 +287,7 @@ async def test_set_pairing_config_toggles_enabled() -> None:
         store,
         ManagementSetPairingConfigPayload(pairing_psk=SetPairingPskConfig(enabled=False)),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.OK
     assert effect is ManagementEffect.NONE
@@ -300,6 +302,7 @@ async def test_set_pairing_config_rotates_psk() -> None:
         store,
         ManagementSetPairingConfigPayload(pairing_psk=SetPairingPskConfig(psk=b64url_encode(psk))),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.OK
     stored = await store.pairing_psk()
@@ -314,6 +317,7 @@ async def test_set_pairing_config_invalid_psk() -> None:
         store,
         ManagementSetPairingConfigPayload(pairing_psk=SetPairingPskConfig(psk="too-short")),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.INVALID
     assert await store.pairing_psk() is None
@@ -328,6 +332,7 @@ async def test_set_pairing_config_stores_static_pairing_code() -> None:
             static_pairing_code=SetStaticPairingCodeConfig(code="12345678")
         ),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.OK
     assert await store.static_pairing_code() == "12345678"
@@ -343,6 +348,7 @@ async def test_set_pairing_config_invalid_static_pairing_code() -> None:
                 static_pairing_code=SetStaticPairingCodeConfig(code=pairing_code)
             ),
             implemented_pair_methods=_ALL_METHODS,
+            config_lock=asyncio.Lock(),
         )
         assert payload.result is ManagementResult.INVALID
     assert await store.static_pairing_code() is None
@@ -367,6 +373,7 @@ async def test_set_pairing_config_unimplemented_method_is_invalid() -> None:
             static_pairing_code=SetStaticPairingCodeConfig(enabled=True)
         ),
         implemented_pair_methods=_WITHOUT_STATIC_PAIRING_CODE,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.INVALID
 
@@ -380,6 +387,7 @@ async def test_set_pairing_config_enable_static_pairing_code_without_code_is_inv
             static_pairing_code=SetStaticPairingCodeConfig(enabled=True)
         ),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.INVALID
     assert (await store.get_pairing_config()).static_pairing_code_enabled is False
@@ -394,6 +402,7 @@ async def test_set_pairing_config_enable_static_pairing_code_with_code_in_patch(
             static_pairing_code=SetStaticPairingCodeConfig(enabled=True, code="12345678")
         ),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.OK
     assert (await store.get_pairing_config()).static_pairing_code_enabled is True
@@ -407,6 +416,7 @@ async def test_set_pairing_config_persists_unpaired_access() -> None:
         store,
         ManagementSetPairingConfigPayload(unpaired_access=SetUnpairedAccessConfig(enabled=True)),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert payload.result is ManagementResult.OK
     assert effect is ManagementEffect.NONE
@@ -420,6 +430,7 @@ async def test_set_pairing_config_record_mode_requires_shared_record() -> None:
         store,
         ManagementSetPairingConfigPayload(record_mode=RecordModeConfig(psk_id="absent")),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert missing[0].result is ManagementResult.INVALID
 
@@ -428,6 +439,7 @@ async def test_set_pairing_config_record_mode_requires_shared_record() -> None:
         store,
         ManagementSetPairingConfigPayload(record_mode=RecordModeConfig(psk_id=stored.psk_id)),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert non_shared[0].result is ManagementResult.INVALID
 
@@ -436,6 +448,7 @@ async def test_set_pairing_config_record_mode_requires_shared_record() -> None:
         store,
         ManagementSetPairingConfigPayload(record_mode=RecordModeConfig(psk_id=shared.psk_id)),
         implemented_pair_methods=_ALL_METHODS,
+        config_lock=asyncio.Lock(),
     )
     assert ok[0].result is ManagementResult.OK
     assert (await store.get_pairing_config()).record_mode_psk_id == shared.psk_id
