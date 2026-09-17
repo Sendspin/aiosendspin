@@ -258,7 +258,11 @@ class ControllerGroupRole(GroupRole):
             self.emit_group_event(event)
 
     def _clamp_seek_offset(self, offset_ms: int) -> int:
-        """Clamp an offset so it lands within the seekable range, never reversing its direction."""
+        """Clamp an offset so its target lands between 0 and `seek_max_ms`.
+
+        From a position already beyond `seek_max_ms` the target is kept between 0 and that
+        position instead, so the seek never moves in the opposite direction.
+        """
         metadata_group_role = self._group.group_role("metadata")
         if not isinstance(metadata_group_role, MetadataGroupRole):
             return offset_ms
