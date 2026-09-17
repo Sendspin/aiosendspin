@@ -354,6 +354,10 @@ class PlayerV1Role(Role):
         """Send binary audio; the connection adds the header. Late audio is discarded there."""
         # Send deferred stream/start on first chunk (ensures encoder header is available)
         if self._pending_stream_start:
+            if not self._client.available:
+                # No stream/start, and so no audio, until the latest client/state
+                # reports the client available.
+                return
             self._send_stream_start_message()
             self._pending_stream_start = False
 
