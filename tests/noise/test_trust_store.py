@@ -876,7 +876,12 @@ async def test_pairing_persists_when_every_other_record_is_protected(
         await store.replace_record_for_server_id(new, protected={r.psk_id for r in seeded})
 
     assert await _per_server_psk_ids(store) == {new.psk_id, *(r.psk_id for r in seeded)}
-    assert any("exceed the capacity" in r.message for r in caplog.records)
+    assert any(
+        r.getMessage()
+        == "Pairing records exceed the capacity of 5; the remaining records are backed by "
+        "open connections"
+        for r in caplog.records
+    )
 
 
 def test_client_record_without_last_used_at_falls_back_to_created_at() -> None:

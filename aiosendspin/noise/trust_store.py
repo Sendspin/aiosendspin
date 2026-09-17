@@ -598,7 +598,8 @@ class ClientPairingStore(ABC):
             await self.remove_record(record.psk_id)
         if len(evictable) < excess:
             logger.warning(
-                "Pairing records exceed the capacity of %d: the rest back open connections",
+                "Pairing records exceed the capacity of %d; the remaining records are backed "
+                "by open connections",
                 self.record_capacity,
             )
 
