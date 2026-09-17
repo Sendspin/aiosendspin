@@ -19,9 +19,14 @@ class _FakeConnection:
         self.chunks: list[tuple[int, bytes]] = []
         self.synchronized = synchronized
         self.source_stream_active = False
+        # Each capture starts with one server start delivered.
+        self.start_authorized = True
 
     async def send_client_stream_start(self, **kwargs: Any) -> None:
+        if not self.start_authorized:
+            raise RuntimeError("Source stream start requires a server start command")
         self.calls.append(("start", kwargs))
+        self.start_authorized = False
         self.source_stream_active = True
 
     async def send_source_chunk(self, frame: bytes, *, timestamp_us: int) -> None:
@@ -29,6 +34,7 @@ class _FakeConnection:
 
     async def send_client_stream_end(self) -> None:
         self.calls.append(("end", None))
+        self.start_authorized = False
         self.source_stream_active = False
 
     def compute_source_timestamp(self, capture_timestamp_us: int) -> int:
@@ -140,13 +146,16 @@ async def test_start_before_time_sync_raises() -> None:
         await capture.start()
 
 
-async def test_start_recovers_after_connection_ends_stream() -> None:
-    """A capture can restart after its connection closes the wire stream."""
+async def test_start_requires_new_server_start_after_connection_ends_stream() -> None:
+    """A capture reopens after its connection ends the wire stream only on a new server start."""
     conn = _FakeConnection()
     capture = SourceCapture(_FakeClient(), conn, _pcm_format())  # type: ignore[arg-type]
     await capture.start()
     conn.source_stream_active = False
 
+    with pytest.raises(RuntimeError, match="server start"):
+        await capture.start()
+    conn.start_authorized = True
     await capture.start()
 
     assert [kind for kind, _ in conn.calls] == ["start", "start"]
@@ -164,6 +173,7 @@ async def test_stop_discards_buffer_after_connection_ends_stream() -> None:
 
     with pytest.raises(RuntimeError, match="start"):
         await capture.feed(sine_pcm_16bit(1))
+    conn.start_authorized = True
     await capture.start()
     await capture.feed(sine_pcm_16bit(1200), capture_timestamp_us=2_000_000)
     assert [timestamp for timestamp, _ in conn.chunks] == [2_000_000]

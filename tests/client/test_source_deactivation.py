@@ -161,6 +161,7 @@ async def test_stream_start_rejected_during_in_band_exchange() -> None:
     """A stream start during an in-band exchange fails instead of marking the stream active."""
     ws = _FakeWs()
     conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=False)
+    conn._source_start_authorized = True  # noqa: SLF001
     conn._exchange_in_progress = True  # noqa: SLF001
 
     with pytest.raises(RuntimeError, match="in-band exchange"):

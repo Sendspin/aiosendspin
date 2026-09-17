@@ -1298,16 +1298,16 @@ async def test_server_command_not_reported_is_ignored() -> None:
     received: list[ServerCommandPayload] = []
     client.add_server_command_listener(received.append)
 
-    connection._handle_server_command(  # noqa: SLF001
+    await connection._handle_server_command(  # noqa: SLF001
         ServerCommandPayload(
             player=PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY, output_delay_ms=250)
         )
     )
-    connection._handle_server_command(  # noqa: SLF001
+    await connection._handle_server_command(  # noqa: SLF001
         ServerCommandPayload(player=PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=10))
     )
     mute = ServerCommandPayload(player=PlayerCommandPayload(command=PlayerCommand.MUTE, mute=True))
-    connection._handle_server_command(mute)  # noqa: SLF001
+    await connection._handle_server_command(mute)  # noqa: SLF001
 
     assert connection.output_delay_ms == 0.0
     assert received == [mute]
@@ -1332,7 +1332,7 @@ async def test_server_command_set_output_delay_applies_and_notifies() -> None:
     payload = ServerCommandPayload(
         player=PlayerCommandPayload(command=PlayerCommand.SET_OUTPUT_DELAY, output_delay_ms=250)
     )
-    connection._handle_server_command(payload)  # noqa: SLF001
+    await connection._handle_server_command(payload)  # noqa: SLF001
 
     assert connection.output_delay_ms == 250.0
     assert client.output_delay_us == 250_000
@@ -1357,7 +1357,7 @@ async def test_server_command_pre_rename_delay_applies_and_notifies() -> None:
     payload = ServerCommandPayload.from_dict(
         {"player": {"command": "set_static_delay", "static_delay_ms": 250}}
     )
-    connection._handle_server_command(payload)  # noqa: SLF001
+    await connection._handle_server_command(payload)  # noqa: SLF001
 
     assert connection.output_delay_ms == 250.0
     assert received == [payload]
@@ -1396,7 +1396,7 @@ async def test_server_command_without_player_only_notifies() -> None:
     client.add_server_command_listener(received.append)
 
     payload = ServerCommandPayload()
-    connection._handle_server_command(payload)  # noqa: SLF001
+    await connection._handle_server_command(payload)  # noqa: SLF001
 
     assert connection.output_delay_ms == 0.0
     assert received == [payload]
