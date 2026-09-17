@@ -953,6 +953,93 @@ async def test_encode_runs_off_loop_and_stop_reset_waits_for_it(mock_loop: Any) 
 
 
 @pytest.mark.asyncio
+async def test_overlapping_commits_run_dsp_one_at_a_time_in_order(
+    mock_loop: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second commit waits for the first commit's worker before starting its own DSP."""
+    stream, role, transformer = _blocking_transformer_stream(mock_loop)
+    in_flight = 0
+    max_in_flight = 0
+    original_run_off_loop = push_stream_module._run_off_loop  # noqa: SLF001
+
+    async def _tracked_run_off_loop(func: Any, /, *args: object) -> Any:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        try:
+            return await original_run_off_loop(func, *args)
+        finally:
+            in_flight -= 1
+
+    monkeypatch.setattr(push_stream_module, "_run_off_loop", _tracked_run_off_loop)
+
+    first = asyncio.create_task(stream.commit_audio())
+    assert await asyncio.to_thread(transformer.entered.wait, 5.0)
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    second = asyncio.create_task(stream.commit_audio())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert in_flight == 1
+    assert stream._commit_dsp_lock.locked()  # noqa: SLF001
+
+    transformer.release.set()
+    first_start_us, second_start_us = await asyncio.gather(first, second)
+
+    assert max_in_flight == 1
+    assert first_start_us < second_start_us
+    assert [chunk.timestamp_us for chunk in role.received] == [first_start_us, second_start_us]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_commit_waits_for_its_worker(mock_loop: Any) -> None:
+    """Cancelling commit_audio() completes only once its worker thread has finished."""
+    stream, _role, transformer = _blocking_transformer_stream(mock_loop)
+    commit_task = asyncio.create_task(stream.commit_audio())
+    assert await asyncio.to_thread(transformer.entered.wait, 5.0)
+
+    for _ in range(2):
+        commit_task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not commit_task.done()
+    assert stream._commit_in_flight == 1  # noqa: SLF001
+
+    transformer.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await commit_task
+    assert not transformer.in_process
+    assert stream._commit_in_flight == 0  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_run_off_loop_retrieves_worker_error_after_cancel(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A worker that fails after its caller was cancelled is logged, not left unretrieved."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _failing_worker() -> None:
+        entered.set()
+        release.wait()
+        raise ValueError("worker failed")
+
+    task = asyncio.create_task(push_stream_module._run_off_loop(_failing_worker))  # noqa: SLF001
+    assert await asyncio.to_thread(entered.wait, 5.0)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with (
+        caplog.at_level("DEBUG", logger=push_stream_module.__name__),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await task
+    assert any(record.exc_info and record.exc_info[0] is ValueError for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_stop_with_keep_stream_suppresses_stream_end(mock_loop: Any) -> None:
     """stop(keep_stream=True) tears down transport without emitting stream/end."""
     group = _DummyGroup(clients=[])

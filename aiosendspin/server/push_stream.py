@@ -31,6 +31,7 @@ from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from collections.abc import Set as AbstractSet
 
     import av
@@ -231,6 +232,27 @@ def _encode_for_transform_key(
         result.append((data, ts, dur))
         ts += dur
     return result
+
+
+async def _run_off_loop[T, *Ts](func: Callable[[*Ts], T], /, *args: *Ts) -> T:
+    """
+    Run func on a worker thread and return its result.
+
+    A cancelled caller still waits for the thread to finish before CancelledError is
+    re-raised, so the work never outlives the coroutine that started it.
+    """
+    future = asyncio.get_running_loop().run_in_executor(None, func, *args)
+    cancelled: asyncio.CancelledError | None = None
+    while not future.done():
+        try:
+            await asyncio.wait((future,))
+        except asyncio.CancelledError as err:
+            cancelled = err
+    if cancelled is None:
+        return future.result()
+    if not future.cancelled() and (exc := future.exception()) is not None:
+        _LOGGER.debug("Worker failed after its caller was cancelled", exc_info=exc)
+    raise cancelled
 
 
 class _ResamplerKey(NamedTuple):
@@ -772,6 +794,10 @@ class PushStream:
         # Live encoding runs on a worker thread. Transformer resets from the loop
         # take this lock so a reset never interleaves with an in-progress encode.
         self._transformer_lock = threading.Lock()
+        # Overlapping commit_audio() calls run their DSP one at a time, in the order they
+        # reach delivery, so cached resampler and transformer state is never driven from
+        # two threads.
+        self._commit_dsp_lock = asyncio.Lock()
         # Roles awaiting delayed join; excluded from live delivery until join executes.
         self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
         # >0 while commit_audio() is between the _channel_timing advance and _role_chunk_cache
@@ -1534,7 +1560,7 @@ class PushStream:
                 results[pcm_key] = empty
                 continue
 
-            resampled = await asyncio.to_thread(
+            resampled = await _run_off_loop(
                 _resample_pcm_standalone, state, source_pcm, source_format, input_timestamp_us
             )
             if not self._is_generation_active(commit_generation):
@@ -1687,7 +1713,7 @@ class PushStream:
                     target_bit_depth=depth,
                     resampler_cache=self._resamplers,
                 )
-                edge_quantized = await asyncio.to_thread(
+                edge_quantized = await _run_off_loop(
                     _resample_pcm_standalone,
                     quantizer,
                     pcm_data,
@@ -1732,7 +1758,7 @@ class PushStream:
         transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
 
         if encode_tasks:
-            transformed = await asyncio.to_thread(
+            transformed = await _run_off_loop(
                 self._encode_transforms, encode_tasks, commit_generation
             )
             if not self._is_generation_active(commit_generation):
@@ -1797,22 +1823,22 @@ class PushStream:
         Returns:
             Dict of TransformKey -> list of CachedChunk for late joiners.
         """
-        roles_by_pcm = self._group_roles_by_pcm_requirements(prepared)
-        if not roles_by_pcm:
-            return {}
-
-        if not self._is_generation_active(commit_generation):
-            return {}
-        resampled = await self._resample_for_roles(
-            roles_by_pcm, prepared, channel_play_start, commit_generation=commit_generation
-        )
-        if not self._is_generation_active(commit_generation):
-            return {}
-        return await self._transform_and_deliver(
-            roles_by_pcm,
-            resampled,
-            commit_generation=commit_generation,
-        )
+        async with self._commit_dsp_lock:
+            if not self._is_generation_active(commit_generation):
+                return {}
+            roles_by_pcm = self._group_roles_by_pcm_requirements(prepared)
+            if not roles_by_pcm:
+                return {}
+            resampled = await self._resample_for_roles(
+                roles_by_pcm, prepared, channel_play_start, commit_generation=commit_generation
+            )
+            if not self._is_generation_active(commit_generation):
+                return {}
+            return await self._transform_and_deliver(
+                roles_by_pcm,
+                resampled,
+                commit_generation=commit_generation,
+            )
 
     def _prune_role_chunk_cache(self) -> None:
         """Remove old chunks from the role-based cache."""
