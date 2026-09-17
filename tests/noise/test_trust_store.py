@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import stat
 import sys
 from typing import TYPE_CHECKING
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from aiosendspin.models.types import PairMethod
-from aiosendspin.noise.keys import generate_psk, psk_id_for
+from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
     PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
@@ -57,6 +58,18 @@ def _pairing_psk() -> PairingPsk:
 def _staged_psk() -> StagedPairingPsk:
     psk = generate_psk()
     return StagedPairingPsk(psk_id=psk_id_for(psk), psk=psk)
+
+
+def _record_dict(client_id: str, pair_methods: list[str]) -> dict[str, object]:
+    psk = generate_psk()
+    return {
+        "psk_id": psk_id_for(psk),
+        "psk": b64url_encode(psk),
+        "client_id": client_id,
+        "pair_methods": pair_methods,
+        "created_at": "2026-05-01T12:00:00+00:00",
+        "owner": None,
+    }
 
 
 @pytest.fixture(params=["memory", "file"])
@@ -113,6 +126,31 @@ def test_server_record_pair_methods_round_trip_and_back_compat() -> None:
     legacy = record.to_dict()
     del legacy["pair_methods"]
     assert ServerPairingRecord.from_dict(legacy).pair_methods == []
+
+
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+def test_server_record_maps_legacy_pair_method_names() -> None:
+    """Pre-rename method names load as their pairing-code methods, de-duplicated in order."""
+    data = _record_dict(
+        "client-A", ["static_pin", "pairing_psk", "dynamic_pin", "static_pairing_code"]
+    )
+    record = ServerPairingRecord.from_dict(data)
+    assert record.pair_methods == [
+        PairMethod.STATIC_PAIRING_CODE,
+        PairMethod.PAIRING_PSK,
+        PairMethod.DYNAMIC_PAIRING_CODE,
+    ]
+    assert record.to_dict()["pair_methods"] == [
+        "static_pairing_code",
+        "pairing_psk",
+        "dynamic_pairing_code",
+    ]
+
+
+def test_server_record_rejects_unknown_pair_method() -> None:
+    """An unrecognised method name raises ValueError."""
+    with pytest.raises(ValueError, match="unknown pair method 'carrier_pigeon'"):
+        ServerPairingRecord.from_dict(_record_dict("client-A", ["carrier_pigeon"]))
 
 
 def test_server_record_owner_round_trips_and_back_compat() -> None:
@@ -292,6 +330,79 @@ async def test_file_server_store_tolerates_absent_sections(tmp_path: Path) -> No
     assert list(await store.list_trusted_unpaired()) == []
 
 
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+async def test_file_server_store_loads_legacy_pair_method_names(tmp_path: Path) -> None:
+    """A store saved with pre-rename method names loads, and saves only the new names."""
+    path = tmp_path / "pairings.json"
+    staged = _staged_psk()
+    path.write_text(
+        json.dumps(
+            {
+                "records": {
+                    "client-A": _record_dict("client-A", ["dynamic_pin"]),
+                    "client-B": _record_dict("client-B", ["pairing_psk", "static_pin"]),
+                },
+                "staged_pairing_psks": {"client-S": staged.to_dict()},
+                "trusted_unpaired_clients": {
+                    "client-T": {"client_id": "client-T", "created_at": "2026-05-01T12:00:00+00:00"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = await FileServerPairingStore.open(path)
+    record_a = await store.record_by_client_id("client-A")
+    record_b = await store.record_by_client_id("client-B")
+    assert record_a is not None
+    assert record_a.pair_methods == [PairMethod.DYNAMIC_PAIRING_CODE]
+    assert record_b is not None
+    assert record_b.pair_methods == [PairMethod.PAIRING_PSK, PairMethod.STATIC_PAIRING_CODE]
+    assert await store.staged_pairing_psk("client-S") == staged
+    assert await store.trusted_unpaired("client-T") is not None
+
+    await store.store_record(_server_record(client_id="client-C"))
+    saved = json.loads(path.read_text(encoding="utf-8"))["records"]
+    assert saved["client-A"]["pair_methods"] == ["dynamic_pairing_code"]
+    assert saved["client-B"]["pair_methods"] == ["pairing_psk", "static_pairing_code"]
+    assert saved["client-C"]["pair_methods"] == []
+
+
+async def test_file_server_store_skips_record_with_unknown_pair_method(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A record naming an unknown method is skipped with a warning; the rest of the store loads."""
+    path = tmp_path / "pairings.json"
+    staged = _staged_psk()
+    known = _record_dict("client-A", ["pairing_psk"])
+    path.write_text(
+        json.dumps(
+            {
+                "records": {
+                    "client-A": known,
+                    "client-X": _record_dict("client-X", ["pairing_psk", "carrier_pigeon"]),
+                },
+                "staged_pairing_psks": {"client-S": staged.to_dict()},
+                "trusted_unpaired_clients": {
+                    "client-T": {"client_id": "client-T", "created_at": "2026-05-01T12:00:00+00:00"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="aiosendspin.noise.trust_store"):
+        store = await FileServerPairingStore.open(path)
+
+    assert list(await store.list_records()) == [ServerPairingRecord.from_dict(known)]
+    assert await store.record_by_client_id("client-X") is None
+    assert await store.staged_pairing_psk("client-S") == staged
+    assert await store.trusted_unpaired("client-T") is not None
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    assert "client-X" in caplog.records[0].getMessage()
+    assert "carrier_pigeon" in caplog.records[0].getMessage()
+
+
 async def test_file_server_store_rejects_malformed_file(tmp_path: Path) -> None:
     """A present-but-malformed store fails loud rather than silently dropping credentials."""
     non_object = tmp_path / "top.json"
@@ -343,15 +454,13 @@ async def test_file_client_store_persists_state(tmp_path: Path) -> None:
     assert await reloaded.pairing_round_count() == 1
 
 
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
 async def test_file_client_store_migrates_per_method_pin_failures(tmp_path: Path) -> None:
     """A store with per-method counters carries its dynamic count over as the round count."""
     path = tmp_path / "client.json"
     await FileClientPairingStore.open(path)
     data = json.loads(path.read_text(encoding="utf-8"))
-    data["pin_failures"] = {
-        PairMethod.DYNAMIC_PAIRING_CODE.value: PAIRING_ROUND_LIMIT,
-        PairMethod.STATIC_PAIRING_CODE.value: 3,
-    }
+    data["pin_failures"] = {"dynamic_pin": PAIRING_ROUND_LIMIT, "static_pin": 3}
     path.write_text(json.dumps(data), encoding="utf-8")
 
     reloaded = await FileClientPairingStore.open(path)

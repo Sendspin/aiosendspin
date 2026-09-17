@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -49,6 +50,8 @@ __all__ = [
     "TrustedUnpairedClient",
 ]
 
+logger = logging.getLogger(__name__)
+
 
 class PskCategory(StrEnum):
     """Which kind of PSK was matched during a handshake."""
@@ -83,6 +86,10 @@ _PSK_CATEGORIES_BY_CODE: dict[str, PskCategory] = {c: k for k, c in _PSK_CATEGOR
 
 class StorageExhaustedError(Exception):
     """A pairing cannot persist its record and has no shared-PSK fallback."""
+
+
+class _UnknownPairMethodError(ValueError):
+    """A stored record names a pair method this version does not recognise."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,9 +634,12 @@ class FileServerPairingStore(_ServerPairingStoreBase):
         data = await asyncio.to_thread(_read_json_object, self._path)
         if data is None:
             return
-        self._records = {
-            cid: ServerPairingRecord.from_dict(v) for cid, v in _section(data, "records").items()
-        }
+        self._records = {}
+        for cid, v in _section(data, "records").items():
+            try:
+                self._records[cid] = ServerPairingRecord.from_dict(v)
+            except _UnknownPairMethodError as err:
+                logger.warning("Skipping pairing record for client %s: %s", cid, err)
         self._staged = {
             cid: StagedPairingPsk.from_dict(v)
             for cid, v in _section(data, "staged_pairing_psks").items()
@@ -831,7 +841,8 @@ class FileClientPairingStore(_ClientPairingStoreBase):
         if isinstance(raw_failures, Mapping):
             # Pre-escalation format kept per-method counters; carry over the
             # dynamic pairing-code counter.
-            raw_failures = raw_failures.get(PairMethod.DYNAMIC_PAIRING_CODE.value, 0)
+            # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+            raw_failures = raw_failures.get("dynamic_pin", 0)
         if isinstance(raw_failures, bool) or not isinstance(raw_failures, int):
             msg = "pairing store 'pin_failures' must be an integer"
             raise TypeError(msg)
@@ -956,6 +967,13 @@ def _opt_str(data: Mapping[str, object], key: str) -> str | None:
     return value
 
 
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+_LEGACY_PAIR_METHODS: Final[dict[str, PairMethod]] = {
+    "dynamic_pin": PairMethod.DYNAMIC_PAIRING_CODE,
+    "static_pin": PairMethod.STATIC_PAIRING_CODE,
+}
+
+
 def _pair_methods(data: Mapping[str, object], key: str) -> list[PairMethod]:
     value = data.get(key, [])
     if not isinstance(value, list):
@@ -966,5 +984,11 @@ def _pair_methods(data: Mapping[str, object], key: str) -> list[PairMethod]:
         if not isinstance(item, str):
             msg = f"{key!r} entries must be strings, got {type(item).__name__}"
             raise TypeError(msg)
-        methods.append(PairMethod(item))
+        try:
+            method = _LEGACY_PAIR_METHODS.get(item) or PairMethod(item)
+        except ValueError as err:
+            msg = f"unknown pair method {item!r}"
+            raise _UnknownPairMethodError(msg) from err
+        if method not in methods:
+            methods.append(method)
     return methods
