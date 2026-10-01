@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from aiosendspin.models.core import (
     ActivatePairing,
     ClientHelloPayload,
     DynamicPairMethodDescriptor,
+    LegacyServerActivateMessage,
     PairMethodDescriptor,
     ServerActivatePayload,
     ServerHelloPayload,
@@ -84,6 +86,30 @@ def test_activate_pairing_omits_format_for_non_dynamic_methods() -> None:
     )
     raw = orjson.loads(payload.to_json())
     assert raw["pairing"] == {"method": "static_pairing_code"}
+
+
+# DEPRECATED(spec-pr-130): remove in aiosendspin <version>
+@pytest.mark.parametrize(
+    ("method", "selected"),
+    [
+        (PairMethod.PAIRING_PSK, "pairing_psk"),
+        (PairMethod.STATIC_PAIRING_CODE, None),
+        (PairMethod.DYNAMIC_PAIRING_CODE, None),
+    ],
+)
+def test_legacy_activate_names_only_a_pairing_psk_attempt(
+    method: PairMethod, selected: str | None
+) -> None:
+    """The legacy activate adds selected_pair_method only for a Pairing PSK attempt."""
+    message = LegacyServerActivateMessage(
+        ServerActivatePayload(
+            activities=[Activity.PAIRING], active_roles=[], pairing=ActivatePairing(method=method)
+        )
+    )
+    raw = orjson.loads(message.to_json())
+    assert raw["type"] == "server/activate"
+    assert raw["payload"]["pairing"]["method"] == method.value
+    assert raw["payload"].get("selected_pair_method") == selected
 
 
 def test_unrecognized_descriptor_format_is_dropped() -> None:
