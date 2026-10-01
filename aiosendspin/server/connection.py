@@ -1058,6 +1058,8 @@ class SendspinConnection:
                 self._logger.warning("Accepting unencrypted legacy connection (transition mode)")
                 self._pending_first_text = first_text
                 return raw
+            peer = self._request.remote if self._request is not None else self._url
+            self._server._warn_unencrypted_refused(peer or "unknown")  # noqa: SLF001
         result = await run_handshake_server(
             raw,
             local_identity=self._server.identity,
@@ -1625,7 +1627,8 @@ class SendspinConnection:
         self._pairing_message_queue = queue
         self._pairing_attempt = attempt
         dispatched = QueuedEncryptedWebSocket(transport, queue)
-        task = create_task(self._pair(dispatched))
+        # Awaited below, so skip create_task's unhandled-exception logging.
+        task = asyncio.Task(self._pair(dispatched), loop=self._server.loop, eager_start=True)
         self._pairing_task = task
         try:
             if not await task:
@@ -3211,8 +3214,11 @@ class SendspinConnection:
                 iterations_since_yield += 1
         except asyncio.CancelledError:
             self._logger.debug("Writer cancelled")
-        except Exception:
-            self._logger.exception("Writer failed")
+        except Exception as exc:
+            if isinstance(exc, ConnectionResetError):
+                self._logger.debug("Writer stopped, connection lost: %s", exc)
+            else:
+                self._logger.exception("Writer failed")
             # Close the websocket to signal the message loop to exit
             if not wsock.closed:
                 with suppress(Exception):

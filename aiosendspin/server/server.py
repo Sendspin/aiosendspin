@@ -164,7 +164,7 @@ class SendspinServer:
     _pending_connections: set[SendspinConnection]
     """Incoming connections that have not finished their handshake/message loop yet."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0915
         self,
         loop: asyncio.AbstractEventLoop,
         identity: Identity,
@@ -252,6 +252,7 @@ class SendspinServer:
         self._reclaim_timeouts: dict[str, asyncio.Handle] = {}
         # Clients whose unregister a one-shot timer deferred to an in-flight reconnect.
         self._deferred_unregister: set[str] = set()
+        self._unencrypted_refused_peers: set[str] = set()
         self._pending_connections = set()
 
         self._mdns_client_urls: dict[str, str] = {}
@@ -480,6 +481,15 @@ class SendspinServer:
     def _signal_credential_mismatch(self, client_id: str) -> None:
         """Emit a ClientCredentialMismatchEvent (called from SendspinConnection)."""
         self._signal_event(ClientCredentialMismatchEvent(client_id))
+
+    def _warn_unencrypted_refused(self, peer: str) -> None:
+        """Warn once per peer that an unencrypted client was refused."""
+        if peer in self._unencrypted_refused_peers:
+            return
+        self._unencrypted_refused_peers.add(peer)
+        logger.warning(
+            "Refused unencrypted legacy connection from %s (transition mode is off)", peer
+        )
 
     def _signal_client_connected(self, client_id: str) -> None:
         """Emit a ClientConnectedEvent (called from SendspinClient)."""
