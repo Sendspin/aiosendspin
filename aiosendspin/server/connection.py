@@ -3211,8 +3211,11 @@ class SendspinConnection:
                 iterations_since_yield += 1
         except asyncio.CancelledError:
             self._logger.debug("Writer cancelled")
-        except Exception:
-            self._logger.exception("Writer failed")
+        except Exception as exc:
+            if isinstance(exc, ConnectionResetError):
+                self._logger.debug("Writer stopped, connection lost: %s", exc)
+            else:
+                self._logger.exception("Writer failed")
             # Close the websocket to signal the message loop to exit
             if not wsock.closed:
                 with suppress(Exception):
