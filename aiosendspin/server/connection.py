@@ -2324,6 +2324,9 @@ class SendspinConnection:
             # In flight from before the client observed the leave activate.
             self._logger.debug("Discarding pairing message: not in pairing")
             return True
+        if message_type == "client/command":
+            self._logger.warning("Ignoring client/command that failed to parse: %s", exc)
+            return True
         if not isinstance(message_type, str) or not (
             isinstance(exc, SuitableVariantNotFoundError) and exc.variants_type is ClientMessage
         ):
