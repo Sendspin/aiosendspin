@@ -1920,11 +1920,15 @@ class SendspinConnection:
         """Send ``server/activate``, reconcile the client's active roles, and resume the writer."""
         assert self._transport is not None
         await self._pause_writer()
+        # Messages queued while the writer was stopped (a re-handshake) follow the activation.
+        held = self._priority_messages.copy()
+        self._priority_messages.clear()
         if self._declared_activities is None:
             self._declared_activities = self._initial_activities
         else:
             self._declared_activities = self._desired_activities
         self._send_activation(self._roles_to_activate)
+        self._priority_messages.extend(held)
         # The writer is paused here, so put the queued activation on the wire now.
         while await self._process_priority_messages(self._transport):
             pass

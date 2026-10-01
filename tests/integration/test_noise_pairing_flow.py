@@ -26,8 +26,11 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientStatePayload,
+    ClientTimeMessage,
+    ClientTimePayload,
     ServerActivatePayload,
     ServerHelloMessage,
+    ServerTimeMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
@@ -44,6 +47,7 @@ from aiosendspin.models.types import (
     TrustLevel,
 )
 from aiosendspin.noise import pairing as pairing_module
+from aiosendspin.noise.constants import MSG_TYPE_JSON_BODY
 from aiosendspin.noise.driver import InitRejectedError
 from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
@@ -73,6 +77,7 @@ from aiosendspin.noise.trust_store import (
     StagedPairingPsk,
     TrustedUnpairedClient,
 )
+from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server import connection as connection_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.compliance import ClientComplianceError
@@ -86,7 +91,6 @@ from tests.conftest import make_sdk_client
 
 if TYPE_CHECKING:
     from aiosendspin.noise.trust_store import ClientPairingStore
-    from aiosendspin.noise.wire import EncryptedWebSocket
 
 
 def _make_server(
@@ -2250,6 +2254,93 @@ async def test_success_rehandshake_handles_client_messages_sent_before_message_1
             assert conn.psk_category is PskCategory.LONG_TERM
         finally:
             release.set()
+            await client.disconnect()
+
+
+def _track_sends_across_rekeys(conn: SendspinConnection) -> list[str]:
+    """Record the type of each JSON message ``conn`` sends, with ``<rekey>`` at each key swap."""
+    transport = conn._transport  # noqa: SLF001
+    assert isinstance(transport, EncryptedWebSocket)
+    sent: list[str] = []
+    send_plaintext = transport._send_plaintext  # noqa: SLF001
+    swap_session = transport.swap_session
+
+    async def tracking_send(plaintext: bytes) -> None:
+        if plaintext[0] == MSG_TYPE_JSON_BODY:
+            sent.append(json.loads(plaintext[1:])["type"])
+        await send_plaintext(plaintext)
+
+    def tracking_swap(session: Any) -> None:
+        swap_session(session)
+        sent.append("<rekey>")
+
+    transport._send_plaintext = tracking_send  # type: ignore[method-assign]  # noqa: SLF001
+    transport.swap_session = tracking_swap  # type: ignore[method-assign]
+    return sent
+
+
+async def _pairing_psk_client(
+    identity: Identity, store: InMemoryClientPairingStore
+) -> tuple[SdkClient, PairingAttempt]:
+    """Build a client and a Pairing PSK attempt for the PSK it holds."""
+    client = make_sdk_client(
+        identity=identity, pairing_store=store, client_name="c", roles=[Roles.CONTROLLER]
+    )
+    pairing = generate_psk()
+    await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+    )
+    return client, attempt
+
+
+async def test_activation_is_first_under_new_keys_despite_queued_replies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server/time reply queued during a re-handshake goes out after the new server/activate."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    client, attempt = await _pairing_psk_client(client_identity, client_store)
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            client_ws = client._admitted_connection._ws  # noqa: SLF001
+            assert client_ws is not None
+            sent = _track_sends_across_rekeys(conn)
+
+            time_reply_queued = asyncio.Event()
+            queue_priority = conn.send_priority_message
+
+            def tracking_queue(message: ServerMessage | bytes) -> None:
+                queue_priority(message)
+                if isinstance(message, ServerTimeMessage):
+                    time_reply_queued.set()
+
+            conn.send_priority_message = tracking_queue  # type: ignore[method-assign]
+            rehandshake = connection_module.run_rehandshake_server
+
+            async def rehandshake_after_client_time(*args: Any, **kwargs: Any) -> Any:
+                # The client sends client/time under the old keys before it sees message 1.
+                time_reply_queued.clear()
+                await client_ws.send_str(
+                    ClientTimeMessage(payload=ClientTimePayload(client_transmitted=1)).to_json()
+                )
+                await time_reply_queued.wait()
+                return await rehandshake(*args, **kwargs)
+
+            monkeypatch.setattr(
+                connection_module, "run_rehandshake_server", rehandshake_after_client_time
+            )
+            await conn.initiate_pairing(attempt)
+
+            after_rekeys = [sent[i + 1] for i, kind in enumerate(sent) if kind == "<rekey>"]
+            assert after_rekeys == ["server/activate", "server/activate"]
+            assert "server/time" in sent
+            assert conn.psk_category is PskCategory.LONG_TERM
+        finally:
             await client.disconnect()
 
 
