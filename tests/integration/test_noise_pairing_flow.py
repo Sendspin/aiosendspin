@@ -1549,6 +1549,49 @@ async def test_dial_pairing_failed_entry_keeps_the_connection(
         await server.close()
 
 
+async def test_dial_pairing_is_not_retried_while_only_pairing() -> None:
+    """A drop without client/goodbye while the connection declares only pairing ends it."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    asked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def provide() -> str:
+        code = await shown.get()
+        asked.set()
+        await release.wait()
+        return code
+
+    sdk = await _code_pairing_client(
+        client_identity, InMemoryClientPairingStore(), PairMethod.DYNAMIC_PAIRING_CODE, shown
+    )
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(
+                server,
+                url,
+                pairing_attempt=_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide),
+            ),
+        ):
+            async with asyncio.timeout(5):
+                await asked.wait()
+            server_client = server.get_client(client_identity.peer_id)
+            assert server_client is not None
+            conn = server_client.connection
+            assert conn is not None
+            assert conn.should_retry_server_initiated_connection is False
+
+            release.set()
+            await _await_paired_session(sdk)
+            assert conn.should_retry_server_initiated_connection is True
+    finally:
+        release.set()
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_revoking_approval_during_a_failed_dial_pairing_admits_no_playback() -> None:
     """Approval revoked while a pairing dial runs is honored when the attempt fails."""
     server = _make_server(InMemoryServerPairingStore())

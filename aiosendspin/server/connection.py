@@ -369,6 +369,8 @@ class SendspinConnection:
         self._expects_rehandshake_hellos = False
 
         self._declared_activities: list[Activity] | None = None
+        # Activities of the pairing server/activate, until the next activation replaces it.
+        self._pairing_activities: list[Activity] | None = None
         # Source start commands sent that no client-stream/start has opened a stream for yet.
         # Each is counted: a start crossing a stop or role removal can still open a stream.
         self._source_starts_pending = 0
@@ -435,7 +437,7 @@ class SendspinConnection:
             return False
         reason = self._last_goodbye_reason
         if reason is None:
-            activities = self._declared_activities or []
+            activities = self._pairing_activities or self._declared_activities or []
             return not activities or Activity.PLAYBACK in activities
         return reason is GoodbyeReason.RESTART
 
@@ -1753,6 +1755,7 @@ class SendspinConnection:
                 else ServerActivateMessage(activation_payload)
             )
             await transport.send_str(activation.to_json())
+            self._pairing_activities = activation_payload.activities
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
             if not self._legacy_hello:
                 self._resume_writer()
@@ -1988,6 +1991,7 @@ class SendspinConnection:
         for role in retiring:
             self._discard_role_queue(role)
         self._retiring_roles = retiring
+        self._pairing_activities = None
         try:
             self._client.deactivate_roles(active_roles)
         finally:
