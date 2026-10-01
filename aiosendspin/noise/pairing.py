@@ -61,6 +61,7 @@ _NONCE_WRAP_LABEL = b"sendspin-pair-nonce-wrap-v1"
 _WRAP_NONCE = bytes(12)  # zero nonce is safe: each wrap key is per-field and used once
 _AEAD_TAG_SIZE = 16
 _CLIENT_ATTEMPT_TIMEOUT_S: float = 120.0
+_SERVER_FINALIZE_TIMEOUT_S: float = 30.0
 # Server bounds raise PairingTimeoutError, sending no pairing message: no pair/abort reason is
 # available to a server for its own timeout. They exceed the client's attempt timeout so the
 # client's in-band abort wins when both sides are live.
@@ -77,7 +78,7 @@ class PairingError(Exception):
 
 
 class PairingTimeoutError(PairingError):
-    """A server-side bound on waiting for a client pairing message expired."""
+    """A server-side bound on waiting for a client pairing message or storing its record expired."""
 
 
 class InvalidPairingCodeError(PairingError):
@@ -701,30 +702,32 @@ async def _commit_finalize(
     owner: str | None,
 ) -> ServerPairingRecord | None:
     """Store the record ``finalize`` carries and acknowledge it unless verifying."""
-    existing = await store.record_by_client_id(client_id)
-    record = existing.with_method(method) if existing is not None else None
-    if not verify:
-        psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
-        if record is None:
-            record = ServerPairingRecord(
-                psk_id=psk_id_for(psk),
-                psk=psk,
-                client_id=client_id,
-                pair_methods=[method],
-                owner=owner,
-            )
-        else:
-            # Ownership tracks the latest authorization that minted the credential.
-            record = replace(record, psk_id=psk_id_for(psk), psk=psk, owner=owner)
-    if record is not None and record is not existing:
-        await store.store_record(record)  # persist before acking
-    if verify:
-        return None
-    # The new record supersedes the client's lesser grants.
-    await store.unstage_pairing_psk(client_id)
-    await store.remove_trusted_unpaired(client_id)
-    await ws.send_str(ServerPairFinalizeMessage().to_json())
-    return record
+    # Bounded here, since the caller's timeout and cancels cannot interrupt this step.
+    async with _server_timeout(_SERVER_FINALIZE_TIMEOUT_S, "completion of the pairing finalize"):
+        existing = await store.record_by_client_id(client_id)
+        record = existing.with_method(method) if existing is not None else None
+        if not verify:
+            psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
+            if record is None:
+                record = ServerPairingRecord(
+                    psk_id=psk_id_for(psk),
+                    psk=psk,
+                    client_id=client_id,
+                    pair_methods=[method],
+                    owner=owner,
+                )
+            else:
+                # Ownership tracks the latest authorization that minted the credential.
+                record = replace(record, psk_id=psk_id_for(psk), psk=psk, owner=owner)
+        if record is not None and record is not existing:
+            await store.store_record(record)  # persist before acking
+        if verify:
+            return None
+        # The new record supersedes the client's lesser grants.
+        await store.unstage_pairing_psk(client_id)
+        await store.remove_trusted_unpaired(client_id)
+        await ws.send_str(ServerPairFinalizeMessage().to_json())
+        return record
 
 
 def _unwrap_psk(
