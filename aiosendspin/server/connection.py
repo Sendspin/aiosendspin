@@ -1918,8 +1918,10 @@ class SendspinConnection:
                 psk_id_for(attempt.pairing_psk), attempt.pairing_psk, PskCategory.PAIRING
             )
         else:
-            if self._noise_psk.category in (PskCategory.SENTINEL, PskCategory.LONG_TERM):
-                # Long-term: verification runs over the existing PSK.
+            if self._noise_psk.category is PskCategory.SENTINEL or (
+                self._noise_psk.category is PskCategory.LONG_TERM and attempt.verify
+            ):
+                # Long-term: verification runs over the existing PSK, outside the activity table.
                 # Sentinel: a fresh pairing-code pairing.
                 return True
             target = ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)

@@ -3576,6 +3576,43 @@ async def test_pairing_on_a_long_term_session_quiesces_first() -> None:
             await client.disconnect()
 
 
+@pytest.mark.parametrize("method", _CODE_METHODS)
+async def test_code_re_pairing_on_a_long_term_session_runs_over_the_sentinel(
+    method: PairMethod,
+) -> None:
+    """Code re-pairing on a long-term session runs over the Sentinel PSK."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    old_record = await server_store.record_by_client_id(identity.peer_id)
+    assert old_record is not None
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    categories: list[PskCategory] = []
+
+    async def provide() -> str:
+        code = await shown.get()
+        assert client.noise_psk is not None
+        categories.append(client.noise_psk.category)
+        return code
+
+    client = await _code_pairing_client(identity, client_store, method, shown)
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            await _await_connected_client(server, identity.peer_id)
+            await server.initiate_pairing(identity.peer_id, _code_attempt(method, provide))
+
+            assert categories == [PskCategory.SENTINEL]
+            await _await_paired_session(client)
+            new_record = await server_store.record_by_client_id(identity.peer_id)
+            assert new_record is not None
+            assert new_record.psk != old_record.psk
+        finally:
+            await client.disconnect()
+
+
 async def _await_player_state(conn: SendspinConnection, *, volume: int, muted: bool) -> None:
     async with asyncio.timeout(5):
         while True:
