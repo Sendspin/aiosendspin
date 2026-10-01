@@ -85,7 +85,7 @@ This could generate a `KeyError` if `"name"` does not exist in the `dict`. Consi
 ## Avoid These False Positives
 * Do not report a race unless there is an `await` between the check and the change. Code without an `await` runs without interruption in asyncio, and so does an eager task that never suspends.
 * Do not report valid Python 3.12 syntax or features as errors, such as `type X = ...` aliases, `def f[T](...)` type parameters, nested f-strings, and `reversed()` on dictionary views.
-* Do not report names used only in annotations as missing at runtime. Files use `from __future__ import annotations`, so annotations are never evaluated.
+* In files that use `from __future__ import annotations`, do not report names used only in annotations as missing at runtime, since those annotations are never evaluated.
 * Do not ask for runtime validation of values that the strict type checking already rules out.
 
 ## When to Stay Silent
