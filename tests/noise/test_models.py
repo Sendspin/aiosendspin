@@ -7,7 +7,7 @@ import json
 import pytest
 
 from aiosendspin import noise
-from aiosendspin.models.types import ServerErrorReason
+from aiosendspin.models.types import PairAbortReason, ServerErrorReason
 from aiosendspin.noise.models import (
     ClientInitMessage,
     ClientInitPayload,
@@ -18,6 +18,7 @@ from aiosendspin.noise.models import (
     NoiseHandshakePayload,
     NoiseMsg1Payload,
     NoiseMsg2Payload,
+    PairAbortMessage,
     PairingMessage,
     ServerErrorMessage,
     ServerErrorPayload,
@@ -181,3 +182,11 @@ def test_client_pair_retry_round_trip() -> None:
     raw = ClientPairRetryMessage().to_json()
     assert json.loads(raw) == {"type": "client/pair-retry", "payload": {}}
     assert PairingMessage.from_json(raw) == ClientPairRetryMessage()
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def test_pair_abort_reads_pre_rename_pin_mismatch() -> None:
+    """A pre-rename PIN client's pin_mismatch abort parses as a pairing-code mismatch."""
+    message = PairingMessage.from_json('{"type":"pair/abort","payload":{"reason":"pin_mismatch"}}')
+    assert isinstance(message, PairAbortMessage)
+    assert message.payload.reason is PairAbortReason.PAIRING_CODE_MISMATCH

@@ -58,6 +58,8 @@ _PAKE_SHARE_SIZE = 32
 _KC_TAG_SIZE = 64
 _PSK_WRAP_LABEL = b"sendspin-pair-psk-wrap-v1"
 _NONCE_WRAP_LABEL = b"sendspin-pair-nonce-wrap-v1"
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+_LEGACY_PIN_DERIVE_LABEL = b"sendspin-pin-derive-v1"
 _WRAP_NONCE = bytes(12)  # zero nonce is safe: each wrap key is per-field and used once
 _AEAD_TAG_SIZE = 16
 _CLIENT_ATTEMPT_TIMEOUT_S: float = 120.0
@@ -379,12 +381,16 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    legacy_pin: bool = False,
 ) -> ServerPairingRecord | None:
     """Run the server side of the dynamic-pairing-code flow.
 
     Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
-    client predating rounds: one round under the ``sid`` without a round number.
+    client predating rounds: one round under the ``sid`` without a round number. ``legacy_pin``
+    serves a dynamic PIN client predating the pairing-code rename, which reveals ``nonce_B``
+    unwrapped and derives its PIN under the old label.
     """
     init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
     if init.payload.commit_B is None:
@@ -421,28 +427,41 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
             _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
         ):
             await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
-        if confirm.payload.wrapped_nonce_B is None:
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        # DEPRECATED(spec-pr-155): remove in aiosendspin <version>
+        if legacy_pin:
+            if confirm.payload.nonce_B is None or confirm.payload.wrapped_nonce_B is not None:
+                raise PairingError("client/pair-confirm must carry only nonce_B for dynamic PIN")
+            nonce_b = _decode_field(
+                confirm.payload.nonce_B, "nonce_B", expect_len=pairing_code_mod.NONCE_SIZE
+            )
+        elif confirm.payload.wrapped_nonce_B is None:
             raise PairingError(
                 "client/pair-confirm missing wrapped_nonce_B for dynamic pairing code"
             )
-        wrapped_nonce = _decode_field(
-            confirm.payload.wrapped_nonce_B,
-            "wrapped_nonce_B",
-            expect_len=pairing_code_mod.NONCE_SIZE + _AEAD_TAG_SIZE,
-        )
-        try:
-            nonce_b = _wrap_aead(
-                ws.session.suite, _wrap_key(_NONCE_WRAP_LABEL, sid, cpace)
-            ).decrypt(_WRAP_NONCE, wrapped_nonce, None)
-        except InvalidTag as exc:
-            raise PairingError("malformed wrapped_nonce_B: AEAD failure") from exc
+        else:
+            wrapped_nonce = _decode_field(
+                confirm.payload.wrapped_nonce_B,
+                "wrapped_nonce_B",
+                expect_len=pairing_code_mod.NONCE_SIZE + _AEAD_TAG_SIZE,
+            )
+            try:
+                nonce_b = _wrap_aead(
+                    ws.session.suite, _wrap_key(_NONCE_WRAP_LABEL, sid, cpace)
+                ).decrypt(_WRAP_NONCE, wrapped_nonce, None)
+            except InvalidTag as exc:
+                raise PairingError("malformed wrapped_nonce_B: AEAD failure") from exc
         if not pairing_code_mod.verify_commit(nonce_b, commit_b):
             raise PairingError("revealed nonce_B does not match commit_B")
-        derived_prs = (
-            pairing_code_mod.derive_digits(handshake_hash, nonce_a, nonce_b).encode("ascii")
-            if pairing_format is PairingCodeFormat.DIGITS
-            else pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
-        )
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        if legacy_pin:
+            derived_prs = _legacy_pin_digits(handshake_hash, nonce_a, nonce_b).encode("ascii")
+        elif pairing_format is PairingCodeFormat.DIGITS:
+            derived_prs = pairing_code_mod.derive_digits(handshake_hash, nonce_a, nonce_b).encode(
+                "ascii"
+            )
+        else:
+            derived_prs = pairing_code_mod.derive_qr_code(handshake_hash, nonce_a, nonce_b)
         if prs != derived_prs:
             raise PairingError("entered pairing code is not bound to this connection")
 
@@ -919,6 +938,13 @@ def _pake_sid(handshake_hash: bytes, pairing_index: int, round_number: int) -> b
 def _legacy_pake_sid(handshake_hash: bytes, pairing_index: int) -> bytes:
     """CPace session id for a client predating rounds: no round number."""
     return _PAKE_SID_LABEL + handshake_hash + pairing_index.to_bytes(4, "big")
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def _legacy_pin_digits(handshake_hash: bytes, nonce_a: bytes, nonce_b: bytes) -> str:
+    """Derive the six-digit dynamic PIN of a client predating the pairing-code rename."""
+    digest = hashlib.sha256(_LEGACY_PIN_DERIVE_LABEL + handshake_hash + nonce_a + nonce_b).digest()
+    return f"{int.from_bytes(digest, 'big') % 1_000_000:06d}"
 
 
 def _wrap_key(label: bytes, sid: bytes, cpace: CPace) -> bytes:

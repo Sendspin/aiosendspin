@@ -44,6 +44,7 @@ from aiosendspin.noise.pairing import (
     PairingError,
     PairingTimeoutError,
     _legacy_pake_sid,
+    _legacy_pin_digits,
     _pake_sid,
     run_dynamic_pairing_code_client,
     run_dynamic_pairing_code_server,
@@ -2067,6 +2068,69 @@ async def test_legacy_rounds_server_rejects_pair_retry() -> None:
             client(),
         )
     assert not isinstance(excinfo.value, PairingAbortError)
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def test_legacy_pin_digits_known_answer() -> None:
+    """The pre-rename dynamic PIN matches aiosendspin 9.1.1's six-digit derivation."""
+    assert _legacy_pin_digits(bytes(range(32)), bytes([1]) * 32, bytes([2]) * 32) == "638562"
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+async def test_legacy_pin_server_pairs_a_dynamic_pin_client() -> None:
+    """A dynamic PIN client revealing nonce_B unwrapped pairs under the pre-rename PIN."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    psk = generate_psk()
+    sid = _legacy_pake_sid(_HANDSHAKE_HASH, 0)
+
+    async def pin_client() -> None:
+        nonce_b = pairing_code_mod.generate_nonce()
+        await client_ews.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(
+                    pairing_index=0, commit_B=b64url_encode(pairing_code_mod.commit(nonce_b))
+                ),
+            ).to_json(),
+        )
+        init = ServerPairInitMessage.from_json((await client_ews.receive()).data)
+        assert init.payload.nonce_A is not None
+        pin = _legacy_pin_digits(_HANDSHAKE_HASH, b64url_decode(init.payload.nonce_A), nonce_b)
+        pairing_code_future.set_result(pin)
+        cpace = CPace.start(role=CPaceRole.RESPONDER, prs=pin.encode(), sid=sid, ad=b"client")
+        auth = ServerPairAuthMessage.from_json((await client_ews.receive()).data)
+        await client_ews.send_str(
+            ClientPairAuthMessage(
+                payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(cpace.public_share)),
+            ).to_json(),
+        )
+        cpace.derive(b64url_decode(auth.payload.pake_msg_1), b"server")
+        await client_ews.receive()  # server/pair-confirm
+        await client_ews.send_str(
+            ClientPairConfirmMessage(
+                payload=ClientPairConfirmPayload(
+                    client_kc=b64url_encode(cpace.tag()), nonce_B=b64url_encode(nonce_b)
+                ),
+            ).to_json(),
+        )
+        await client_ews.send_str(_psk_finalize_wrapped(sid, cpace, psk))
+
+    server_record, _ = await asyncio.gather(
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_provider=lambda: pairing_code_future,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            legacy_rounds=True,
+            legacy_pin=True,
+        ),
+        pin_client(),
+    )
+    assert server_record is not None
+    assert server_record.psk == psk
 
 
 async def test_dynamic_pairing_code_mismatched_commit_is_protocol_error() -> None:

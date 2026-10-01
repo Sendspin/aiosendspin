@@ -1436,6 +1436,9 @@ class SendspinConnection:
             self._flag_noncompliance("client/hello sent supported_pair_methods as a list")
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        if client_info.legacy_pin_methods_used:
+            self._flag_noncompliance("client/hello offered the pre-rename PIN pairing methods")
         methods = client_info.supported_pair_methods
         if methods is None:
             return
@@ -1729,6 +1732,7 @@ class SendspinConnection:
                     languages = list(self._server.languages)
             # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
             self._activated_pairing_method = method
+            assert self._client_info is not None
             # No gate on the hello-advertised methods: the advertisement may lag the client's
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
@@ -1738,6 +1742,8 @@ class SendspinConnection:
                     method=method,
                     format=pairing_format.value if pairing_format is not None else None,
                     languages=languages,
+                    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+                    legacy_pin_wire=self._client_info.legacy_pin_methods_used,
                 )
             )
             # DEPRECATED(spec-pr-130): remove in aiosendspin <version>
@@ -1850,6 +1856,8 @@ class SendspinConnection:
             on_pair_pending=self._pairing_attempt.on_pair_pending,
             owner=self._pairing_attempt.owner,
             legacy_rounds=legacy_rounds,
+            # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+            legacy_pin=bool(self._client_info.legacy_pin_methods_used),
         )
 
     # DEPRECATED(spec-pr-247): remove in aiosendspin <version>

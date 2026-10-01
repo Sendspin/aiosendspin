@@ -51,6 +51,7 @@ from .types import (
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
+    PairingCodeFormat,
     PairMethod,
     PlaybackStateType,
     Roles,
@@ -139,14 +140,44 @@ _PAIR_METHOD_SIDECARS: frozenset[str] = frozenset(
 )
 
 
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+_LEGACY_PIN_METHODS: dict[str, str] = {
+    "dynamic_pin": PairMethod.DYNAMIC_PAIRING_CODE.value,
+    "static_pin": PairMethod.STATIC_PAIRING_CODE.value,
+}
+# The server always activates this dynamic PIN length.
+_LEGACY_DYNAMIC_PIN_LENGTH = 6
+
+
 # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
 def _pair_methods_from_list(entries: Any) -> dict[str, Any]:
     """Key a superseded list of self-describing descriptors by method identifier."""
-    return {
-        entry["method"]: {k: v for k, v in entry.items() if k != "method"}
+    return dict(
+        _list_entry(entry)
         for entry in entries
         if isinstance(entry, dict) and isinstance(entry.get("method"), str)
-    }
+    )
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def _list_entry(entry: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return a list entry's method and descriptor, renaming the pre-rename PIN methods."""
+    method = entry["method"]
+    descriptor = {k: v for k, v in entry.items() if k != "method"}
+    if method == "dynamic_pin":
+        # A client whose shortest PIN exceeds the activated length is left with no format.
+        min_pin_length = entry.get("min_pin_length", _LEGACY_DYNAMIC_PIN_LENGTH)
+        usable = isinstance(min_pin_length, int) and min_pin_length <= _LEGACY_DYNAMIC_PIN_LENGTH
+        descriptor["formats"] = [PairingCodeFormat.DIGITS.value] if usable else []
+    return _LEGACY_PIN_METHODS.get(method, method), descriptor
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def _uses_legacy_pin_methods(entries: Any) -> bool:
+    """Whether a superseded descriptor list names a pre-rename PIN method."""
+    return any(
+        isinstance(entry, dict) and entry.get("method") in _LEGACY_PIN_METHODS for entry in entries
+    )
 
 
 def _filter_descriptor_values(
@@ -326,6 +357,10 @@ class ClientHelloPayload(SendspinModel):
     trust_level_used: bool | None = None
     """Whether the removed trust_level key was present, recorded for the server to treat
     the client as legacy. Not part of the wire schema (omitted when None)."""
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    legacy_pin_methods_used: bool | None = None
+    """Whether supported_pair_methods named the pre-rename PIN methods, recorded for the
+    server to pair over the PIN wire. Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -357,6 +392,10 @@ class ClientHelloPayload(SendspinModel):
         if legacy_pair_methods_list:
             normalized["supported_pair_methods"] = _pair_methods_from_list(pair_methods)
         normalized["legacy_pair_methods_list_used"] = legacy_pair_methods_list or None
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        normalized["legacy_pin_methods_used"] = (
+            legacy_pair_methods_list and _uses_legacy_pin_methods(pair_methods)
+        ) or None
         # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
         normalized["trust_level_used"] = "trust_level" in normalized or None
         # Always overwrite so a client cannot spoof the record via the wire.
@@ -663,11 +702,28 @@ class ActivatePairing(SendspinModel):
     # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
     languages: list[str] | None = None
     """BCP 47 tags in descending operator preference, for spoken pairing-code emission."""
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    legacy_pin_wire: bool | None = None
+    """Serialize with the pre-rename PIN method names, for a client that offered them.
+    Not part of the wire schema (omitted when None)."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
 
         omit_none = True
+
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite a pairing-code method to its PIN name when ``legacy_pin_wire`` is set."""
+        if not d.pop("legacy_pin_wire", None):
+            return d
+        if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
+            d["method"] = "dynamic_pin"
+            d["pin_length"] = _LEGACY_DYNAMIC_PIN_LENGTH
+            d.pop("format", None)
+        elif self.method is PairMethod.STATIC_PAIRING_CODE:
+            d["method"] = "static_pin"
+        return d
 
 
 @dataclass
