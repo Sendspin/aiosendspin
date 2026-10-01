@@ -2548,10 +2548,8 @@ async def test_format_change_preserves_peer_audio(
 
 
 @pytest.mark.asyncio
-async def test_format_change_onto_a_peer_format_resumes_at_the_nearest_chunk(
-    mock_loop: Any,
-) -> None:
-    """Switching to the format a peer already streams resumes at the chunk nearest the old end."""
+async def test_format_change_onto_a_peer_format_resends_no_audio(mock_loop: Any) -> None:
+    """Switching to the format a peer already streams sends nothing before the old end."""
     group = _DummyGroup(clients=[])
     client_a, conn_a = _make_connected_player_multi_format(mock_loop, group, "p1")
     client_b, _conn_b = _make_connected_player_multi_format(mock_loop, group, "p2")
@@ -2588,13 +2586,12 @@ async def test_format_change_onto_a_peer_format_resumes_at_the_nearest_chunk(
         for frame in conn_a.sent_binary[pre_change_count:]
     ]
     assert timestamps
-    # The peer's 44.1kHz chunks last about 25ms, so the nearest one starts within 12.5ms.
-    assert abs(timestamps[0] - pre_change_end_us) <= 12_500
+    assert all(timestamp_us >= pre_change_end_us for timestamp_us in timestamps)
 
 
 @pytest.mark.asyncio
-async def test_format_change_into_a_peer_catch_up_resumes_at_the_old_end(mock_loop: Any) -> None:
-    """Joining the catch-up a late peer started resumes at the chunk nearest the old end."""
+async def test_format_change_into_a_peer_catch_up_resends_no_audio(mock_loop: Any) -> None:
+    """Joining the catch-up a late peer started sends nothing before the old end."""
     group = _DummyGroup(clients=[])
     client_a, conn_a = _make_connected_player_multi_format(mock_loop, group, "p1")
     stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
@@ -2631,7 +2628,7 @@ async def test_format_change_into_a_peer_catch_up_resumes_at_the_old_end(mock_lo
         for frame in conn_a.sent_binary[pre_change_count:]
     ]
     assert timestamps
-    assert abs(timestamps[0] - pre_change_end_us) <= 12_500
+    assert all(timestamp_us >= pre_change_end_us for timestamp_us in timestamps)
 
 
 # --- Historical Audio Tests ---

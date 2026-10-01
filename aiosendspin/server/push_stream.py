@@ -1826,8 +1826,7 @@ class PushStream:
                 not_before_us = self._resume_at_us.get(role)
                 for audio_chunk in audio_chunks:
                     if not_before_us is not None:
-                        # Resume at the chunk boundary nearest the old end.
-                        if audio_chunk.timestamp_us + audio_chunk.duration_us // 2 < not_before_us:
+                        if audio_chunk.timestamp_us < not_before_us:
                             continue
                         del self._resume_at_us[role]
                         not_before_us = None
