@@ -74,21 +74,6 @@ async def _code() -> str:
     return "000000"
 
 
-def test_pairing_attempt_verify_is_code_only() -> None:
-    """Verify is a pairing code-only re-authentication flag; PAIRING_PSK rejects it."""
-    with pytest.raises(ValueError, match="does not support verification"):
-        PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), verify=True)
-    assert PairingAttempt(
-        method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=_code, verify=True
-    ).verify
-    assert PairingAttempt(
-        method=PairMethod.DYNAMIC_PAIRING_CODE,
-        pairing_code_provider=_code,
-        verify=True,
-        pairing_format=PairingCodeFormat.DIGITS,
-    ).verify
-
-
 def test_pairing_attempt_pairing_psk_requires_material() -> None:
     """PAIRING_PSK must carry a 32-byte pairing_psk, its client_id, and no code flow hooks."""
     with pytest.raises(ValueError, match="requires pairing_psk"):
@@ -1494,23 +1479,25 @@ async def test_client_stores_nothing_without_the_finalize_ack() -> None:
     async def provide() -> str:
         return await shown
 
+    class _LeavesPairingWS(_RecordingWS):
+        """Sends a ``server/activate`` in place of the finalize ack."""
+
+        async def send_str(self, data: str) -> None:
+            if json.loads(data)["type"] == "server/pair-finalize":
+                data = ServerActivateMessage(
+                    payload=ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
+                ).to_json()
+            await super().send_str(data)
+
     async def server_leaves_pairing() -> None:
-        # Receive client/pair-finalize without finalizing, then leave pairing with a
-        # server/activate (what the connection layer sends in place of an ack).
         await run_dynamic_pairing_code_server(
-            server_ews,
+            _LeavesPairingWS(server_ews),  # type: ignore[arg-type]
             handshake_hash=_HANDSHAKE_HASH,
             pairing_index=0,
             pairing_format=PairingCodeFormat.DIGITS,
             pairing_code_provider=provide,
             client_id="client-A",
             store=server_store,
-            verify=True,
-        )
-        await server_ews.send_str(
-            ServerActivateMessage(
-                payload=ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
-            ).to_json(),
         )
 
     with pytest.raises(PairingError, match="malformed message awaiting ServerPairFinalizeMessage"):
@@ -1527,9 +1514,7 @@ async def test_client_stores_nothing_without_the_finalize_ack() -> None:
             server_leaves_pairing(),
         )
 
-    # Neither side stored a record.
     assert _added_records(await client_store.list_records()) == []
-    assert await server_store.record_by_client_id("client-A") is None
     # server_kc verified, so the round count resets like any other attempt.
     assert await client_store.pairing_round_count() == 0
 

@@ -108,20 +108,29 @@ def _send_audio(conn: SendspinConnection) -> None:
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("category", "payload"),
     [
-        ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
-        ServerActivatePayload(activities=[Activity.PAIRING]),
-        ServerActivatePayload(
-            activities=[Activity.PLAYBACK],
-            active_roles=["player@v2", "artwork@v2", "visualizer@v2"],
+        (
+            PskCategory.LONG_TERM,
+            ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
+        ),
+        (PskCategory.SENTINEL, ServerActivatePayload(activities=[Activity.PAIRING])),
+        (
+            PskCategory.LONG_TERM,
+            ServerActivatePayload(
+                activities=[Activity.PLAYBACK],
+                active_roles=["player@v2", "artwork@v2", "visualizer@v2"],
+            ),
         ),
     ],
     ids=["explicit", "not-playback-capable", "version-replacement"],
 )
-async def test_activation_ends_removed_role_streams(payload: ServerActivatePayload) -> None:
+async def test_activation_ends_removed_role_streams(
+    category: PskCategory, payload: ServerActivatePayload
+) -> None:
     """A removed stream role ends its stream, blanks shown artwork and signals stream end once."""
     conn, recorder = await _streaming_connection()
+    conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, category)  # noqa: SLF001
 
     assert await conn._apply_activation(payload) is None  # noqa: SLF001
 
