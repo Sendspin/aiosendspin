@@ -711,7 +711,8 @@ class SendspinConnection:
         message exists, it uses timestamp 0 (sent before any timed binary).
 
         Exception: StreamEnd and StreamStart use current time instead of inheriting,
-        ensuring they are ordered correctly across stream boundaries.
+        ensuring they are ordered correctly across stream boundaries. A StreamStart
+        never sorts ahead of the role's already queued messages.
         """
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
@@ -732,6 +733,8 @@ class SendspinConnection:
         # across stream boundaries (prevents old stream timestamps from affecting new stream)
         if isinstance(message, StreamEndMessage | StreamStartMessage):
             sort_ts = self._server.clock.now_us()
+            if isinstance(message, StreamStartMessage):
+                sort_ts = max(sort_ts, self._last_enqueued_ts_by_role.get(role, 0))
             # Update tracker so subsequent messages inherit this timestamp
             self._last_enqueued_ts_by_role[role] = sort_ts
         else:

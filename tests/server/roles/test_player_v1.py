@@ -972,7 +972,7 @@ def test_set_preferred_format_clear_mid_stream_notifies_group() -> None:
 
     assert role.set_preferred_format(None)
     assert role._pending_stream_start is True  # noqa: SLF001
-    client.group.on_role_format_changed.assert_called_once_with(role)
+    client.group.on_role_format_changed.assert_called_once_with(role, resume_at_us=None)
 
 
 def test_ensure_preferred_format_noop_when_no_player_support() -> None:
