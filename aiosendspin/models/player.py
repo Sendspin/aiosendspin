@@ -267,8 +267,12 @@ class PlayerCommandPayload(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Accept the pre-rename `static_delay_ms` spelling from a pre-rename server."""
-        return _rewrite_legacy_delay_key(d)
+        """Accept the pre-rename `static_delay_ms` spelling and clamp the delay to 0-5000."""
+        normalized = _rewrite_legacy_delay_key(d)
+        delay_ms = normalized.get("output_delay_ms")
+        if isinstance(delay_ms, int):
+            normalized["output_delay_ms"] = min(max(delay_ms, 0), 5000)
+        return normalized
 
     def __post_init__(self) -> None:
         """Validate field values and command consistency."""
