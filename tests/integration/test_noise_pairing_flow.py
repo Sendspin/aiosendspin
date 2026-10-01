@@ -1082,7 +1082,9 @@ async def test_live_pairing_unoffered_format_fails_before_activation() -> None:
             await client.disconnect()
 
 
-async def test_live_pairing_unadvertised_format_client_aborts() -> None:
+async def test_live_pairing_unadvertised_format_client_aborts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """With no descriptor to gate on, an unoffered format reaches the client, which aborts."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
@@ -1116,6 +1118,7 @@ async def test_live_pairing_unadvertised_format_client_aborts() -> None:
                     )
                 )
             assert exc_info.value.reason is PairAbortReason.METHOD_NOT_SUPPORTED
+            assert "Unhandled exception" not in caplog.text
         finally:
             await client.disconnect()
 
