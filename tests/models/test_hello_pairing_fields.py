@@ -199,12 +199,76 @@ def test_superseded_pair_methods_list_is_accepted() -> None:
     )
     payload = ClientHelloPayload.from_json(raw)
     assert payload.legacy_pair_methods_list_used is True
+    assert payload.legacy_pin_methods_used is None
     methods = payload.supported_pair_methods
     assert methods is not None
     assert methods.pairing_psk == PairMethodDescriptor(locations=["device"])
     assert methods.dynamic_pairing_code == DynamicPairMethodDescriptor(
         out_channels=["speaker"], formats=["digits"]
     )
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        pytest.param(
+            '{"method":"dynamic_pin","out_channels":["display"],"min_pin_length":6}',
+            SupportedPairMethods(
+                dynamic_pairing_code=DynamicPairMethodDescriptor(
+                    out_channels=["display"], formats=["digits"]
+                )
+            ),
+            id="dynamic",
+        ),
+        pytest.param(
+            '{"method":"static_pin","locations":["device"]}',
+            SupportedPairMethods(static_pairing_code=PairMethodDescriptor(locations=["device"])),
+            id="static",
+        ),
+        pytest.param(
+            '{"method":"dynamic_pin","out_channels":["display"],"min_pin_length":8}',
+            SupportedPairMethods(unusable_methods=["dynamic_pairing_code"]),
+            id="dynamic_longer_than_six",
+        ),
+    ],
+)
+def test_pre_rename_pin_methods_read_as_pairing_code_methods(
+    entry: str, expected: SupportedPairMethods
+) -> None:
+    """The pre-rename PIN methods map onto the pairing-code methods, six digits only."""
+    raw = (
+        '{"name":"Client","supported_roles":["controller@v1"],'
+        f'"supported_pair_methods":[{entry}]}}'
+    )
+    payload = ClientHelloPayload.from_json(raw)
+    assert payload.legacy_pin_methods_used is True
+    assert payload.supported_pair_methods == expected
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+@pytest.mark.parametrize(
+    ("pairing", "wire"),
+    [
+        pytest.param(
+            ActivatePairing(
+                method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits", legacy_pin_wire=True
+            ),
+            {"method": "dynamic_pin", "pin_length": 6},
+            id="dynamic",
+        ),
+        pytest.param(
+            ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE, legacy_pin_wire=True),
+            {"method": "static_pin"},
+            id="static",
+        ),
+    ],
+)
+def test_legacy_pin_activation_uses_the_pin_wire(
+    pairing: ActivatePairing, wire: dict[str, object]
+) -> None:
+    """An activation for a pre-rename PIN client carries the PIN method name and length."""
+    assert orjson.loads(pairing.to_json()) == wire
 
 
 def test_current_pair_methods_object_is_not_flagged_as_legacy() -> None:

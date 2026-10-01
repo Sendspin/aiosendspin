@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from mashumaro.types import Discriminator
 
@@ -151,6 +151,14 @@ class PairAbortPayload(SendspinModel):
 
     reason: PairAbortReason
     """Why the pairing attempt was aborted."""
+
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Read the pre-rename ``pin_mismatch`` reason as ``pairing_code_mismatch``."""
+        if d.get("reason") == "pin_mismatch":
+            return {**d, "reason": PairAbortReason.PAIRING_CODE_MISMATCH.value}
+        return d
 
 
 @dataclass
@@ -303,6 +311,9 @@ class ClientPairConfirmPayload(SendspinModel):
     """CPace MCF tag ``Tb`` (HMAC-SHA-512, 86-char base64url)."""
     wrapped_nonce_B: str | None = None  # noqa: N815 - spec wire field name
     """48-byte wrapping of the ``commit_B`` preimage (64-char base64url). Dynamic only."""
+    # DEPRECATED(spec-pr-155): remove in aiosendspin <version>
+    nonce_B: str | None = None  # noqa: N815 - spec wire field name
+    """Unwrapped ``commit_B`` preimage (43-char base64url), sent by pre-rename PIN clients."""
 
     class Config(SendspinConfig):
         """Omit the optional wrapped nonce opening when absent (static pairing code)."""
