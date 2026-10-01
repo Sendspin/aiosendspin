@@ -2438,6 +2438,49 @@ async def test_disconnect_during_opening_rehandshake_completes_teardown() -> Non
             await client.disconnect()
 
 
+async def test_end_pairing_during_record_persistence_completes_pairing() -> None:
+    """end_pairing while the server stores a finalized record completes the pairing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    client, attempt = await _pairing_psk_client(client_identity, client_store)
+
+    storing = asyncio.Event()
+    release = asyncio.Event()
+    store_record = server_store.store_record
+
+    async def stalled_store_record(record: ServerPairingRecord) -> None:
+        storing.set()
+        await release.wait()
+        await store_record(record)
+
+    server_store.store_record = stalled_store_record  # type: ignore[method-assign]
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            pairing = asyncio.ensure_future(conn.initiate_pairing(attempt))
+            await storing.wait()
+
+            end_task = asyncio.ensure_future(server.end_pairing(client_identity.peer_id))
+            await asyncio.sleep(0)  # let end_pairing cancel the attempt task
+            release.set()
+            await end_task
+            await pairing
+
+            assert conn.psk_category is PskCategory.LONG_TERM
+            client_record = await client_store.record_by_server_id(server.id)
+            server_record = await server_store.record_by_client_id(client_identity.peer_id)
+            assert client_record is not None
+            assert server_record is not None
+            assert client_record.psk == server_record.psk
+        finally:
+            release.set()
+            await client.disconnect()
+
+
 async def test_live_pairing_pairing_psk() -> None:
     """Operator pairs a Sentinel-idle connection via Pairing PSK."""
     server_store = InMemoryServerPairingStore()

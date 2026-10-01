@@ -672,6 +672,37 @@ async def _finalize_server(
     """
     if finalize is None:
         finalize = await _receive_pairing(ws, ClientPairFinalizeMessage)
+    # The client has finalized, so a cancel from here on completes the attempt.
+    commit = asyncio.create_task(
+        _commit_finalize(
+            ws,
+            finalize,
+            client_id=client_id,
+            store=store,
+            method=method,
+            verify=verify,
+            wrap_key=wrap_key,
+            owner=owner,
+        )
+    )
+    try:
+        return await asyncio.shield(commit)
+    except asyncio.CancelledError:
+        return await commit
+
+
+async def _commit_finalize(
+    ws: EncryptedWebSocket,
+    finalize: ClientPairFinalizeMessage,
+    *,
+    client_id: str,
+    store: ServerPairingStore,
+    method: PairMethod,
+    verify: bool,
+    wrap_key: bytes | None,
+    owner: str | None,
+) -> ServerPairingRecord | None:
+    """Store the record ``finalize`` carries and acknowledge it unless verifying."""
     existing = await store.record_by_client_id(client_id)
     record = existing.with_method(method) if existing is not None else None
     if not verify:
