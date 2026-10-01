@@ -13,11 +13,26 @@ This guidance is aimed at Claude Code but may also be suitable for other AI tool
 ./scripts/run-in-env.sh pytest -k "test_name"  # Run tests matching pattern
 ```
 
+## Specification
+
+The [Sendspin spec](https://github.com/Sendspin/spec) defines every message, field, and required behavior this library implements. Check protocol changes against it:
+
+- `connection.md`: connection setup, discovery, and encryption
+- `pairing.md`: pairing
+- `messaging.md`: message format, clock synchronization, and core messages
+- `roles/<family>/v1.md`: one file per role family
+
+`README.md` in the spec repo is generated from these files.
+
+When the spec renames or removes a field, the server keeps accepting the old form and calls `flag_noncompliance` (see `server/compliance.py`). The client is only rejected when the server runs with `allow_noncompliant_clients=False`, and in that mode validation happens before any side effect such as marking the client connected or emitting events. The client library supports only the current spec and keeps no old forms.
+
 ## Architecture
 
-**aiosendspin** is the async Python implementation of the [Sendspin Protocol](https://github.com/Sendspin-Protocol/spec) for synchronized audio streaming across networked devices.
+**aiosendspin** is the async Python implementation of the [Sendspin Protocol](https://github.com/Sendspin/spec) for synchronized audio streaming across networked devices.
 
-The package has three main subpackages: `server` (the protocol server), `client` (a Python SDK for building clients), and `models` (shared protocol messages and types).
+The package has five main subpackages: `server` (the protocol server), `client` (a Python SDK for building clients), `models` (shared protocol messages and types), `audio` (PCM formats, codecs, and source bridges), and `noise` (Noise encryption, pairing, and trust stores).
+
+Keep the library generic: no features that only one consumer needs. Policy decisions, such as auto-starting a source when it joins, belong to the application. The library exposes commands and events for them. Treat removed or renamed public symbols, changed signatures, and new abstract methods on stores as breaking changes.
 
 Server-side `SendspinClient` (`server/client.py`) lifetime is decoupled from `SendspinConnection` (WebSocket transport). Clients persist across reconnects and disconnections; roles are retained across reconnections (warm reconnect) and only recreated when the negotiated role set changes (cold reconnect).
 
@@ -54,7 +69,7 @@ Two-level architecture: **`Role`** (per-connection) and **`GroupRole`** (per-gro
 - Hooks: `on_member_join()`, `on_member_leave()`, `on_client_added()`, `on_client_removed()`
 - Emits events via `emit_group_event()`
 
-**Built-in role families** (each under `server/roles/{family}/`): `player`, `controller`, `metadata`, `artwork`, `visualizer`. Each has a `v1.py` (Role impl) and `group.py` (GroupRole impl); `player`, `controller`, `metadata`, and `artwork` also have `types.py` and `events.py`.
+**Built-in role families** (each under `server/roles/{family}/`): `player`, `controller`, `metadata`, `artwork`, `color`, `visualizer`, `source`. Each has a `v1.py` (Role impl), and all but `source` have a `group.py` (GroupRole impl). `visualizer_draft_r1/` keeps the deprecated `visualizer@_draft_r1` wire working.
 
 **Registration**: Roles auto-register via `ROLE_FACTORIES` / `GROUP_ROLE_FACTORIES` in `server/roles/registry.py`. Negotiation (`server/roles/negotiation.py`) picks the first mutually supported role per family from the client's `client/hello`.
 
@@ -72,7 +87,7 @@ User PCM → prepare_audio(pcm, format) → commit_audio()
 
 ### Models & Serialization
 
-Mashumaro `DataClassORJSONMixin` dataclasses with discriminator-based polymorphic dispatch on `"type"` field. Binary messages use a 9-byte header (1B message type + 8B timestamp_us); player audio chunks add a 4B `send_ahead` (13 bytes, `models/player.py`). Key model files:
+`models/` holds only types sent over the wire. Mashumaro `DataClassORJSONMixin` dataclasses with discriminator-based polymorphic dispatch on `"type"` field. Binary messages use a 9-byte header (1B message type + 8B timestamp_us); player audio chunks add a 4B `send_ahead` (13 bytes, `models/player.py`). Key model files:
 
 - `models/core.py`: Protocol messages (`ClientHelloPayload`, `StreamStartPayload`, `ServerTimePayload`, etc.)
 - `models/types.py`: Enums (`AudioCodec`, `BinaryMessageType`, `ClientStateType`, `PlaybackStateType`, etc.)
@@ -93,10 +108,12 @@ Event streams subscribable via `add_event_listener()`:
 
 - Python ≥3.12, fully typed (strict mypy config in `pyproject.toml`)
 - Ruff with `select = ["ALL"]`, 100 char line length
+- Rate-limit warnings on hot paths such as per-chunk audio handling, and add no per-chunk debug logs
 - Conventional commits: `type(scope): subject` (feat, fix, refactor, test, chore)
 
 ## Testing
 
 - Tests mirror module structure: `tests/server/`, `tests/models/`, `tests/integration/`
 - Common fixtures in `tests/conftest.py`: `pcm_44100_stereo_16bit`, `pcm_48000_stereo_16bit`, `mock_loop`
-- `ManualClock` from `server/clock.py` for deterministic timing tests
+- `ManualClock` from `clock.py` for deterministic timing tests
+- No tests that depend on the ffmpeg build installed in CI
