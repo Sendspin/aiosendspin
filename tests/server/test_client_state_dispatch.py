@@ -15,7 +15,10 @@ from aiosendspin.models.artwork import (
     ClientStateArtwork,
     StreamRequestFormatArtwork,
 )
+from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import (
+    ClientCommandMessage,
+    ClientCommandPayload,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
@@ -25,7 +28,7 @@ from aiosendspin.models.core import (
 )
 from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
 from aiosendspin.models.player import PlayerStatePayload, StreamRequestFormatPlayer
-from aiosendspin.models.types import ArtworkSource, ManagementResult, PlayerCommand
+from aiosendspin.models.types import ArtworkSource, ManagementResult, MediaCommand, PlayerCommand
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
@@ -278,20 +281,6 @@ async def test_pending_epoch_exempt_binary_survives_stream_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_client_state_player_object_for_inactive_role_is_flagged() -> None:
-    """A player state object with no active player role is flagged."""
-    conn, client = _conn_with_client()
-    client.active_roles = [_role("controller")]
-    conn._initial_state_received = True  # noqa: SLF001
-    client.available = None
-    await conn._handle_message(  # noqa: SLF001
-        ClientStateMessage(payload=ClientStatePayload(player=PlayerStatePayload())), timestamp_us=0
-    )
-    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
-    assert any("player" in r and "inactive role" in r for r in flagged)
-
-
-@pytest.mark.asyncio
 async def test_client_state_player_object_for_active_role_is_not_flagged() -> None:
     """A player state object with an active player role is not flagged."""
     conn, client = _conn_with_client()
@@ -329,12 +318,10 @@ async def test_strict_rejection_applies_no_side_effects() -> None:
     conn._initial_state_received = True  # noqa: SLF001
     client.flag_noncompliance.side_effect = ClientComplianceError("nope")
     client.handle_availability_change = AsyncMock()
-    client.active_roles = [_role("controller")]  # player object below is for an inactive role
+    client.active_roles = [_role("controller")]
     with pytest.raises(ClientComplianceError):
         await conn._handle_message(  # noqa: SLF001
-            ClientStateMessage(
-                payload=ClientStatePayload(available=False, player=PlayerStatePayload())
-            ),
+            ClientStateMessage(payload=ClientStatePayload(available=False, legacy_state_used=True)),
             timestamp_us=0,
         )
     client.mark_connected.assert_not_called()
@@ -424,20 +411,38 @@ _VISUALIZER_STATE = VisualizerStatePayload(types=["loudness", "spectrum"], rate_
 
 
 @pytest.mark.asyncio
-async def test_client_state_visualizer_object_for_inactive_role_is_flagged() -> None:
-    """A visualizer state object with no active visualizer role is flagged."""
+async def test_client_state_objects_for_inactive_roles_are_ignored() -> None:
+    """Role objects in client/state with no active role are not flagged."""
     conn, client = _conn_with_client()
-    client.active_roles = [_role("controller")]
+    controller = _role("controller")
+    client.active_roles = [controller]
     conn._initial_state_received = True  # noqa: SLF001
     client.available = True
+    payload = ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload(),
+        artwork=ClientStateArtwork(channels=[ArtworkChannel(source=ArtworkSource.NONE)]),
+        visualizer=_VISUALIZER_STATE,
+    )
+    await conn._handle_message(ClientStateMessage(payload=payload), timestamp_us=0)  # noqa: SLF001
+    client.flag_noncompliance.assert_not_called()
+    controller.on_client_state.assert_called_once_with(payload)
+
+
+@pytest.mark.asyncio
+async def test_client_command_controller_object_for_inactive_role_is_ignored() -> None:
+    """A controller object in client/command with no active controller role is not flagged."""
+    conn, client = _conn_with_client()
+    client.active_roles = [_role("player")]
     await conn._handle_message(  # noqa: SLF001
-        ClientStateMessage(
-            payload=ClientStatePayload(available=True, visualizer=_VISUALIZER_STATE)
+        ClientCommandMessage(
+            payload=ClientCommandPayload(
+                controller=ControllerCommandPayload(command=MediaCommand.PLAY)
+            )
         ),
         timestamp_us=0,
     )
-    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
-    assert flagged == ["client/state carried a visualizer object for an inactive role"]
+    client.flag_noncompliance.assert_not_called()
 
 
 def _visualizer_client(conn: SendspinConnection, client: MagicMock) -> VisualizerV1Role:
@@ -505,21 +510,6 @@ async def test_strict_rejects_nonpositive_visualizer_rate_max() -> None:
             ),
             timestamp_us=0,
         )
-
-
-@pytest.mark.asyncio
-async def test_client_state_artwork_object_for_inactive_role_is_flagged() -> None:
-    """An artwork state object with no active artwork role is flagged."""
-    conn, client = _conn_with_client()
-    client.active_roles = [_role("player")]
-    conn._initial_state_received = True  # noqa: SLF001
-    client.available = None
-    artwork = ClientStateArtwork(channels=[ArtworkChannel(source=ArtworkSource.NONE)])
-    await conn._handle_message(  # noqa: SLF001
-        ClientStateMessage(payload=ClientStatePayload(artwork=artwork)), timestamp_us=0
-    )
-    flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
-    assert any("artwork" in r and "inactive role" in r for r in flagged)
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
