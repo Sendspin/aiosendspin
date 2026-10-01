@@ -1245,6 +1245,9 @@ class SendspinConnection:
             self._logger.error("Malformed client/hello: %s", exc)
             await self.disconnect(retry_connection=False)
             return False
+        if isinstance(message, ClientGoodbyeMessage):
+            await self._handle_goodbye(message.payload)
+            return False
         if not isinstance(message, ClientHelloMessage):
             self._logger.error("Expected client/hello, got %s", type(message).__name__)
             await self.disconnect(retry_connection=False)
