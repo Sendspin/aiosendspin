@@ -227,9 +227,12 @@ class ServerPairInitPayload(SendspinModel):
 
     nonce_A: str | None = None  # noqa: N815 - spec wire field name
     """32 bytes from a CSPRNG, base64url-encoded (43 chars). Present in the first round only."""
+    # DEPRECATED(spec-pr-130): remove in aiosendspin <version>
+    pin_length: int | None = None
+    """Dynamic PIN length, for clients that read it here instead of from the activation."""
 
     class Config(SendspinConfig):
-        """Omit the nonce in the rounds after the first."""
+        """Omit the nonce in the rounds after the first, and an unset PIN length."""
 
         omit_none = True
 

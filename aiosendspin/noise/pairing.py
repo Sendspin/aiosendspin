@@ -400,7 +400,12 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     )
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
         nonce_a = pairing_code_mod.generate_nonce()
-        init_payload = ServerPairInitPayload(nonce_A=b64url_encode(nonce_a))
+        init_payload = ServerPairInitPayload(
+            nonce_A=b64url_encode(nonce_a),
+            # DEPRECATED(spec-pr-130): remove in aiosendspin <version>
+            # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+            pin_length=pairing_code_mod.DYNAMIC_DIGITS if legacy_pin else None,
+        )
         round_number = 1
         while True:
             await ws.send_str(ServerPairInitMessage(payload=init_payload).to_json())

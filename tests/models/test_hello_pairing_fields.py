@@ -90,25 +90,32 @@ def test_activate_pairing_omits_format_for_non_dynamic_methods() -> None:
 
 # DEPRECATED(spec-pr-130): remove in aiosendspin <version>
 @pytest.mark.parametrize(
-    ("method", "selected"),
+    ("pairing", "selected"),
     [
-        (PairMethod.PAIRING_PSK, "pairing_psk"),
-        (PairMethod.STATIC_PAIRING_CODE, None),
-        (PairMethod.DYNAMIC_PAIRING_CODE, None),
+        (ActivatePairing(method=PairMethod.PAIRING_PSK), "pairing_psk"),
+        (ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE), None),
+        (ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE), None),
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        (
+            ActivatePairing(method=PairMethod.STATIC_PAIRING_CODE, legacy_pin_wire=True),
+            "static_pin",
+        ),
+        (
+            ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, legacy_pin_wire=True),
+            "dynamic_pin",
+        ),
     ],
 )
-def test_legacy_activate_names_only_a_pairing_psk_attempt(
-    method: PairMethod, selected: str | None
+def test_legacy_activate_names_only_methods_old_clients_know(
+    pairing: ActivatePairing, selected: str | None
 ) -> None:
-    """The legacy activate adds selected_pair_method only for a Pairing PSK attempt."""
+    """The legacy activate adds selected_pair_method only for Pairing PSK and PIN attempts."""
     message = LegacyServerActivateMessage(
-        ServerActivatePayload(
-            activities=[Activity.PAIRING], active_roles=[], pairing=ActivatePairing(method=method)
-        )
+        ServerActivatePayload(activities=[Activity.PAIRING], active_roles=[], pairing=pairing)
     )
     raw = orjson.loads(message.to_json())
     assert raw["type"] == "server/activate"
-    assert raw["payload"]["pairing"]["method"] == method.value
+    assert raw["payload"]["pairing"] == orjson.loads(pairing.to_json())
     assert raw["payload"].get("selected_pair_method") == selected
 
 
