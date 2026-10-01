@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import orjson
 import pytest
@@ -52,6 +53,8 @@ from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.metadata.group import MetadataGroupRole
+from aiosendspin.server.roles.metadata.state import Metadata
 from aiosendspin.server.roles.negotiation import negotiate_roles
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
 from aiosendspin.server.server import SendspinServer
@@ -1039,10 +1042,10 @@ class TestLegacyServerHello:
         reason = fake.sent_payloads()[0]["payload"]["connection_reason"]
         assert reason == ConnectionReason.DISCOVERY.value
 
-    # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
     @pytest.mark.asyncio
-    async def test_legacy_hello_clears_role_state_with_null(self, mock_server: _MockServer) -> None:
-        """An unencrypted connection speaks the pre-#177 wire and gets null role objects."""
+    async def test_legacy_hello_speaks_pre_spec_177_wire(self, mock_server: _MockServer) -> None:
+        """An unencrypted connection speaks the pre-#177 wire."""
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
         conn._transport = _FakeTransport()  # type: ignore[assignment]  # noqa: SLF001
         hello = _player_hello("client-1")
@@ -1052,7 +1055,48 @@ class TestLegacyServerHello:
         await conn._exchange_hellos()  # noqa: SLF001
 
         assert conn.uses_pre_spec_177_wire is True
-        assert conn.clears_role_state_with_null is True
+
+    # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    async def test_legacy_hello_gets_metadata_clear_as_null_fields(
+        self, mock_server: _MockServer
+    ) -> None:
+        """An unencrypted connection gets a metadata clear with every field set to null."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        fake = _FakeTransport()
+        conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+        hello = _player_hello("client-1")
+        hello.supported_roles = [Roles.PLAYER.value, Roles.METADATA.value]
+        assert hello.player_support is not None
+        hello.player_support.supported_commands = None
+        conn._pending_first_text = ClientHelloMessage(payload=hello).to_json()  # noqa: SLF001
+        await conn._exchange_hellos()  # noqa: SLF001
+        client = conn._client  # noqa: SLF001
+        assert client is not None
+        metadata = client.group.group_role("metadata")
+        assert isinstance(metadata, MetadataGroupRole)
+
+        metadata.set_metadata(Metadata(title="Song"))
+        metadata.clear()
+        writer = asyncio.create_task(conn._writer())  # noqa: SLF001
+        await conn._writer_idle.wait()  # noqa: SLF001
+        writer.cancel()
+        with suppress(asyncio.CancelledError):
+            await writer
+
+        assert fake.sent_payloads()[-1]["payload"] == {
+            "metadata": {
+                "timestamp": ANY,
+                "title": None,
+                "artist": None,
+                "album_artist": None,
+                "album": None,
+                "artwork_url": None,
+                "year": None,
+                "track": None,
+                "progress": None,
+            }
+        }
 
 
 class _FakePairingTransport(_FakeTransport, EncryptedWebSocket):

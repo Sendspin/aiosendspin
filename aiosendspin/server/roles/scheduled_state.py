@@ -5,7 +5,6 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import TYPE_CHECKING
 
-from aiosendspin.models.core import LegacyServerStateClearMessage
 from aiosendspin.server.roles.base import GroupRole, Role
 
 if TYPE_CHECKING:
@@ -77,11 +76,11 @@ class ScheduledStateGroupRole[S](GroupRole):
         """Send the current state, then any scheduled state already sent to members."""
         now_us = self._now_us()
         current = self._current_state(now_us)
-        self._send_state(role, current, self._state_message(current, now_us))
+        role.send_message(self._state_message(current, now_us))
         scheduled_us = self._state.pending_timestamp_us
         if scheduled_us is not None and self._scheduled_sent:
             scheduled = self._state.pending
-            self._send_state(role, scheduled, self._state_message(scheduled, scheduled_us))
+            role.send_message(self._state_message(scheduled, scheduled_us))
 
     def on_group_deleted(self) -> None:
         """Stop a deferred send of the scheduled state."""
@@ -118,7 +117,7 @@ class ScheduledStateGroupRole[S](GroupRole):
         message = self._state_message(state, timestamp_us)
         self._state.apply(state)
         self._cancel_send_scheduled()
-        self._send_to_members(state, message)
+        self._send_to_members(message)
 
     def _schedule(self, state: S, timestamp_us: int) -> None:
         """Hold `state` as scheduled and send it once it is within the lead limit."""
@@ -138,7 +137,7 @@ class ScheduledStateGroupRole[S](GroupRole):
             # Clients still hold the replaced state; restating the current one discards it.
             now_us = self._now_us()
             current = self._current_state(now_us)
-            self._send_to_members(current, self._state_message(current, now_us))
+            self._send_to_members(self._state_message(current, now_us))
 
     def _send_scheduled(self) -> None:
         """Send the scheduled state to all members."""
@@ -147,7 +146,7 @@ class ScheduledStateGroupRole[S](GroupRole):
         if scheduled_us is not None:
             self._scheduled_sent = True
             scheduled = self._state.pending
-            self._send_to_members(scheduled, self._state_message(scheduled, scheduled_us))
+            self._send_to_members(self._state_message(scheduled, scheduled_us))
 
     def _cancel_send_scheduled(self) -> None:
         self._scheduled_sent = False
@@ -155,14 +154,6 @@ class ScheduledStateGroupRole[S](GroupRole):
             self._send_scheduled_handle.cancel()
             self._send_scheduled_handle = None
 
-    def _send_to_members(self, state: S | None, message: ServerStateMessage) -> None:
+    def _send_to_members(self, message: ServerStateMessage) -> None:
         for role in self._members:
-            self._send_state(role, state, message)
-
-    def _send_state(self, role: Role, state: S | None, message: ServerStateMessage) -> None:
-        """Send `message`, which carries `state`, to a role."""
-        # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
-        if state is None and role.clears_state_with_null():
-            role.send_message(LegacyServerStateClearMessage(self.role_family))
-            return
-        role.send_message(message)
+            role.send_message(message)

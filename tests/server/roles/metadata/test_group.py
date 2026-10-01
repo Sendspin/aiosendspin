@@ -22,12 +22,6 @@ def _make_group_stub() -> MagicMock:
     return group
 
 
-def _member(*, legacy: bool) -> MagicMock:
-    member = MagicMock()
-    member.clears_state_with_null.return_value = legacy
-    return member
-
-
 def test_metadata_group_role_family() -> None:
     """MetadataGroupRole has role_family of 'metadata'."""
     group = _make_group_stub()
@@ -83,7 +77,7 @@ def test_metadata_group_role_clear_metadata() -> None:
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
 
     mgr.set_metadata(Metadata(title="Test"))
@@ -106,7 +100,7 @@ def test_metadata_group_role_set_metadata_none_sends_timestamp_only() -> None:
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
 
     mgr.set_metadata(Metadata(title="Test"))
@@ -117,31 +111,6 @@ def test_metadata_group_role_set_metadata_none_sends_timestamp_only() -> None:
 
     msg = member.send_message.call_args.args[0]
     assert msg.payload.to_dict() == {"metadata": {"timestamp": 2_000_000}}
-
-
-# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
-def test_metadata_group_role_clear_sends_null_to_legacy_member() -> None:
-    """clear() sends a metadata null to a legacy-generation member."""
-    group = _make_group_stub()
-    mgr = MetadataGroupRole(group)
-
-    legacy = _member(legacy=True)
-    current = _member(legacy=False)
-    mgr._members = [legacy, current]  # noqa: SLF001
-
-    mgr.set_metadata(Metadata(title="Test"))
-    legacy.reset_mock()
-    current.reset_mock()
-
-    mgr.clear()
-
-    assert legacy.send_message.call_args.args[0].to_dict() == {
-        "type": "server/state",
-        "payload": {"metadata": None},
-    }
-    assert current.send_message.call_args.args[0].payload.to_dict() == {
-        "metadata": {"timestamp": 1_000_000}
-    }
 
 
 def test_metadata_group_role_clear_when_already_cleared_is_noop() -> None:
@@ -240,29 +209,13 @@ def test_metadata_group_role_on_member_join_no_metadata() -> None:
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    new_member = _member(legacy=False)
+    new_member = MagicMock()
     mgr.on_member_join(new_member)
 
     new_member.send_message.assert_called_once()
     msg = new_member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
     assert msg.payload.to_dict() == {"metadata": {"timestamp": 1_000_000}}
-
-
-# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
-def test_metadata_group_role_on_member_join_no_metadata_legacy() -> None:
-    """on_member_join() sends a metadata null to a legacy-generation member without metadata."""
-    group = _make_group_stub()
-    mgr = MetadataGroupRole(group)
-
-    new_member = _member(legacy=True)
-    mgr.on_member_join(new_member)
-
-    new_member.send_message.assert_called_once()
-    assert new_member.send_message.call_args.args[0].to_dict() == {
-        "type": "server/state",
-        "payload": {"metadata": None},
-    }
 
 
 def test_metadata_group_role_skips_unchanged() -> None:
@@ -372,7 +325,7 @@ def test_metadata_group_role_reset_progress_zeroes_position_and_speed() -> None:
     mgr = MetadataGroupRole(group)
     group.has_active_stream = True
 
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(
         Metadata(
@@ -415,7 +368,7 @@ def test_metadata_group_role_reset_progress_sends_within_equality_tolerance() ->
     mgr = MetadataGroupRole(group)
     group.has_active_stream = True
 
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(
         Metadata(title="Test", track_progress=300, track_duration=180_000, playback_speed=0)
@@ -440,7 +393,7 @@ def test_metadata_group_role_reset_progress_when_already_reset_sends_nothing() -
     mgr = MetadataGroupRole(group)
     group.has_active_stream = True
 
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(
         Metadata(title="Test", track_progress=0, track_duration=180_000, playback_speed=0)
@@ -467,7 +420,7 @@ def test_metadata_group_role_reset_progress_without_progress_sends_nothing(
     group = _make_group_stub()
     mgr = MetadataGroupRole(group)
 
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     if metadata is not None:
         mgr.set_metadata(metadata)
@@ -718,7 +671,7 @@ def test_future_metadata_is_sent_and_takes_effect_later() -> None:
     """Metadata with a future timestamp is sent as is and becomes current once due."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(_track("Now", 30_000))
 
@@ -751,7 +704,7 @@ def test_late_join_gets_current_then_scheduled_metadata() -> None:
     mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
     clock.advance_us(200_000)
 
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr.on_member_join(member)
 
     sent = _all_sent_metadata(member)
@@ -782,7 +735,7 @@ def test_present_metadata_cancels_scheduled_even_when_unchanged() -> None:
     """Unchanged metadata set now is still sent, since it cancels the scheduled track."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(_track("Now", 30_000))
     mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
@@ -799,7 +752,7 @@ def test_cancel_scheduled_metadata_resends_current_now() -> None:
     """cancel_scheduled() re-sends the current metadata as of now."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(_track("Now", 30_000))
     mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
@@ -829,7 +782,7 @@ def test_reset_progress_without_progress_cancels_scheduled_metadata() -> None:
     """reset_progress() with no position cancels the scheduled metadata, keeping the current one."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(Metadata(title="Now"))
     mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
@@ -846,7 +799,7 @@ def test_reset_progress_discards_scheduled_metadata() -> None:
     """The reset state itself discards scheduled metadata, which never takes effect."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(_track("Now", 30_000))
     mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
@@ -869,7 +822,7 @@ def test_clear_discards_scheduled_metadata() -> None:
     """clear() sends null at once and the scheduled metadata never takes effect."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
 
@@ -884,7 +837,7 @@ def test_metadata_beyond_lead_limit_is_sent_20s_ahead() -> None:
     """Metadata more than 20 s ahead is sent only 20 s ahead, and not to joiners before."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
 
     mgr.set_metadata(_track("Next", 0, timestamp_us=31_000_000))
@@ -892,7 +845,7 @@ def test_metadata_beyond_lead_limit_is_sent_20s_ahead() -> None:
     member.send_message.assert_not_called()
     (delay_s, send), _kwargs = group._server.loop.call_later.call_args  # noqa: SLF001
     assert delay_s == 10.0
-    joiner = _member(legacy=False)
+    joiner = MagicMock()
     mgr.on_member_join(joiner)
     assert _all_sent_metadata(joiner) == [{"timestamp": 1_000_000}]
 
@@ -908,7 +861,7 @@ def test_sent_metadata_replaced_by_deferred_one_is_cancelled() -> None:
     """Replacing sent metadata with metadata sent only later restates the current metadata now."""
     group, _clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
-    member = _member(legacy=False)
+    member = MagicMock()
     mgr._members = [member]  # noqa: SLF001
     mgr.set_metadata(_track("Now", 30_000))
     mgr.set_metadata(_track("Next", 0, timestamp_us=1_500_000))
