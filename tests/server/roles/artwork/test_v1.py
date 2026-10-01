@@ -1093,6 +1093,31 @@ def test_legacy_request_format_restarts_stream_once(
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_legacy_request_format_disabling_channel_keeps_its_format_and_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A none channel announced to a hello-wire client still carries its format and size."""
+    client = _make_legacy_client_stub(_ALBUM, _ARTIST)
+    events = _record(client, monkeypatch)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    events.clear()
+
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            artwork=StreamRequestFormatArtwork(channel=0, source=ArtworkSource.NONE)
+        )
+    )
+
+    assert events == [
+        ("drop", ["artwork"]),
+        ("binary", 0, 9),
+        ("start", [{**_ALBUM_WIRE, "source": "none"}, _ARTIST_WIRE]),
+        ("image", 1),
+    ]
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 def test_legacy_request_format_enables_declared_none_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1104,7 +1129,10 @@ def test_legacy_request_format_enables_declared_none_channel(
     events = _record(client, monkeypatch)
     role = ArtworkV1Role(client=client)
     role.on_connect()
-    assert events[0] == ("start", [_ALBUM_WIRE])
+    assert events[0] == (
+        "start",
+        [_ALBUM_WIRE, {"source": "none", "format": "png", "width": 64, "height": 64}],
+    )
     events.clear()
 
     role.on_stream_request_format(

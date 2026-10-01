@@ -323,6 +323,18 @@ class ArtworkV1Role(Role):
         # With no channel streamed, keep one entry: the stream stays active so a later
         # client/state can enable a channel, which it could not do after a stream/end.
         stream_channels = configs[: streamed[-1] + 1] if streamed else configs[:1]
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        if self._client.info.artwork_support is not None:
+            # A hello-wire client requires every declared channel, with format and size.
+            stream_channels = [
+                StreamArtworkChannelConfig(
+                    source=channel.source,
+                    format=channel.format,
+                    width=channel.width,
+                    height=channel.height,
+                )
+                for channel in self._channels
+            ]
         stream_start = StreamStartMessage(
             payload=StreamStartPayload(artwork=StreamStartArtwork(channels=stream_channels))
         )
