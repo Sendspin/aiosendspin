@@ -324,6 +324,27 @@ async def test_artwork_starts_with_the_current_image_once_available() -> None:
 
 
 @pytest.mark.asyncio
+async def test_artwork_starts_with_the_channels_of_the_state_that_makes_it_available() -> None:
+    """A client/state reporting available: true with new channels starts only those channels."""
+    conn, _fake = await _connect(_hello([Roles.ARTWORK.value]), send_state=False)
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, artwork=ClientStateArtwork(channels=[_ARTWORK_CHANNEL]))
+    )
+    channel = dataclasses.replace(_ARTWORK_CHANNEL, width=600)
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, artwork=ClientStateArtwork(channels=[channel]))
+    )
+
+    starts = [
+        entry.json_message.payload.artwork
+        for _, _, entry in conn._role_queues.get("artwork", [])  # noqa: SLF001
+        if isinstance(entry.json_message, StreamStartMessage)
+    ]
+    assert [start.channels[0].width for start in starts] == [channel.width]
+
+
+@pytest.mark.asyncio
 async def test_visualizer_stream_starts_once_the_reconnected_client_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
