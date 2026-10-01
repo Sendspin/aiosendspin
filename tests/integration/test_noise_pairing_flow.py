@@ -1549,6 +1549,46 @@ async def test_dial_pairing_failed_entry_keeps_the_connection(
         await server.close()
 
 
+async def test_revoking_approval_during_a_failed_dial_pairing_admits_no_playback() -> None:
+    """Approval revoked while a pairing dial runs is honored when the attempt fails."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    await server.trust_unpaired(client_identity.peer_id)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    asked = asyncio.Event()
+
+    async def provide() -> str:
+        await shown.get()
+        await server.untrust_unpaired(client_identity.peer_id)
+        asked.set()
+        return "12x456"
+
+    sdk = await _code_pairing_client(
+        client_identity,
+        await _unpaired_enabled_store(),
+        PairMethod.DYNAMIC_PAIRING_CODE,
+        shown,
+    )
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(
+                server,
+                url,
+                pairing_attempt=_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide),
+            ),
+        ):
+            async with asyncio.timeout(5):
+                await asked.wait()
+            await _await_left_pairing(sdk)
+            assert sdk.connected
+            assert _server_active_role_count(server, client_identity.peer_id) == 0
+            assert sdk.activities == []
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_pair_retry_in_flight_does_not_fail_the_next_attempt() -> None:
     """A retry sent before the client saw a leave does not fail an attempt started right after."""
     server_store = InMemoryServerPairingStore()

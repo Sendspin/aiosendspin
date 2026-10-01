@@ -2050,13 +2050,16 @@ class SendspinConnection:
         """Re-read the trusted-unpaired approval and re-activate roles.
 
         During pairing a grant takes effect when pairing ends, and a revocation ends pairing.
+        On connect a revocation also waits for pairing to end.
         """
         if self._noise_psk is None or self._noise_psk.category is PskCategory.LONG_TERM:
             return
-        if self._client is None or self._declared_activities is None:
+        if self._client is None:
             return
         was_trusted = self._trusted_unpaired
         await self._reload_trusted_unpaired()
+        if self._declared_activities is None:
+            return  # The first server/activate reads the reloaded approval.
         if self._in_pairing:
             # A server/activate would cancel the attempt; the one ending pairing carries the change.
             if was_trusted and not self._trusted_unpaired:
