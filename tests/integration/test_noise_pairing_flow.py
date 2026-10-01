@@ -278,6 +278,22 @@ async def test_default_server_answers_non_init_first_frame_with_server_error(
         assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
 
 
+async def test_default_server_warns_once_per_peer_about_unencrypted_client(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A redialing legacy client is reported at WARNING on its first refusal only."""
+    server = _make_server(InMemoryServerPairingStore())
+    async with _serve(server) as url, ClientSession() as session:
+        for _ in range(2):
+            async with session.ws_connect(url) as ws:
+                await ws.send_str(_legacy_hello())
+                await asyncio.wait_for(ws.receive(), timeout=5)
+    warnings = [
+        r for r in caplog.records if r.levelname == "WARNING" and "unencrypted" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
 async def test_server_closes_silently_on_binary_first_frame() -> None:
     """A non-TEXT first frame closes the connection without a server/error."""
     server = _make_server(InMemoryServerPairingStore(), allow_unencrypted=True)

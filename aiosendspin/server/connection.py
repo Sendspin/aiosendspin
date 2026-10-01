@@ -1057,6 +1057,8 @@ class SendspinConnection:
                 self._logger.warning("Accepting unencrypted legacy connection (transition mode)")
                 self._pending_first_text = first_text
                 return raw
+            peer = self._request.remote if self._request is not None else self._url
+            self._server._warn_unencrypted_refused(peer or "unknown")  # noqa: SLF001
         result = await run_handshake_server(
             raw,
             local_identity=self._server.identity,
