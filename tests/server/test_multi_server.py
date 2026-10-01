@@ -1004,7 +1004,7 @@ class TestLegacyServerHello:
     # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_legacy_hello_clears_role_state_with_null(self, mock_server: _MockServer) -> None:
-        """An unencrypted connection, which never gets server/activate, gets null role objects."""
+        """An unencrypted connection speaks the pre-#177 wire and gets null role objects."""
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
         conn._transport = _FakeTransport()  # type: ignore[assignment]  # noqa: SLF001
         hello = _player_hello("client-1")
@@ -1013,7 +1013,7 @@ class TestLegacyServerHello:
         conn._pending_first_text = ClientHelloMessage(payload=hello).to_json()  # noqa: SLF001
         await conn._exchange_hellos()  # noqa: SLF001
 
-        assert conn.uses_pre_spec_177_wire is False
+        assert conn.uses_pre_spec_177_wire is True
         assert conn.clears_role_state_with_null is True
 
 
@@ -1094,6 +1094,19 @@ class TestLegacyFragmentTolerance:
         ).decode()
 
     @staticmethod
+    def _trust_level_controller_hello_text() -> str:
+        return orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "client-1",
+                    "supported_roles": ["controller@v1"],
+                    "trust_level": "user",
+                },
+            }
+        ).decode()
+
+    @staticmethod
     async def _encrypted_connection(
         server: _MockServer,
     ) -> tuple[SendspinConnection, EncryptedWebSocket, FakeWebSocket, NoiseSession]:
@@ -1129,14 +1142,21 @@ class TestLegacyFragmentTolerance:
         ]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("pre_spec_177", [True, False])
+    @pytest.mark.parametrize(
+        ("hello", "pre_spec_177"),
+        [
+            (_hello_text(pre_spec_177=True), True),
+            (_trust_level_controller_hello_text(), True),
+            (_hello_text(pre_spec_177=False), False),
+        ],
+        ids=["player-supported-commands", "trust-level-controller", "current"],
+    )
     async def test_legacy_send_framing_follows_pre_spec_177_hello(
-        self, mock_server: _MockServer, *, pre_spec_177: bool
+        self, mock_server: _MockServer, hello: str, *, pre_spec_177: bool
     ) -> None:
         """Only a pre-#177 hello switches the transport to legacy fragment framing."""
         conn, transport, raw, client_session = await self._encrypted_connection(mock_server)
-        hello = self._hello_text(pre_spec_177=pre_spec_177).encode()
-        await self._push(raw, client_session, [bytes([MSG_TYPE_JSON_BODY]) + hello])
+        await self._push(raw, client_session, [bytes([MSG_TYPE_JSON_BODY]) + hello.encode()])
 
         assert await conn._exchange_hellos() is True  # noqa: SLF001
         assert conn.uses_pre_spec_177_wire is pre_spec_177

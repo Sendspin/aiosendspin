@@ -356,7 +356,8 @@ class SendspinConnection:
         self._moved_off_record = False
         # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
         # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
-        # Set when the client/hello tripped the spec-pr-177 player commands tolerance.
+        # Set for a client on a pre-#177 wire: unencrypted, or a client/hello carrying
+        # trust_level or player supported_commands.
         self._legacy_hello = False
         # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
         # Set when the client/hello tripped a tolerance for a wire that predates spec-pr-287.
@@ -453,7 +454,7 @@ class SendspinConnection:
     @property
     def uses_pre_spec_177_wire(self) -> bool:
         """
-        Whether the client/hello used the pre-spec-#177 shape.
+        Whether the client speaks a wire predating spec #177.
 
         Such a client receives the 9-byte player audio header without send_ahead.
         """
@@ -1387,16 +1388,24 @@ class SendspinConnection:
             self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         player_support = client_info.player_support
-        if player_support is not None and player_support.supported_commands is not None:
+        player_commands = (
+            player_support is not None and player_support.supported_commands is not None
+        )
+        if player_commands:
             self._flag_noncompliance(
                 "client/hello declared player supported_commands, superseded by client/state"
             )
-            # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
-            # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
-            self._legacy_hello = True
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
-            # A pre-#177 client also predates the type 1 fragment framing.
+        # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
+        if client_info.trust_level_used:
+            # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
+            self._expects_rehandshake_hellos = True
+        # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+        # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
+        if not self.is_encrypted or client_info.trust_level_used or player_commands:
+            self._legacy_hello = True
+            # Such a client also predates the type 1 fragment framing.
             # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
             if isinstance(self._transport, EncryptedWebSocket):
                 self._transport.legacy_fragment_framing = True
