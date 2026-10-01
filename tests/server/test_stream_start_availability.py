@@ -14,6 +14,7 @@ from aiosendspin.models.artwork import ClientStateArtwork
 from aiosendspin.models.core import ClientStatePayload, StreamStartMessage
 from aiosendspin.models.source import SourceStatePayload
 from aiosendspin.models.types import PlaybackStateType, Roles
+from aiosendspin.models.visualizer import VisualizerStatePayload
 from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
@@ -108,10 +109,10 @@ async def test_add_client_sends_no_stream_start_to_unavailable_player() -> None:
 
 
 async def _joiner_in_playing_group(
-    monkeypatch: pytest.MonkeyPatch, audio_s: int
+    monkeypatch: pytest.MonkeyPatch, audio_s: int, roles: list[str] | None = None
 ) -> tuple[SendspinConnection, PushStream]:
     """Return a connection awaiting its initial client/state, grouped with a playing owner."""
-    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    conn, _fake = await _connect(_hello(roles or [Roles.PLAYER.value]), send_state=False)
     server = conn._server  # noqa: SLF001
     monkeypatch.setattr(
         server, "request_client_playback_connection", lambda _client_id: False, raising=False
@@ -320,3 +321,41 @@ async def test_artwork_starts_with_the_current_image_once_available() -> None:
 
     assert isinstance(queued[0].json_message, StreamStartMessage)
     assert queued[1].binary is not None
+
+
+@pytest.mark.asyncio
+async def test_visualizer_stream_starts_once_the_reconnected_client_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A visualizer in a playing group gets stream/start only once the client is available."""
+    conn, stream = await _joiner_in_playing_group(
+        monkeypatch, audio_s=2, roles=[Roles.PLAYER.value, Roles.VISUALIZER.value]
+    )
+    monkeypatch.setattr(
+        conn._server,  # noqa: SLF001
+        "visualizer_pitch_enabled",
+        False,
+        raising=False,
+    )
+    visualizer = VisualizerStatePayload(types=["loudness"], rate_max=30)
+
+    def _visualizer_starts() -> list[Any]:
+        return [
+            entry
+            for _, _, entry in conn._role_queues.get("visualizer", [])  # noqa: SLF001
+            if isinstance(entry.json_message, StreamStartMessage)
+        ]
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, player=_PLAYER_STATE, visualizer=visualizer)
+    )
+    await _commit(stream)
+    assert _visualizer_starts() == []
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE, visualizer=visualizer)
+    )
+    await _commit(stream)
+
+    assert len(_visualizer_starts()) == 1
+    stream.stop()

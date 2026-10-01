@@ -136,8 +136,8 @@ class VisualizerDraftR1Role(Role):
         self.reset_binary_timing()
 
     def on_stream_start(self) -> None:
-        """Start extractor state for a new audio stream."""
-        if self._stream_config is None:
+        """Start extractor state for a new audio stream, once the client is available."""
+        if self._stream_config is None or not self._client.available:
             return
         self.reset_binary_timing()
         # stream/end clears client-side visualizer config, so resend stream/start
@@ -152,6 +152,15 @@ class VisualizerDraftR1Role(Role):
         )
         self._stream_started = True
         self._ensure_buffer_tracker()
+
+    def on_availability_changed(
+        self,
+        old_available: bool,  # noqa: ARG002, FBT001
+        new_available: bool,  # noqa: FBT001
+    ) -> None:
+        """Join the group's running stream once the client becomes available."""
+        if new_available and not self._stream_started:
+            self._client.join_active_stream(self)
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
         """Process audio chunk and emit visualizer binary frame."""
