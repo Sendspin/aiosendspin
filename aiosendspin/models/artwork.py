@@ -179,11 +179,11 @@ class StreamArtworkChannelConfig(SendspinModel):
     source: ArtworkSource
     """Artwork source type."""
     format: PictureFormat | None = None
-    """Format of the encoded image. Omitted when `source` is `none`."""
+    """Format of the encoded image. Optional when `source` is `none`."""
     width: int | None = None
-    """Width in pixels of the encoded image. Omitted when `source` is `none`."""
+    """Width in pixels of the encoded image. Optional when `source` is `none`."""
     height: int | None = None
-    """Height in pixels of the encoded image. Omitted when `source` is `none`."""
+    """Height in pixels of the encoded image. Optional when `source` is `none`."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
