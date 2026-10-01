@@ -305,15 +305,14 @@ def test_format_request_keeps_buffer_count(mock_server: MagicMock) -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-def test_noop_format_request_runs_no_boundary(mock_server: MagicMock) -> None:
-    """A request for the format already in use must not run the transition.
-
-    The stream/start identity guard would suppress the announcement, so the
-    boundary would evict queued audio the client still holds with nothing
-    replacing it.
-    """
-    client, conn = _make_player_client(mock_server, "p1")
+def test_noop_format_request_runs_no_boundary(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request for the format already in use must not run the transition."""
+    client, _conn = _make_player_client(mock_server, "p1")
     client.group.start_stream()
+    format_changes = MagicMock(wraps=client.group.on_role_format_changed)
+    monkeypatch.setattr(client.group, "on_role_format_changed", format_changes)
 
     player_role = client.role("player@v1")
     assert isinstance(player_role, PlayerV1Role)
@@ -337,7 +336,7 @@ def test_noop_format_request_runs_no_boundary(mock_server: MagicMock) -> None:
     )
 
     assert tracker.buffered_duration_us > 0
-    assert conn.dropped_pending_binary == []
+    format_changes.assert_not_called()
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
@@ -363,10 +362,14 @@ def test_format_request_survives_client_state_without_format(
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-def test_format_request_does_not_beat_operator_override(mock_server: MagicMock) -> None:
+def test_format_request_does_not_beat_operator_override(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The operator override still wins over a pre-#195 request."""
-    client, conn = _make_player_client(mock_server, "p1")
+    client, _conn = _make_player_client(mock_server, "p1")
     client.group.start_stream()
+    format_changes = MagicMock(wraps=client.group.on_role_format_changed)
+    monkeypatch.setattr(client.group, "on_role_format_changed", format_changes)
     player_role = client.role("player@v1")
     assert isinstance(player_role, PlayerV1Role)
     assert player_role.set_preferred_format(
@@ -378,14 +381,18 @@ def test_format_request_does_not_beat_operator_override(mock_server: MagicMock) 
     )
 
     assert player_role.preferred_codec == AudioCodec.PCM
-    assert conn.dropped_pending_binary == []
+    format_changes.assert_not_called()
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-def test_unsupported_format_request_is_ignored(mock_server: MagicMock) -> None:
+def test_unsupported_format_request_is_ignored(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A request matching no encodable format leaves the current preference in place."""
-    client, conn = _make_player_client(mock_server, "p1")
+    client, _conn = _make_player_client(mock_server, "p1")
     client.group.start_stream()
+    format_changes = MagicMock(wraps=client.group.on_role_format_changed)
+    monkeypatch.setattr(client.group, "on_role_format_changed", format_changes)
     player_role = client.role("player@v1")
     assert isinstance(player_role, PlayerV1Role)
 
@@ -394,7 +401,7 @@ def test_unsupported_format_request_is_ignored(mock_server: MagicMock) -> None:
     )
 
     assert player_role.preferred_format == AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
-    assert conn.dropped_pending_binary == []
+    format_changes.assert_not_called()
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>

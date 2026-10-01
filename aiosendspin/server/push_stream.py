@@ -718,6 +718,27 @@ class CachedPCMChunk:
     sample_type: Literal["int", "float"] = "int"
 
 
+def _trim_pcm_chunk_start(chunk: CachedPCMChunk, start_us: int) -> CachedPCMChunk:
+    """Drop the frames of `chunk` that start before `start_us`."""
+    frame_stride = chunk.bit_depth // 8 * chunk.channels
+    total_frames = len(chunk.pcm_data) // frame_stride
+    skip_frames = min(
+        total_frames, -(-(start_us - chunk.timestamp_us) * chunk.sample_rate // 1_000_000)
+    )
+    if skip_frames <= 0:
+        return chunk
+    timestamp_us = chunk.timestamp_us + -(-skip_frames * 1_000_000 // chunk.sample_rate)
+    return CachedPCMChunk(
+        timestamp_us=timestamp_us,
+        duration_us=max(0, chunk.timestamp_us + chunk.duration_us - timestamp_us),
+        pcm_data=chunk.pcm_data[skip_frames * frame_stride :],
+        sample_rate=chunk.sample_rate,
+        bit_depth=chunk.bit_depth,
+        channels=chunk.channels,
+        sample_type=chunk.sample_type,
+    )
+
+
 class StreamStoppedError(Exception):
     """Raised when trying to commit audio on a stopped stream."""
 
@@ -800,6 +821,8 @@ class PushStream:
         self._commit_dsp_lock = asyncio.Lock()
         # Roles awaiting delayed join; excluded from live delivery until join executes.
         self._pending_join_roles: weakref.WeakSet[Role] = weakref.WeakSet()
+        # Where a role's timeline continues after a format change, until live audio passes it.
+        self._resume_at_us: weakref.WeakKeyDictionary[Role, int] = weakref.WeakKeyDictionary()
         # >0 while commit_audio() is between the _channel_timing advance and _role_chunk_cache
         # update, joiners should be delayed during that
         self._commit_in_flight: int = 0
@@ -1800,7 +1823,13 @@ class PushStream:
                 self._ensure_role_started(role)
                 if role not in self._started_roles:
                     continue
+                not_before_us = self._resume_at_us.get(role)
                 for audio_chunk in audio_chunks:
+                    if not_before_us is not None:
+                        if audio_chunk.timestamp_us < not_before_us:
+                            continue
+                        del self._resume_at_us[role]
+                        not_before_us = None
                     role.on_audio_chunk(audio_chunk)
 
         return cache_results
@@ -1890,10 +1919,14 @@ class PushStream:
         role: Role,
         cached_chunks: list[CachedChunk],
         now_us: int,
+        *,
+        not_before_us: int | None = None,
     ) -> None:
         """Send cached chunks to a role, skipping chunks whose start is not in the future."""
         skipped_late = 0
         for cached_chunk in cached_chunks:
+            if not_before_us is not None and cached_chunk.timestamp_us < not_before_us:
+                continue
             if cached_chunk.timestamp_us <= now_us:
                 skipped_late += 1
                 continue
@@ -1920,6 +1953,7 @@ class PushStream:
         """Remove role-specific state so re-joins get fresh stream/start."""
         self._started_roles.discard(role)
         self._pending_join_roles.discard(role)
+        self._resume_at_us.pop(role, None)
         req = role.get_audio_requirements()
         if req is not None:
             channel_id = req.channel_id or MAIN_CHANNEL
@@ -1959,13 +1993,13 @@ class PushStream:
         for stale_tkey in stale_transform_keys:
             self._transform_last_input_end_us.pop(stale_tkey, None)
 
-    def on_role_format_changed(self, role: Role) -> None:
-        """Re-anchor a role whose audio format changed mid-stream.
+    def on_role_format_changed(self, role: Role, *, resume_at_us: int | None = None) -> None:
+        """Rejoin a role whose audio format changed mid-stream.
 
-        The role stays active (unlike on_role_leave()) but is treated as a
-        late joiner: stale transform-key work is discarded and the join path
-        re-anchors it near the playhead in the new format. In-flight commits
-        need no abort: the synchronous join deferral moves the role into
+        The role stays active (unlike on_role_leave()) but rejoins through the
+        late-join path: stale transform-key work is discarded and the new format
+        starts at `resume_at_us`, or near the playhead when it is None. In-flight
+        commits need no abort: the synchronous join deferral moves the role into
         _pending_join_roles, which excludes it from live delivery.
         """
         # Invalidate transform key cache entries for this role
@@ -1997,11 +2031,10 @@ class PushStream:
                 if task is not None:
                     task.cancel()
 
-        # The changing role's client discards its un-played buffer at the new
-        # stream/start, so re-anchor it near the playhead via the late-join
-        # path: the buffered content is re-encoded in the new format and
-        # handed off to live at the tail, leaving the shared channel timeline
-        # untouched for unchanged roles.
+        if resume_at_us is None:
+            self._resume_at_us.pop(role, None)
+        else:
+            self._resume_at_us[role] = resume_at_us
         self.on_role_join(role)
 
     def has_cached_chunks(self) -> bool:
@@ -2029,6 +2062,7 @@ class PushStream:
     def _do_role_join(self, role: Role) -> None:
         """Execute role join with cached chunk replay."""
         self._pending_join_roles.discard(role)
+        resume_at_us = self._resume_at_us.get(role)
         # A rejoining role (e.g. warm reconnect) must receive on_stream_start()
         # again so the new transport gets stream/start before any audio chunks.
         self._started_roles.discard(role)
@@ -2055,10 +2089,14 @@ class PushStream:
             ):
                 channel_pcm_cache = self._pcm_chunk_cache.get(channel_id.int)
                 if channel_pcm_cache:
-                    late_join_target_us = self.get_late_join_target_timestamp_us(
-                        role=role,
-                        channel_id=channel_id,
-                        align_to_channel_tail=(channel_id != MAIN_CHANNEL),
+                    late_join_target_us = (
+                        resume_at_us
+                        if resume_at_us is not None
+                        else self.get_late_join_target_timestamp_us(
+                            role=role,
+                            channel_id=channel_id,
+                            align_to_channel_tail=(channel_id != MAIN_CHANNEL),
+                        )
                     )
                     latest_cached_end_us = (
                         channel_pcm_cache[-1].timestamp_us + channel_pcm_cache[-1].duration_us
@@ -2098,10 +2136,14 @@ class PushStream:
             return
 
         now_us = self._clock.now_us()
-        min_timestamp_us = self.get_late_join_target_timestamp_us(
-            role=role,
-            channel_id=channel_id,
-            align_to_channel_tail=False,
+        min_timestamp_us = (
+            resume_at_us
+            if resume_at_us is not None
+            else self.get_late_join_target_timestamp_us(
+                role=role,
+                channel_id=channel_id,
+                align_to_channel_tail=False,
+            )
         )
 
         # Late joiners get chunks that start at or after the target only; a chunk
@@ -2461,7 +2503,7 @@ class PushStream:
             for data, ts, dur in encoded_frames
         ]
 
-    async def _start_catchup_encoding(  # noqa: PLR0915
+    async def _start_catchup_encoding(  # noqa: PLR0912, PLR0915
         self,
         role: Role,
         req: AudioRequirements,
@@ -2487,19 +2529,25 @@ class PushStream:
             self._transform_last_input_end_us.pop(cache_key, None)
             pcm_chunks = list(self._pcm_chunk_cache.get(channel_int, []))
             align_to_channel_tail = channel_id != MAIN_CHANNEL
-            target_ts = self.get_late_join_target_timestamp_us(
-                role=role,
-                channel_id=channel_id,
-                align_to_channel_tail=align_to_channel_tail,
-            )
-            encode_start_ts = target_ts
-            if encoder is not None and align_to_channel_tail:
-                encode_start_ts = max(0, target_ts - ENCODER_CATCHUP_WARMUP_US)
+            resume_at_us = self._resume_at_us.get(role)
+            if resume_at_us is not None:
+                target_ts = encode_start_ts = resume_at_us
+            else:
+                target_ts = self.get_late_join_target_timestamp_us(
+                    role=role,
+                    channel_id=channel_id,
+                    align_to_channel_tail=align_to_channel_tail,
+                )
+                encode_start_ts = target_ts
+                if encoder is not None and align_to_channel_tail:
+                    encode_start_ts = max(0, target_ts - ENCODER_CATCHUP_WARMUP_US)
             eligible = [
                 chunk
                 for chunk in pcm_chunks
                 if chunk.timestamp_us + chunk.duration_us > encode_start_ts
             ]
+            if resume_at_us is not None and eligible:
+                eligible[0] = _trim_pcm_chunk_start(eligible[0], resume_at_us)
 
             if not eligible:
                 if self._channel_timing:
@@ -2610,7 +2658,9 @@ class PushStream:
             encoded_cache: deque[CachedChunk] = self._role_chunk_cache.get(cache_key, deque())
             chunks_to_send = list(encoded_cache)
             for r in self._catchup_roles.get(cache_key, {role}):
-                self._send_cached_chunks_to_role(r, chunks_to_send, now_us)
+                self._send_cached_chunks_to_role(
+                    r, chunks_to_send, now_us, not_before_us=self._resume_at_us.get(r)
+                )
 
             self._catchup_state[cache_key] = "live"
         finally:
@@ -2674,6 +2724,7 @@ class PushStream:
         # Clear role tracking state
         self._started_roles.clear()
         self._pending_join_roles.clear()
+        self._resume_at_us.clear()
         self._cancel_catchup_tasks()
         self._pcm_chunk_cache.clear()
         self._historical_buffers.clear()
@@ -2707,6 +2758,7 @@ class PushStream:
         # Clear chunk cache
         self._role_chunk_cache.clear()
         self._pending_join_roles.clear()
+        self._resume_at_us.clear()
         self._pcm_chunk_cache.clear()
         self._cancel_catchup_tasks()
 

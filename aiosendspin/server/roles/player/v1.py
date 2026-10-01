@@ -134,6 +134,8 @@ class PlayerV1Role(Role):
         self._pending_stream_start = False
         # Last format announced to the client via stream/start.
         self._last_sent_format: tuple[AudioCodec, int, int, int, str | None] | None = None
+        # End timestamp of the last audio chunk sent in the current stream.
+        self._sent_end_us: int | None = None
 
     @property
     def role_id(self) -> str:
@@ -218,6 +220,7 @@ class PlayerV1Role(Role):
         self._subscribe_to_group_role()
         self._stream_started = False
         self._last_sent_format = None
+        self._sent_end_us = None
         self._client_format = None
         self._client_format_legacy = False
         if state.buffer_reset_handle is not None:
@@ -282,6 +285,7 @@ class PlayerV1Role(Role):
         self._stream_started = False
         self._pending_stream_start = False
         self._last_sent_format = None
+        self._sent_end_us = None
         self.reset_binary_timing()
         self._ensure_audio_requirements(force=True)
 
@@ -381,6 +385,7 @@ class PlayerV1Role(Role):
             duration_us=chunk.duration_us,
             player_audio_header=True,
         )
+        self._sent_end_us = chunk.timestamp_us + chunk.duration_us
 
     def on_stream_clear(self) -> None:
         """Send stream/clear and reset buffer-tracking state."""
@@ -390,6 +395,7 @@ class PlayerV1Role(Role):
         stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
         self.send_message(stream_clear)
         self._pending_stream_start = False
+        self._sent_end_us = None
         self.reset_binary_timing()
 
         if self._buffer_tracker is not None:
@@ -405,6 +411,7 @@ class PlayerV1Role(Role):
         self._stream_started = False
         self._pending_stream_start = False
         self._last_sent_format = None
+        self._sent_end_us = None
         self.reset_binary_timing()
 
         if self._buffer_tracker is not None:
@@ -828,21 +835,9 @@ class PlayerV1Role(Role):
         )
 
     def _begin_format_transition(self) -> None:
-        """Start a mid-stream format change at a clean boundary.
-
-        Frames queued under the old format must never reach the client after
-        the new stream/start; the announcement itself waits for the next
-        chunk so it can carry the new codec header.
-        """
-        self._client.drop_pending_binary([self.role_family])
-        # The binary timing belongs to the old format. An in-place stream/start does not
-        # reset the buffer accounting, so the tracker keeps counting chunks already sent.
-        self.reset_binary_timing()
+        """Switch the active stream to the new format, announced with the next chunk."""
         self._pending_stream_start = True
-        # The client flushes its invalidated buffer only on a stream/start, so a
-        # flip-flop back to the announced format must not suppress one.
-        self._last_sent_format = None
-        self._client.group.on_role_format_changed(self)
+        self._client.group.on_role_format_changed(self, resume_at_us=self._sent_end_us)
 
     # ---- Internal helpers ----
 
@@ -899,8 +894,7 @@ class PlayerV1Role(Role):
 
     def _apply_preferred_format(self) -> None:
         """Re-derive the stream format; restart an active stream only when it changed."""
-        # Running the boundary for an unchanged format would evict valid audio while the
-        # announcement's identity guard suppresses the stream/start that justifies it.
+        # An unchanged format keeps its running encoder instead of rejoining the stream.
         before = self._effective_format()
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)

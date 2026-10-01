@@ -166,10 +166,10 @@ class SendspinGroup:
             self._push_stream.stop()
             self._push_stream = None
 
-    def on_role_format_changed(self, role: Role) -> None:
+    def on_role_format_changed(self, role: Role, *, resume_at_us: int | None = None) -> None:
         """Notify PushStream that a role's audio format changed mid-stream."""
         if self._push_stream is not None and not self._push_stream.is_stopped:
-            self._push_stream.on_role_format_changed(role)
+            self._push_stream.on_role_format_changed(role, resume_at_us=resume_at_us)
 
     def on_role_activated(self, role: Role) -> None:
         """Join a role activated mid-connection to the active stream, if any."""
