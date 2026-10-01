@@ -23,7 +23,7 @@ Review all code changes for:
 - Documentation updates if needed
 
 ## Specification
-This library implements the [Sendspin spec](https://github.com/Sendspin/spec). When a PR changes protocol behavior (messages, fields, handshake, pairing, timing, or role behavior), read the matching spec file before reviewing: `connection.md`, `pairing.md`, `messaging.md`, or `roles/<family>/v1.md`. If the PR links a spec PR, review against that spec PR instead.
+This library implements the [Sendspin spec](https://github.com/Sendspin/spec). When a PR changes protocol behavior (messages, fields, handshake, pairing, timing, or role behavior), read the matching spec file before reviewing: `connection.md`, `pairing.md`, `messaging.md`, or `roles/<family>/v1.md`. If the PR links an open spec PR, review against that spec PR instead, since it is not in the spec yet. A merged spec PR is already part of the current spec files.
 - A message the library sends, or a field it requires, that differs from the spec is a `[CRITICAL]`.
 - In `server/`, dropping support for a field the spec renamed or removed, instead of accepting it through `flag_noncompliance`, is a `[PROBLEM]`. The client library supports only the current spec, so dropping old forms there is not an issue.
 - Optional spec features the client library does not use yet are not issues.
