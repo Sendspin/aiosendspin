@@ -1759,6 +1759,11 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
             if not self._legacy_hello:
                 self._resume_writer()
+                if self._declared_activities is None:
+                    # The first server/activate is due a group/update even while pairing.
+                    assert self._client is not None
+                    group = self._client.group
+                    self.send_message(group._group_update_message())  # noqa: SLF001
             record = await self._run_pairing_protocol(method, transport, pairing_format)
         except asyncio.CancelledError:
             # A cancelled attempt ends like any local abort: the task never reports

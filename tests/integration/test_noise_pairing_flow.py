@@ -1549,6 +1549,42 @@ async def test_dial_pairing_failed_entry_keeps_the_connection(
         await server.close()
 
 
+async def test_dial_pairing_sends_group_update_during_the_attempt() -> None:
+    """A pairing dial sends group/update after its pairing activation, not after pairing."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    group_update = asyncio.Event()
+    seen_during_attempt: list[bool] = []
+
+    async def provide() -> str:
+        code = await shown.get()
+        with suppress(TimeoutError):
+            async with asyncio.timeout(2):
+                await group_update.wait()
+        seen_during_attempt.append(group_update.is_set())
+        return code
+
+    sdk = await _code_pairing_client(
+        client_identity, InMemoryClientPairingStore(), PairMethod.DYNAMIC_PAIRING_CODE, shown
+    )
+    sdk.add_group_update_listener(lambda _payload: group_update.set())
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(
+                server,
+                url,
+                pairing_attempt=_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide),
+            ),
+        ):
+            await _await_paired_session(sdk)
+            assert seen_during_attempt == [True]
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_dial_pairing_is_not_retried_while_only_pairing() -> None:
     """A drop without client/goodbye while the connection declares only pairing ends it."""
     server = _make_server(InMemoryServerPairingStore())
