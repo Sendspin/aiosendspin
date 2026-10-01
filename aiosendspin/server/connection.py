@@ -57,6 +57,7 @@ from aiosendspin.models.core import (
     ClientStateMessage,
     ClientStatePayload,
     ClientTimeMessage,
+    LegacyServerActivateMessage,
     LegacyServerHelloMessage,
     LegacyServerHelloPayload,
     LegacyServerStateMessage,
@@ -1732,17 +1733,20 @@ class SendspinConnection:
             # live pairing config (management can change it mid-connection). The client
             # arbitrates, aborting an unsupported method with ``method_not_supported``.
             await self._pause_writer()
-            await transport.send_str(
-                ServerActivateMessage(
-                    payload=self._pairing_activation(
-                        ActivatePairing(
-                            method=method,
-                            format=pairing_format.value if pairing_format is not None else None,
-                            languages=languages,
-                        )
-                    )
-                ).to_json()
+            activation_payload = self._pairing_activation(
+                ActivatePairing(
+                    method=method,
+                    format=pairing_format.value if pairing_format is not None else None,
+                    languages=languages,
+                )
             )
+            # DEPRECATED(spec-pr-130): remove in aiosendspin <version>
+            activation = (
+                LegacyServerActivateMessage(activation_payload)
+                if self._legacy_hello
+                else ServerActivateMessage(activation_payload)
+            )
+            await transport.send_str(activation.to_json())
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
             if not self._legacy_hello:
                 self._resume_writer()

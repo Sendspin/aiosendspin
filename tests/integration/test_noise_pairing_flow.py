@@ -3464,6 +3464,59 @@ async def test_live_pairing_quiesces_a_legacy_generation_client() -> None:
             await client.disconnect()
 
 
+# DEPRECATED(spec-pr-130): remove in aiosendspin <version>
+async def test_pairing_psk_activation_names_the_method_for_a_legacy_generation_client() -> None:
+    """A client on the previous wire generation also gets selected_pair_method."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    psk_id = psk_id_for(pairing)
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id, psk=pairing))
+    await server_store.stage_pairing_psk(
+        identity.peer_id, StagedPairingPsk(psk_id=psk_id, psk=pairing)
+    )
+    build_client_hello = SdkConnection._build_client_hello  # noqa: SLF001
+    send_str = EncryptedWebSocket.send_str
+    sent: list[dict[str, Any]] = []
+
+    async def pre_spec_177_hello(self: SdkConnection) -> ClientHelloMessage:
+        hello = await build_client_hello(self)
+        assert hello.payload.player_support is not None
+        hello.payload.player_support.supported_commands = [PlayerCommand.VOLUME]
+        return hello
+
+    async def recording_send_str(self: EncryptedWebSocket, data: str) -> None:
+        sent.append(json.loads(data))
+        await send_str(self, data)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.PLAYER],
+            player_support=_player_support(),
+        )
+        try:
+            with (
+                patch.object(SdkConnection, "_build_client_hello", pre_spec_177_hello),
+                patch.object(EncryptedWebSocket, "send_str", recording_send_str),
+                _pre_spec_287_rehandshake(),
+            ):
+                await client.connect(url)
+                await _await_paired_session(client)
+        finally:
+            await client.disconnect()
+    activations = [
+        message["payload"]
+        for message in sent
+        if message.get("type") == "server/activate" and "pairing" in message["payload"]
+    ]
+    assert [a["selected_pair_method"] for a in activations] == ["pairing_psk"]
+
+
 async def test_pairing_on_a_long_term_session_quiesces_first() -> None:
     """A long-term session re-keyed onto the pairing PSK leaves playback before pairing.
 

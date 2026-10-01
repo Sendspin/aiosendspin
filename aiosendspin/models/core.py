@@ -711,6 +711,25 @@ class ServerActivateMessage(ServerMessage):
     type: Literal["server/activate"] = "server/activate"
 
 
+# DEPRECATED(spec-pr-130): remove in aiosendspin <version>
+@dataclass
+class LegacyServerActivateMessage(ServerMessage):
+    """
+    Legacy server/activate that also names a Pairing PSK attempt in selected_pair_method.
+
+    Only for clients that read the method from there. Never parsed.
+    """
+
+    payload: ServerActivatePayload
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Copy a pairing_psk method to the payload's selected_pair_method."""
+        pairing = self.payload.pairing
+        if pairing is not None and pairing.method is PairMethod.PAIRING_PSK:
+            d["payload"]["selected_pair_method"] = pairing.method.value
+        return {"type": "server/activate", "payload": d["payload"]}
+
+
 # Server -> Client: server/time
 @dataclass
 class ServerTimePayload(SendspinModel):
