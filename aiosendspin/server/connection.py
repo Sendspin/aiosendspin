@@ -50,6 +50,7 @@ from aiosendspin.models.core import (
     ActivatePairing,
     ClientCommandMessage,
     ClientGoodbyeMessage,
+    ClientGoodbyePayload,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientLeaveMessage,
@@ -2466,20 +2467,23 @@ class SendspinConnection:
             return
 
         if isinstance(message, ClientGoodbyeMessage):
-            if message.payload.unrecognized_reason is not None:
-                self._logger.info(
-                    "Received client/goodbye with unrecognized reason %r; not reconnecting",
-                    message.payload.unrecognized_reason,
-                )
-            else:
-                self._logger.debug(
-                    "Received client/goodbye with reason: %s",
-                    message.payload.reason,
-                )
-            self._last_goodbye_reason = message.payload.reason
-            retry = message.payload.reason == GoodbyeReason.RESTART
-            await self.disconnect(retry_connection=retry)
+            await self._handle_goodbye(message.payload)
             return
+
+    async def _handle_goodbye(self, payload: ClientGoodbyePayload) -> None:
+        if payload.unrecognized_reason is not None:
+            self._logger.info(
+                "Received client/goodbye with unrecognized reason %r; not reconnecting",
+                payload.unrecognized_reason,
+            )
+        else:
+            self._logger.debug(
+                "Received client/goodbye with reason: %s",
+                payload.reason,
+            )
+        self._last_goodbye_reason = payload.reason
+        retry = payload.reason == GoodbyeReason.RESTART
+        await self.disconnect(retry_connection=retry)
 
     async def _handle_client_state(self, payload: ClientStatePayload) -> None:
         """Apply a client/state update: compliance checks, initial-state gate, dispatch."""
