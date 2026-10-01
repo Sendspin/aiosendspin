@@ -325,7 +325,7 @@ class ArtworkV1Role(Role):
         stream_channels = configs[: streamed[-1] + 1] if streamed else configs[:1]
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
         if self._client.info.artwork_support is not None:
-            # A hello-wire client requires format and size on none channels too.
+            # A hello-wire client requires every declared channel, with format and size.
             stream_channels = [
                 StreamArtworkChannelConfig(
                     source=channel.source,
@@ -333,7 +333,7 @@ class ArtworkV1Role(Role):
                     width=channel.width,
                     height=channel.height,
                 )
-                for channel in self._channels[: len(stream_channels)]
+                for channel in self._channels
             ]
         stream_start = StreamStartMessage(
             payload=StreamStartPayload(artwork=StreamStartArtwork(channels=stream_channels))

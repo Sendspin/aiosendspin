@@ -1129,7 +1129,10 @@ def test_legacy_request_format_enables_declared_none_channel(
     events = _record(client, monkeypatch)
     role = ArtworkV1Role(client=client)
     role.on_connect()
-    assert events[0] == ("start", [_ALBUM_WIRE])
+    assert events[0] == (
+        "start",
+        [_ALBUM_WIRE, {"source": "none", "format": "png", "width": 64, "height": 64}],
+    )
     events.clear()
 
     role.on_stream_request_format(
