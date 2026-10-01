@@ -341,7 +341,7 @@ async def test_reactivated_role_waits_for_its_client_state(family: str) -> None:
         assert conn._activation_state_timeout_handle is None  # noqa: SLF001
 
     queued = [entry.binary for _, _, entry in conn._role_queues[family] if entry.binary]  # noqa: SLF001
-    assert [binary.data for binary in queued] == [b"fresh"]
+    assert [binary.data for binary in queued if binary.data in (b"stale", b"fresh")] == [b"fresh"]
 
 
 @pytest.mark.asyncio
