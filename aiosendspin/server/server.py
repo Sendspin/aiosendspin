@@ -529,6 +529,9 @@ class SendspinServer:
 
         ``pairing_attempt`` carries an operator-initiated pairing intent for this dial;
         when a dial task already exists it is queued for that task's next dial.
+
+        A ``PLAYBACK`` reason applies to the next connection only. Later reconnects use
+        ``DISCOVERY``.
         """
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
@@ -565,6 +568,7 @@ class SendspinServer:
         With ``retry_initial_connection=True`` this waits until the client is reachable or
         the call is cancelled, so callers wanting a deadline must apply their own timeout.
         ``retry_indefinitely`` is deprecated and ignored: reconnection never gives up.
+        A ``PLAYBACK`` reason applies to the next connection only, as in ``connect_to_client``.
 
         Raises:
             ClientConnectionError: If the initial connection to the client fails.
@@ -702,6 +706,11 @@ class SendspinServer:
     def get_connection_reason(self, url: str) -> ConnectionReason:
         """Get the connection reason for a URL (for use by SendspinConnection)."""
         return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
+
+    def _consume_playback_reason(self, url: str) -> None:
+        """Downgrade a playback connection reason to discovery once a connection used it."""
+        if self._connection_reasons.get(url) is ConnectionReason.PLAYBACK:
+            self._connection_reasons[url] = ConnectionReason.DISCOVERY
 
     def register_client_url(self, client_id: str, url: str) -> None:
         """Record the URL used to connect to a client.

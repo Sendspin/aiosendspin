@@ -187,6 +187,19 @@ async def test_late_join_gets_current_then_scheduled_artwork() -> None:
 
 
 @pytest.mark.asyncio
+async def test_join_without_artwork_clears_the_channel() -> None:
+    """A member joining a group with no artwork gets a clear, not the image it still shows."""
+    group, _ = _make_scheduling_group()
+    agr = ArtworkGroupRole(group)
+
+    member = _Member()
+    agr.subscribe(member)  # type: ignore[arg-type]
+    await _settle()
+
+    assert member.sent == [(None, 1_000_000)]
+
+
+@pytest.mark.asyncio
 async def test_late_join_after_scheduled_artwork_took_effect() -> None:
     """Once due, scheduled artwork is the joining member's current image."""
     group, clock = _make_scheduling_group()
@@ -315,10 +328,10 @@ async def test_replacing_scheduled_artwork_restates_current_for_single_message_c
     await agr.set_album_artwork(_image(3), timestamp_us=far_us)
     await _settle()
 
-    assert legacy_sent == [(1, 1_000_000), (2, 2_000_000), (1, 1_000_000)]
-    assert member.sent == [(1, 1_000_000), (2, 2_000_000), (3, far_us)]
+    assert legacy_sent == [(None, 1_000_000), (1, 1_000_000), (2, 2_000_000), (1, 1_000_000)]
+    assert member.sent == [(None, 1_000_000), (1, 1_000_000), (2, 2_000_000), (3, far_us)]
     clock.now_us_value = far_us - MAX_ANNOUNCE_LEAD_US
     legacy._queue_changed.set()  # noqa: SLF001
     await _settle()
-    assert legacy_sent[3:] == [(3, far_us)]
+    assert legacy_sent[4:] == [(3, far_us)]
     legacy.on_disconnect()

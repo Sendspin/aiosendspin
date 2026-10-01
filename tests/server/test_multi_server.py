@@ -54,6 +54,7 @@ from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.negotiation import negotiate_roles
 from aiosendspin.server.roles.registry import ROLE_FACTORIES
+from aiosendspin.server.server import SendspinServer
 from tests.noise.conftest import FakeWebSocket, make_paired_sessions
 
 if TYPE_CHECKING:
@@ -87,6 +88,8 @@ class _MockServer:
 
     def get_connection_reason(self, url: str) -> ConnectionReason:
         return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
+
+    _consume_playback_reason = SendspinServer._consume_playback_reason  # noqa: SLF001
 
     def register_client_url(self, client_id: str, url: str) -> None:
         self._client_urls[client_id] = url
@@ -843,6 +846,21 @@ class TestEncryptedActivities:
         assert Roles.PLAYER.value in activate["active_roles"]
 
     @pytest.mark.asyncio
+    async def test_reconnect_after_playback_dial_declares_no_playback(
+        self, mock_server: _MockServer
+    ) -> None:
+        """A playback dial seeds only its own connection, not later reconnects of the URL."""
+        url = "ws://192.168.1.100:8927/sendspin"
+        mock_server._connection_reasons[url] = ConnectionReason.PLAYBACK  # noqa: SLF001
+        first = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
+        await _exchange_hellos_encrypted(first, category=PskCategory.LONG_TERM)
+
+        reconnect = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
+        fake = await _exchange_hellos_encrypted(reconnect, category=PskCategory.LONG_TERM)
+
+        assert fake.sent_payloads()[1]["payload"]["activities"] == []
+
+    @pytest.mark.asyncio
     async def test_playback_state_change_resends_activate(self, mock_server: _MockServer) -> None:
         """A group playback-state change re-sends server/activate (active_roles omitted)."""
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
@@ -972,6 +990,26 @@ class TestLegacyServerHello:
         payloads = fake.sent_payloads()
         assert [p["type"] for p in payloads] == ["server/hello"]
         assert payloads[0]["payload"]["connection_reason"] == ConnectionReason.PLAYBACK.value
+
+    @pytest.mark.asyncio
+    async def test_legacy_reconnect_after_playback_dial_sends_discovery(
+        self, mock_server: _MockServer
+    ) -> None:
+        """A legacy reconnect of a URL dialed for playback no longer claims playback."""
+        url = "ws://192.168.1.100:8927/sendspin"
+        mock_server._connection_reasons[url] = ConnectionReason.PLAYBACK  # noqa: SLF001
+        reasons = []
+        for _ in range(2):
+            conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
+            fake = _FakeTransport()
+            conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+            conn._pending_first_text = ClientHelloMessage(  # noqa: SLF001
+                payload=_player_hello("client-1")
+            ).to_json()
+            await conn._exchange_hellos()  # noqa: SLF001
+            reasons.append(fake.sent_payloads()[0]["payload"]["connection_reason"])
+
+        assert reasons == [ConnectionReason.PLAYBACK.value, ConnectionReason.DISCOVERY.value]
 
     # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     @pytest.mark.asyncio

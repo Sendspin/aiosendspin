@@ -120,6 +120,17 @@ async def test_unknown_message_type_warnings_are_capped(
     client.handle_leave.assert_awaited_once_with()
 
 
+async def test_invalid_controller_command_is_ignored() -> None:
+    """An out-of-range seek is dropped and the loop goes on."""
+    controller = {"command": "seek", "position_ms": -1}
+    command = orjson.dumps({"type": "client/command", "payload": {"controller": controller}})
+    conn, client = _connection([command.decode(), _LEAVE])
+
+    await conn._run_message_loop()  # noqa: SLF001
+
+    client.handle_leave.assert_awaited_once_with()
+
+
 @pytest.mark.parametrize(
     "text",
     [

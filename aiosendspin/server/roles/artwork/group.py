@@ -60,15 +60,9 @@ class ArtworkGroupRole(GroupRole):
                 task.cancel()
 
     def send_current_artwork(self, role: ArtworkRoleProtocol) -> None:
-        """Schedule the current, then any scheduled, image for each channel the role streams."""
-        now_us = self._now_us()
+        """Schedule the current image or a clear, then any scheduled image, for each channel."""
         for channel_num, channel_config in role.get_channel_configs().items():
             if channel_config.source == ArtworkSource.NONE:
-                continue
-            state = self._artwork.get(channel_config.source)
-            if state is None or (
-                state.current(now_us) is None and state.pending_timestamp_us is None
-            ):
                 continue
             self._schedule_replay(role, channel_num, channel_config)
 
@@ -89,15 +83,14 @@ class ArtworkGroupRole(GroupRole):
         channel: int,
         channel_config: ArtworkChannel,
     ) -> None:
-        """Send the current, then any scheduled, image of the channel's source."""
+        """Send the current image or a clear, then any scheduled image, of the channel's source."""
         async with self._send_lock(role, channel):
-            state = self._artwork[channel_config.source]
+            state = self._artwork.setdefault(channel_config.source, ScheduledRoleState())
             now_us = self._now_us()
             current = state.current(now_us)
             scheduled = state.pending
             scheduled_us = state.pending_timestamp_us
-            if current is not None:
-                await self._encode_and_send(role, current, channel, channel_config, now_us)
+            await self._encode_and_send(role, current, channel, channel_config, now_us)
             if scheduled_us is not None:
                 await self._encode_and_send(role, scheduled, channel, channel_config, scheduled_us)
 

@@ -50,6 +50,7 @@ from aiosendspin.models.core import (
     ActivatePairing,
     ClientCommandMessage,
     ClientGoodbyeMessage,
+    ClientGoodbyePayload,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientLeaveMessage,
@@ -1121,6 +1122,8 @@ class SendspinConnection:
                 if self._url is not None
                 else ConnectionReason.DISCOVERY
             )
+            if self._url is not None:
+                self._server._consume_playback_reason(self._url)  # noqa: SLF001
             if connection_reason not in (ConnectionReason.DISCOVERY, ConnectionReason.PLAYBACK):
                 # Legacy clients parse the enum strictly and predate the other reasons.
                 self._logger.debug(
@@ -1241,6 +1244,9 @@ class SendspinConnection:
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)
             await self.disconnect(retry_connection=False)
+            return False
+        if isinstance(message, ClientGoodbyeMessage):
+            await self._handle_goodbye(message.payload)
             return False
         if not isinstance(message, ClientHelloMessage):
             self._logger.error("Expected client/hello, got %s", type(message).__name__)
@@ -1922,6 +1928,8 @@ class SendspinConnection:
         await self._pause_writer()
         if self._declared_activities is None:
             self._declared_activities = self._initial_activities
+            if self._url is not None:
+                self._server._consume_playback_reason(self._url)  # noqa: SLF001
         else:
             self._declared_activities = self._desired_activities
         self._send_activation(self._roles_to_activate)
@@ -2316,6 +2324,9 @@ class SendspinConnection:
             # In flight from before the client observed the leave activate.
             self._logger.debug("Discarding pairing message: not in pairing")
             return True
+        if message_type == "client/command":
+            self._logger.warning("Ignoring client/command that failed to parse: %s", exc)
+            return True
         if not isinstance(message_type, str) or not (
             isinstance(exc, SuitableVariantNotFoundError) and exc.variants_type is ClientMessage
         ):
@@ -2462,20 +2473,23 @@ class SendspinConnection:
             return
 
         if isinstance(message, ClientGoodbyeMessage):
-            if message.payload.unrecognized_reason is not None:
-                self._logger.info(
-                    "Received client/goodbye with unrecognized reason %r; not reconnecting",
-                    message.payload.unrecognized_reason,
-                )
-            else:
-                self._logger.debug(
-                    "Received client/goodbye with reason: %s",
-                    message.payload.reason,
-                )
-            self._last_goodbye_reason = message.payload.reason
-            retry = message.payload.reason == GoodbyeReason.RESTART
-            await self.disconnect(retry_connection=retry)
+            await self._handle_goodbye(message.payload)
             return
+
+    async def _handle_goodbye(self, payload: ClientGoodbyePayload) -> None:
+        if payload.unrecognized_reason is not None:
+            self._logger.info(
+                "Received client/goodbye with unrecognized reason %r; not reconnecting",
+                payload.unrecognized_reason,
+            )
+        else:
+            self._logger.debug(
+                "Received client/goodbye with reason: %s",
+                payload.reason,
+            )
+        self._last_goodbye_reason = payload.reason
+        retry = payload.reason == GoodbyeReason.RESTART
+        await self.disconnect(retry_connection=retry)
 
     async def _handle_client_state(self, payload: ClientStatePayload) -> None:
         """Apply a client/state update: compliance checks, initial-state gate, dispatch."""
