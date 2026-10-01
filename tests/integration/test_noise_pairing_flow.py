@@ -2344,6 +2344,16 @@ async def test_activation_is_first_under_new_keys_despite_queued_replies(
             await client.disconnect()
 
 
+async def _end_pairing_twice(server: SendspinServer, client_id: str) -> list[asyncio.Future[None]]:
+    """Start two end_pairing calls, the second once the attempt has absorbed the first cancel."""
+    first = asyncio.ensure_future(server.end_pairing(client_id))
+    for _ in range(3):
+        await asyncio.sleep(0)  # two cancels before the attempt task runs would merge into one
+    second = asyncio.ensure_future(server.end_pairing(client_id))
+    await asyncio.sleep(0)  # let the second end_pairing cancel the attempt task
+    return [first, second]
+
+
 def _hold_rehandshake_message_2(conn: SendspinConnection) -> tuple[list[Any], asyncio.Event]:
     """Keep the next Noise message 2 from reaching ``conn``'s pairing attempt."""
     held: list[Any] = []
@@ -2369,7 +2379,7 @@ def _hold_rehandshake_message_2(conn: SendspinConnection) -> tuple[list[Any], as
 async def test_cancel_during_opening_rehandshake_keeps_the_connection(
     via_end_pairing: bool,  # noqa: FBT001
 ) -> None:
-    """A cancel while the attempt re-keys finishes the re-handshake, then leaves pairing."""
+    """A cancel or repeated end_pairing during the re-key finishes it, then leaves pairing."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -2388,10 +2398,9 @@ async def test_cancel_during_opening_rehandshake_keeps_the_connection(
             assert queue is not None
 
             if via_end_pairing:
-                end_task = asyncio.ensure_future(server.end_pairing(client_identity.peer_id))
-                await asyncio.sleep(0)  # let end_pairing cancel the attempt task
+                ends = await _end_pairing_twice(server, client_identity.peer_id)
                 queue.put_nowait(held[0])
-                await end_task
+                await asyncio.gather(*ends)
                 with pytest.raises(PairingAbortError) as excinfo:
                     await pairing
                 assert excinfo.value.reason is PairAbortReason.USER_CANCELLED
@@ -2439,7 +2448,7 @@ async def test_disconnect_during_opening_rehandshake_completes_teardown() -> Non
 
 
 async def test_end_pairing_during_record_persistence_completes_pairing() -> None:
-    """end_pairing while the server stores a finalized record completes the pairing."""
+    """Repeated end_pairing while the server stores a finalized record completes the pairing."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     client_identity = Identity.generate()
@@ -2464,10 +2473,9 @@ async def test_end_pairing_during_record_persistence_completes_pairing() -> None
             pairing = asyncio.ensure_future(conn.initiate_pairing(attempt))
             await storing.wait()
 
-            end_task = asyncio.ensure_future(server.end_pairing(client_identity.peer_id))
-            await asyncio.sleep(0)  # let end_pairing cancel the attempt task
+            ends = await _end_pairing_twice(server, client_identity.peer_id)
             release.set()
-            await end_task
+            await asyncio.gather(*ends)
             await pairing
 
             assert conn.psk_category is PskCategory.LONG_TERM

@@ -142,7 +142,7 @@ from aiosendspin.noise.pairing import (
 )
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import create_task, warn_deprecated
+from aiosendspin.util import create_task, finish_despite_cancel, warn_deprecated
 
 from .client import SendspinClient
 from .compliance import ClientComplianceError, describe_client, noncompliance_subject
@@ -1685,18 +1685,15 @@ class SendspinConnection:
     async def _pair(self, transport: EncryptedWebSocket) -> bool:
         """Run the pairing exchange."""
         try:
-            rehandshake = asyncio.create_task(self._rehandshake_for_pairing_if_needed(transport))
-            try:
-                rekeyed = await asyncio.shield(rehandshake)
-            except asyncio.CancelledError:
-                # Finish the re-handshake first. The client saw no attempt yet, so leave
-                # pairing without a pair/abort.
-                if not await rehandshake:
-                    return False
-                await self._leave_pairing()
-                raise LocalPairingAbortError(PairAbortReason.USER_CANCELLED) from None
+            rekeyed, cancelled = await finish_despite_cancel(
+                self._rehandshake_for_pairing_if_needed(transport)
+            )
             if not rekeyed:
                 return False
+            if cancelled:
+                # The client saw no attempt yet, so leave pairing without a pair/abort.
+                await self._leave_pairing()
+                raise LocalPairingAbortError(PairAbortReason.USER_CANCELLED)
             method = (
                 self._pairing_attempt.method
                 if self._pairing_attempt is not None
@@ -1750,12 +1747,11 @@ class SendspinConnection:
         self.forget_credential_mismatch()
         # The client finalized, so the attempt has succeeded and both sides hold the record:
         # a late cancel must not abort it or corrupt the re-handshake. Complete the tail and
-        # report the success; the one absorbed cancel ends with the pairing in effect.
-        rehandshake = create_task(self._rehandshake_to(transport, record.as_resolved()))
-        try:
-            return await asyncio.shield(rehandshake)
-        except asyncio.CancelledError:
-            return await rehandshake
+        # report the success. An absorbed cancel ends with the pairing in effect.
+        accepted, _ = await finish_despite_cancel(
+            self._rehandshake_to(transport, record.as_resolved())
+        )
+        return accepted
 
     def _pairing_activation(self, pairing: ActivatePairing) -> ServerActivatePayload:
         """Build the ``server/activate`` admitting an attempt.

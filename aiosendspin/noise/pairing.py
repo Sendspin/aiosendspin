@@ -14,6 +14,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 from aiosendspin.models.types import PairAbortReason, PairingCodeFormat, PairMethod
+from aiosendspin.util import finish_despite_cancel
 
 from . import pairing_code as pairing_code_mod
 from .keys import PSK_SIZE, b64url_decode, b64url_encode, psk_id_for
@@ -673,7 +674,7 @@ async def _finalize_server(
     if finalize is None:
         finalize = await _receive_pairing(ws, ClientPairFinalizeMessage)
     # The client has finalized, so a cancel from here on completes the attempt.
-    commit = asyncio.create_task(
+    record, _ = await finish_despite_cancel(
         _commit_finalize(
             ws,
             finalize,
@@ -685,10 +686,7 @@ async def _finalize_server(
             owner=owner,
         )
     )
-    try:
-        return await asyncio.shield(commit)
-    except asyncio.CancelledError:
-        return await commit
+    return record
 
 
 async def _commit_finalize(
