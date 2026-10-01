@@ -15,7 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
-from aiosendspin.models.types import PairMethod, TrustLevel
+from aiosendspin.models.types import PairMethod
 
 from .keys import (
     PSK_SIZE,
@@ -49,7 +49,6 @@ __all__ = [
     "ServerPairingRecord",
     "ServerPairingStore",
     "StagedPairingPsk",
-    "TrustLevel",
     "TrustedUnpairedClient",
 ]
 

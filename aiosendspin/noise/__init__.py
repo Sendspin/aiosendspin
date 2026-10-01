@@ -83,7 +83,6 @@ from .trust_store import (
     ServerPairingStore,
     StagedPairingPsk,
     TrustedUnpairedClient,
-    TrustLevel,
 )
 from .wire import EncryptedWebSocket, RawWebSocket
 
@@ -140,7 +139,6 @@ __all__ = [
     "ServerPairingRecord",
     "ServerPairingStore",
     "StagedPairingPsk",
-    "TrustLevel",
     "TrustedUnpairedClient",
     "b64url_decode",
     "b64url_encode",
