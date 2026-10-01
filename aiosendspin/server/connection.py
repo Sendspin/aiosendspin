@@ -1042,8 +1042,8 @@ class SendspinConnection:
         in transition mode, it is accepted unencrypted (the raw socket is the transport,
         and the frame is held for the message loop). Every other TEXT first frame runs
         the Noise initiator handshake and yields an encrypted transport; one that is not
-        a valid ``client/init`` is answered with ``server/error``. Handshake failures
-        raise ``HandshakeAbortedError``.
+        a valid ``client/init`` is answered with ``server/error``. Handshake failures, and a
+        pairing dial the client lacks the Pairing PSK for, raise ``HandshakeAbortedError``.
         """
         first_text = await receive_text_frame(raw, what="first frame")
         if self._peek_message_type(first_text) == "client/hello":
@@ -1066,8 +1066,9 @@ class SendspinConnection:
         self._pairing_index = 0
         self._logger = logger.getChild(result.peer_id)
         if result.credential_mismatch and self._pairing_attempt is not None:
-            self._logger.warning("Client does not hold the attempt's Pairing PSK; not pairing")
-            self._pairing_attempt = None
+            # Close so the reconnect, which carries no attempt, can use a record this server holds.
+            self._logger.warning("Client lacks the attempt's Pairing PSK, reconnecting without it")
+            raise HandshakeAbortedError("client does not hold the attempt's Pairing PSK")
         self._credential_mismatch = result.credential_mismatch and await self._holds_record(
             result.peer_id
         )

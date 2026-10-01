@@ -79,6 +79,7 @@ from aiosendspin.noise.trust_store import (
 )
 from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server import connection as connection_module
+from aiosendspin.server import server as server_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
@@ -3801,12 +3802,15 @@ async def test_pairing_psk_dial_pairs_the_token_client() -> None:
         await server.close()
 
 
-async def test_pairing_psk_dial_without_the_client_psk_activates_without_rehandshake(
+async def test_pairing_psk_dial_without_the_client_psk_reconnects_onto_the_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Pairing PSK dial the client answers on the Sentinel activates without pairing."""
-    server = _make_server(InMemoryServerPairingStore())
+    """A paired client answering a stale Pairing PSK dial on the Sentinel ends up on its record."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
     identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
     attempt = PairingAttempt(
         method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id=identity.peer_id
     )
@@ -3818,32 +3822,16 @@ async def test_pairing_psk_dial_without_the_client_psk_activates_without_rehands
         return await rehandshake(*args, **kwargs)
 
     monkeypatch.setattr(connection_module, "run_rehandshake_server", tracking_rehandshake)
-    sdk = make_sdk_client(identity=identity, client_name="c", roles=[Roles.CONTROLLER])
+    monkeypatch.setattr(server_module, "MAX_RECONNECT_BACKOFF_S", 0)
+    sdk = make_sdk_client(
+        identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+    )
     try:
-        async with (
-            _host_incoming_client(sdk) as url,
-            ClientSession() as session,
-            session.ws_connect(url) as wsock,
-        ):
-            conn = SendspinConnection(server, wsock_client=wsock, url=url, pairing_attempt=attempt)
-            activated = asyncio.Event()
-            activate = conn._activate  # noqa: SLF001
-
-            async def tracking_activate() -> None:
-                await activate()
-                activated.set()
-
-            conn._activate = tracking_activate  # type: ignore[method-assign]  # noqa: SLF001
-            task = asyncio.create_task(conn.handle_client())
-            try:
-                async with asyncio.timeout(5):
-                    await activated.wait()
-                assert rehandshakes == []
-                assert conn.psk_category is PskCategory.SENTINEL
-            finally:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+        async with _host_incoming_client(sdk) as url:
+            server.connect_to_client(url, pairing_attempt=attempt)
+            await _await_paired_session(sdk)
+            await sdk.disconnect()
+        assert rehandshakes == []
     finally:
         await sdk.disconnect()
         await server.close()
