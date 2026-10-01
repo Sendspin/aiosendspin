@@ -383,12 +383,12 @@ class PlayerV1Role(Role):
         )
 
     def on_stream_clear(self) -> None:
-        """Send stream/clear and reset buffer-tracking state."""
+        """Send stream/clear for an active stream and reset buffer-tracking state."""
         if not self.has_connection():
             return
 
-        stream_clear = StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
-        self.send_message(stream_clear)
+        if self._stream_started:
+            self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["player"])))
         self._pending_stream_start = False
         self.reset_binary_timing()
 
@@ -396,12 +396,12 @@ class PlayerV1Role(Role):
             self._buffer_tracker.reset()
 
     def on_stream_end(self) -> None:
-        """Send stream/end and reset state."""
+        """Send stream/end for an active stream and reset state."""
         if not self.has_connection():
             return
 
-        stream_end = StreamEndMessage(payload=StreamEndPayload(roles=["player"]))
-        self.send_message(stream_end)
+        if self._stream_started:
+            self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["player"])))
         self._stream_started = False
         self._pending_stream_start = False
         self._last_sent_format = None

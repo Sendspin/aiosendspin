@@ -174,7 +174,8 @@ class VisualizerDraftR1Role(Role):
         """Reset visualizer state and notify client to clear buffered data."""
         if self._extractor is not None:
             self._extractor.reset()
-        self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
+        if self._stream_started:
+            self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
@@ -182,8 +183,9 @@ class VisualizerDraftR1Role(Role):
     def on_stream_end(self) -> None:
         """Reset visualizer state and notify client that stream has ended."""
         self._extractor = None
+        if self._stream_started:
+            self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self._stream_started = False
-        self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()

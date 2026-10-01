@@ -150,6 +150,9 @@ async def test_external_source_moves_player_only_client_out_of_multi_group() -> 
     assert len(shared_group.clients) == 2
     shared_group_id = shared_group.group_id
 
+    role = player_a.role(Roles.PLAYER.value)
+    assert role is not None
+    role._stream_started = True  # noqa: SLF001
     conn_a.sent_messages.clear()
     await player_a.handle_availability_change(available=False)
 
@@ -245,6 +248,9 @@ async def test_leave_moves_client_out_of_multi_group(monkeypatch: pytest.MonkeyP
     shared_group.start_stream()
     hook_calls = _record_availability_hooks(player_a, monkeypatch)
 
+    role = player_a.role(Roles.PLAYER.value)
+    assert role is not None
+    role._stream_started = True  # noqa: SLF001
     conn_a.sent_messages.clear()
     await player_a.handle_leave()
 
@@ -270,6 +276,9 @@ async def test_leave_in_solo_group_stops_playback(monkeypatch: pytest.MonkeyPatc
     group.start_stream()
     hook_calls = _record_availability_hooks(player, monkeypatch)
 
+    role = player.role(Roles.PLAYER.value)
+    assert role is not None
+    role._stream_started = True  # noqa: SLF001
     conn.sent_messages.clear()
     await player.handle_leave()
 

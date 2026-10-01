@@ -19,6 +19,7 @@ def test_player_role_on_stream_clear_uses_role_family() -> None:
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
     role.on_stream_clear()
 
     _role, msg = client.send_role_message.call_args.args
@@ -34,6 +35,7 @@ def test_player_role_on_stream_end_uses_role_family() -> None:
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
     role.on_stream_end()
 
     _role, msg = client.send_role_message.call_args.args

@@ -701,6 +701,7 @@ def test_player_role_on_stream_clear_sends_message() -> None:
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
 
     role.on_stream_clear()
 
@@ -769,6 +770,7 @@ def test_player_role_on_stream_end_sends_message() -> None:
     role = PlayerV1Role(client=client)
     role._client.connection = MagicMock()  # noqa: SLF001
     role._buffer_tracker = None  # noqa: SLF001
+    role._stream_started = True  # noqa: SLF001
 
     role.on_stream_end()
 
