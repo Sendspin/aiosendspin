@@ -189,8 +189,8 @@ class SendspinGroup:
     def _legacy_replacement_roles(self) -> set[Role]:
         """Return the roles whose client gets stream/end, not stream/clear, on replacement.
 
-        Clients with a pre-#177 hello predate reliable stream/clear handling, so a
-        replaced stream still ends for them as it did before. The pre-#177 hello is
+        Clients on a pre-#177 wire predate reliable stream/clear handling, so a
+        replaced stream still ends for them as it did before. The pre-#177 wire is
         the only per-connection signal of such a client; this outlives that wire
         tolerance only if another signal replaces it.
         """

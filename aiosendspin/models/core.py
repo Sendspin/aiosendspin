@@ -322,6 +322,10 @@ class ClientHelloPayload(SendspinModel):
     legacy_pair_methods_list_used: bool | None = None
     """Whether supported_pair_methods arrived as the superseded list, recorded for the
     server to flag. Not part of the wire schema (omitted when None)."""
+    # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
+    trust_level_used: bool | None = None
+    """Whether the removed trust_level key was present, recorded for the server to treat
+    the client as legacy. Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -353,6 +357,8 @@ class ClientHelloPayload(SendspinModel):
         if legacy_pair_methods_list:
             normalized["supported_pair_methods"] = _pair_methods_from_list(pair_methods)
         normalized["legacy_pair_methods_list_used"] = legacy_pair_methods_list or None
+        # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
+        normalized["trust_level_used"] = "trust_level" in normalized or None
         # Always overwrite so a client cannot spoof the record via the wire.
         normalized["legacy_support_keys_used"] = legacy_keys or None
         return normalized
