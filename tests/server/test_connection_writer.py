@@ -693,6 +693,63 @@ async def test_role_stream_lifecycle_json_is_sent_before_older_binary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_place_stream_start_follows_queued_binary() -> None:
+    """A stream/start for an active stream must not overtake that role's queued audio."""
+    loop = asyncio.get_running_loop()
+    clock = LoopClock(loop)
+    server = _DummyServer(loop=loop, clock=clock)
+
+    send_order: list[str] = []
+
+    async def _record_json(_payload: str) -> None:
+        send_order.append("json")
+
+    async def _record_binary(_payload: bytes) -> None:
+        send_order.append("binary")
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=_record_json)
+    wsock.send_bytes = AsyncMock(side_effect=_record_binary)
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+
+    timestamp_us = clock.now_us() + 2_000_000
+    conn.send_binary(
+        pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us) + b"audio",
+        role="player",
+        timestamp_us=timestamp_us,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+    )
+    conn.send_role_message(
+        "player",
+        StreamStartMessage(
+            payload=StreamStartPayload(
+                player=StreamStartPlayer(
+                    codec=AudioCodec.PCM,
+                    sample_rate=44_100,
+                    channels=2,
+                    bit_depth=16,
+                    codec_header=None,
+                )
+            )
+        ),
+    )
+
+    for _ in range(50):
+        if len(send_order) >= 2:
+            break
+        await asyncio.sleep(0)
+
+    assert send_order[:2] == ["binary", "json"]
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
 async def test_writer_rewrites_server_transmitted_at_send_time() -> None:
     """`server/time` must carry the clock value at actual send, not at enqueue."""
     loop = asyncio.get_running_loop()

@@ -34,16 +34,12 @@ OPUS_48K = SupportedAudioFormat(codec=AudioCodec.OPUS, sample_rate=48000, bit_de
 class _FakeConnection:
     def __init__(self) -> None:
         self.sent: list[object] = []
-        self.dropped_pending_binary: list[list[str] | None] = []
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
 
     def send_message(self, message: object) -> None:
         self.sent.append(message)
-
-    def drop_pending_binary(self, roles: list[str] | None) -> None:
-        self.dropped_pending_binary.append(roles)
 
     def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
         self.sent.append(message)
@@ -92,6 +88,12 @@ def _make_player(
     return client, role, conn
 
 
+def _spy_format_changes(client: SendspinClient, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    spy = MagicMock(wraps=client.group.on_role_format_changed)
+    monkeypatch.setattr(client.group, "on_role_format_changed", spy)
+    return spy
+
+
 def _state(fmt: SupportedAudioFormat | None) -> ClientStatePayload:
     return ClientStatePayload(available=True, player=PlayerStatePayload(volume=50, format=fmt))
 
@@ -104,16 +106,18 @@ def _transformer(role: PlayerV1Role) -> object:
 
 def test_idle_format_applies_to_next_stream_without_starting_one(
     mock_server: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no active stream a preference sends nothing and is used by the next stream."""
     client, role, conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     conn.sent.clear()
 
     role.on_client_state(_state(FLAC_48K))
 
     assert not client.group.has_active_stream
     assert conn.sent == []
-    assert conn.dropped_pending_binary == []
+    assert format_changes.call_count == 0
     assert role._pending_stream_start is False  # noqa: SLF001
 
     client.group.start_stream()
@@ -138,58 +142,73 @@ def test_format_change_mid_stream_keeps_buffer_count(mock_server: MagicMock) -> 
     assert tracker.buffered_chunks[0].duration_us == 25_000
 
 
-def test_format_change_mid_stream_begins_transition(mock_server: MagicMock) -> None:
+def test_format_change_mid_stream_begins_transition(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A changed preference during a stream restarts it in the new format."""
     client, role, conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     client.group.start_stream()
 
     role.on_client_state(_state(FLAC_48K))
 
-    assert conn.dropped_pending_binary == [["player"]]
+    assert format_changes.call_count == 1
     assert role._pending_stream_start is True  # noqa: SLF001
     assert isinstance(_transformer(role), FlacEncoder)
     assert not any(isinstance(msg, StreamStartMessage) for msg in conn.sent)
 
 
-def test_unchanged_format_runs_no_boundary(mock_server: MagicMock) -> None:
-    """A preference for the format already in use neither drops audio nor restarts."""
-    client, role, conn = _make_player(mock_server)
+def test_unchanged_format_runs_no_boundary(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preference for the format already in use does not restart the stream."""
+    client, role, _conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     client.group.start_stream()
 
     role.on_client_state(_state(PCM_48K))
     role.on_client_state(_state(PCM_48K))
 
-    assert conn.dropped_pending_binary == []
+    assert format_changes.call_count == 0
     assert isinstance(_transformer(role), PcmPassthrough)
 
 
-def test_player_object_without_format_clears_preference(mock_server: MagicMock) -> None:
+def test_player_object_without_format_clears_preference(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A player object without format falls back to the supported_formats priority."""
-    client, role, conn = _make_player(mock_server)
+    client, role, _conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     client.group.start_stream()
     role.on_client_state(_state(FLAC_48K))
 
     role.on_client_state(_state(None))
 
-    assert conn.dropped_pending_binary == [["player"], ["player"]]
+    assert format_changes.call_count == 2
     assert isinstance(_transformer(role), PcmPassthrough)
 
 
-def test_client_state_without_player_object_keeps_preference(mock_server: MagicMock) -> None:
+def test_client_state_without_player_object_keeps_preference(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A client/state that carries no player object leaves the preference untouched."""
-    client, role, conn = _make_player(mock_server)
+    client, role, _conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     client.group.start_stream()
     role.on_client_state(_state(FLAC_48K))
 
     role.on_client_state(ClientStatePayload(available=True))
 
-    assert conn.dropped_pending_binary == [["player"]]
+    assert format_changes.call_count == 1
     assert isinstance(_transformer(role), FlacEncoder)
 
 
-def test_operator_override_wins_over_client_format(mock_server: MagicMock) -> None:
+def test_operator_override_wins_over_client_format(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A client preference hidden by the operator override changes nothing."""
-    client, role, conn = _make_player(mock_server)
+    client, role, _conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     client.group.start_stream()
     pcm = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     assert role.set_preferred_format(pcm, AudioCodec.PCM)
@@ -197,16 +216,19 @@ def test_operator_override_wins_over_client_format(mock_server: MagicMock) -> No
     role.on_client_state(_state(FLAC_48K))
     role.on_client_state(_state(None))
 
-    assert conn.dropped_pending_binary == []
+    assert format_changes.call_count == 0
     assert isinstance(_transformer(role), PcmPassthrough)
     state = client.get_or_create_role_state("player", PlayerPersistentState)
     assert state.preferred_format_override == pcm
     assert state.preferred_codec_override == AudioCodec.PCM
 
 
-def test_client_format_applies_once_override_is_cleared(mock_server: MagicMock) -> None:
+def test_client_format_applies_once_override_is_cleared(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Clearing the operator override falls back to the client's preference."""
-    client, role, conn = _make_player(mock_server)
+    client, role, _conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     client.group.start_stream()
     assert role.set_preferred_format(
         AudioFormat(sample_rate=48000, bit_depth=16, channels=2), AudioCodec.PCM
@@ -215,7 +237,7 @@ def test_client_format_applies_once_override_is_cleared(mock_server: MagicMock) 
 
     assert role.set_preferred_format(None)
 
-    assert conn.dropped_pending_binary == [["player"]]
+    assert format_changes.call_count == 1
     assert isinstance(_transformer(role), FlacEncoder)
 
 
@@ -236,11 +258,13 @@ def test_operator_override_does_not_write_client_preference(mock_server: MagicMo
 @pytest.mark.asyncio
 async def test_undeclared_format_is_flagged_and_ignored(
     mock_server: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
     allow_noncompliant: bool,  # noqa: FBT001
 ) -> None:
     """A format missing from the hello supported_formats is flagged; the preference stays."""
     mock_server.allow_noncompliant_clients = allow_noncompliant
-    client, role, conn = _make_player(mock_server)
+    client, role, _conn = _make_player(mock_server)
+    format_changes = _spy_format_changes(client, monkeypatch)
     client.group.start_stream()
     role.on_client_state(_state(FLAC_48K))
     server_conn = SendspinConnection(mock_server, wsock_client=MagicMock())
@@ -254,7 +278,7 @@ async def test_undeclared_format_is_flagged_and_ignored(
         with pytest.raises(ClientComplianceError, match="declared supported_formats"):
             await server_conn._handle_client_state(payload)  # noqa: SLF001
 
-    assert conn.dropped_pending_binary == [["player"]]
+    assert format_changes.call_count == 1
     assert isinstance(_transformer(role), FlacEncoder)
 
 
