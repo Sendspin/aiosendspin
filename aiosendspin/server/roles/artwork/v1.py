@@ -110,9 +110,7 @@ class ArtworkV1Role(Role):
 
     def on_deactivate(self) -> None:
         """End the artwork stream when the role is deactivated while still connected."""
-        if self._stream_started:
-            self._cancel_in_flight()
-            self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["artwork"])))
+        self._end_stream()
         self._reset_stream()
         super().on_deactivate()
 
@@ -148,8 +146,21 @@ class ArtworkV1Role(Role):
         if payload.artwork is not None:
             self._apply_channels(payload.artwork.channels)
 
+    def on_availability_changed(
+        self,
+        old_available: bool,  # noqa: ARG002, FBT001
+        new_available: bool,  # noqa: FBT001
+    ) -> None:
+        """Start the stream for declared channels once available, and end it when unavailable."""
+        if not new_available:
+            self._end_stream()
+        elif self._channels and not self._stream_started:
+            self._start_stream()
+
     def get_channel_configs(self) -> dict[int, ArtworkChannel]:
         """Return the configurations of the channels currently streamed, by channel number."""
+        if not self._stream_started:
+            return {}
         return {
             channel_num: channel
             for channel_num, channel in enumerate(self._channels)
@@ -294,6 +305,10 @@ class ArtworkV1Role(Role):
 
     def _apply_channels(self, channels: list[ArtworkChannel]) -> None:
         """Stream `channels`, re-announcing the stream when its configuration changed."""
+        if not self._client.available:
+            # Kept for the stream that starts once the client is available.
+            self._channels = channels
+            return
         new_configs = _stream_configs(channels)
         if self._stream_started:
             old_configs = _stream_configs(self._channels)
@@ -311,9 +326,23 @@ class ArtworkV1Role(Role):
                     self._send_clear_now(channel_num, now_us)
 
         self._channels = channels
-        self._send_stream_start(new_configs)
+        self._start_stream()
+
+    def _start_stream(self) -> None:
+        """Send stream/start for the current channels, then their current images."""
+        self._send_stream_start(_stream_configs(self._channels))
         if self._group_role is not None:
             self._group_role.send_current_artwork(self)
+
+    def _end_stream(self) -> None:
+        """Send stream/end for an active stream, keeping the channels for the next one."""
+        if not self._stream_started:
+            return
+        self._cancel_in_flight()
+        self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["artwork"])))
+        self._queued.clear()
+        self._scheduled_announced.clear()
+        self._stream_started = False
 
     def _send_stream_start(self, configs: list[StreamArtworkChannelConfig]) -> None:
         """Send stream/start with `configs` truncated after the last streamed channel."""

@@ -839,22 +839,23 @@ async def test_artwork_cancel_keeps_current_image_in_flight(
 
 
 @pytest.mark.asyncio
-async def test_artwork_transfers_continue_for_unavailable_client(
+async def test_artwork_stream_ends_when_client_becomes_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A client reporting available: false still receives complete transfers."""
+    """available: false ends the artwork stream, and no image follows until it restarts."""
     client = _make_client_stub()
-    client.available = False
     events = _record(client, monkeypatch)
     role = ArtworkV1Role(client=client)
     role.on_connect()
-    role.on_client_state(ClientStatePayload(available=False, artwork=_state(_ALBUM).artwork))
+    role.on_client_state(_state(_ALBUM))
     events.clear()
 
+    client.available = False
+    role.on_availability_changed(old_available=True, new_available=False)
     role.send_artwork(0, b"image", _NOW_US)
     await asyncio.sleep(0)
 
-    assert events == [("announce", 0, _NOW_US, 5), ("part", 0, b"image")]
+    assert events == [("drop", ["artwork"]), "StreamEndMessage"]
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from PIL import Image
 
+from aiosendspin.models.artwork import ClientStateArtwork
 from aiosendspin.models.core import ClientStatePayload, StreamStartMessage
 from aiosendspin.models.source import SourceStatePayload
 from aiosendspin.models.types import PlaybackStateType, Roles
@@ -19,9 +21,16 @@ from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from tests.server.test_group_add_client import _DummyConnection, _DummyServer, _make_player
 from tests.server.test_group_add_client import _hello as _owner_hello
-from tests.server.test_role_activation import _PLAYER_STATE, _client, _connect, _hello
+from tests.server.test_role_activation import (
+    _ARTWORK_CHANNEL,
+    _PLAYER_STATE,
+    _client,
+    _connect,
+    _hello,
+)
 
 _FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
@@ -284,3 +293,30 @@ async def test_unavailable_after_the_initial_state_leaves_the_group(
     assert joiner.group is not group
     assert joiner.group.clients == [joiner]
     stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_artwork_starts_with_the_current_image_once_available() -> None:
+    """Artwork declared while unavailable gets its stream/start and current image once available."""
+    conn, _fake = await _connect(_hello([Roles.ARTWORK.value]), send_state=False)
+    group_role = _client(conn).group.group_role("artwork")
+    assert isinstance(group_role, ArtworkGroupRole)
+    await group_role.set_album_artwork(Image.new("RGB", (10, 10)))
+    artwork = ClientStateArtwork(channels=[_ARTWORK_CHANNEL])
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, artwork=artwork)
+    )
+    assert not conn._role_queues.get("artwork")  # noqa: SLF001
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, artwork=artwork)
+    )
+    for _ in range(200):
+        queued = [entry for _, _, entry in sorted(conn._role_queues.get("artwork", []))]  # noqa: SLF001
+        if any(entry.binary is not None for entry in queued):
+            break
+        await asyncio.sleep(0.01)
+
+    assert isinstance(queued[0].json_message, StreamStartMessage)
+    assert queued[1].binary is not None
