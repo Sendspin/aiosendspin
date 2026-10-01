@@ -1121,6 +1121,8 @@ class SendspinConnection:
                 if self._url is not None
                 else ConnectionReason.DISCOVERY
             )
+            if self._url is not None:
+                self._server._consume_playback_reason(self._url)  # noqa: SLF001
             if connection_reason not in (ConnectionReason.DISCOVERY, ConnectionReason.PLAYBACK):
                 # Legacy clients parse the enum strictly and predate the other reasons.
                 self._logger.debug(
@@ -1922,6 +1924,8 @@ class SendspinConnection:
         await self._pause_writer()
         if self._declared_activities is None:
             self._declared_activities = self._initial_activities
+            if self._url is not None:
+                self._server._consume_playback_reason(self._url)  # noqa: SLF001
         else:
             self._declared_activities = self._desired_activities
         self._send_activation(self._roles_to_activate)
