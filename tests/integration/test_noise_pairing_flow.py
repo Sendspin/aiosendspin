@@ -1549,6 +1549,125 @@ async def test_dial_pairing_failed_entry_keeps_the_connection(
         await server.close()
 
 
+async def test_dial_pairing_sends_group_update_during_the_attempt() -> None:
+    """A pairing dial sends group/update after its pairing activation, not after pairing."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    group_update = asyncio.Event()
+    seen_during_attempt: list[bool] = []
+
+    async def provide() -> str:
+        code = await shown.get()
+        with suppress(TimeoutError):
+            async with asyncio.timeout(2):
+                await group_update.wait()
+        seen_during_attempt.append(group_update.is_set())
+        return code
+
+    sdk = await _code_pairing_client(
+        client_identity, InMemoryClientPairingStore(), PairMethod.DYNAMIC_PAIRING_CODE, shown
+    )
+    sdk.add_group_update_listener(lambda _payload: group_update.set())
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(
+                server,
+                url,
+                pairing_attempt=_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide),
+            ),
+        ):
+            await _await_paired_session(sdk)
+            assert seen_during_attempt == [True]
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
+async def test_dial_pairing_is_not_retried_while_only_pairing() -> None:
+    """A drop without client/goodbye while the connection declares only pairing ends it."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    asked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def provide() -> str:
+        code = await shown.get()
+        asked.set()
+        await release.wait()
+        return code
+
+    sdk = await _code_pairing_client(
+        client_identity, InMemoryClientPairingStore(), PairMethod.DYNAMIC_PAIRING_CODE, shown
+    )
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(
+                server,
+                url,
+                pairing_attempt=_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide),
+            ),
+        ):
+            async with asyncio.timeout(5):
+                await asked.wait()
+            server_client = server.get_client(client_identity.peer_id)
+            assert server_client is not None
+            conn = server_client.connection
+            assert conn is not None
+            assert conn.should_retry_server_initiated_connection is False
+
+            release.set()
+            await _await_paired_session(sdk)
+            assert conn.should_retry_server_initiated_connection is True
+    finally:
+        release.set()
+        await sdk.disconnect()
+        await server.close()
+
+
+async def test_revoking_approval_during_a_failed_dial_pairing_admits_no_playback() -> None:
+    """Approval revoked while a pairing dial runs is honored when the attempt fails."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    await server.trust_unpaired(client_identity.peer_id)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    asked = asyncio.Event()
+
+    async def provide() -> str:
+        await shown.get()
+        await server.untrust_unpaired(client_identity.peer_id)
+        asked.set()
+        return "12x456"
+
+    sdk = await _code_pairing_client(
+        client_identity,
+        await _unpaired_enabled_store(),
+        PairMethod.DYNAMIC_PAIRING_CODE,
+        shown,
+    )
+    try:
+        async with (
+            _host_incoming_client(sdk) as url,
+            _dial(
+                server,
+                url,
+                pairing_attempt=_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide),
+            ),
+        ):
+            async with asyncio.timeout(5):
+                await asked.wait()
+            await _await_left_pairing(sdk)
+            assert sdk.connected
+            assert _server_active_role_count(server, client_identity.peer_id) == 0
+            assert sdk.activities == []
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_pair_retry_in_flight_does_not_fail_the_next_attempt() -> None:
     """A retry sent before the client saw a leave does not fail an attempt started right after."""
     server_store = InMemoryServerPairingStore()
@@ -1818,8 +1937,8 @@ async def test_pair_retry_after_leaving_pairing_is_discarded() -> None:
             await client.disconnect()
 
 
-async def test_pairing_frames_between_attempts_are_discarded() -> None:
-    """After a non-closing abort nothing queues pairing frames until the next attempt."""
+async def test_non_closing_abort_leaves_pairing() -> None:
+    """A pair/abort that keeps the connection open also ends pairing, without ``end_pairing``."""
     server = _make_server(InMemoryServerPairingStore())
     identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
@@ -1848,22 +1967,8 @@ async def test_pairing_frames_between_attempts_are_discarded() -> None:
                         pairing_format=PairingCodeFormat.DIGITS,
                     )
                 )
-            assert conn._in_pairing  # noqa: SLF001
-            assert conn._pairing_message_queue is None  # noqa: SLF001
-            routed = _track_routed_types(conn)
-
-            sdk_conn = client._admitted_connection  # noqa: SLF001
-            assert sdk_conn is not None
-            await sdk_conn._send_message(ClientPairRetryMessage().to_json())  # noqa: SLF001
-            replies = sdk_conn._time_filter.count  # noqa: SLF001
-            await sdk_conn._send_time_message()  # noqa: SLF001
-            await _wait_until(lambda: sdk_conn._time_filter.count > replies)  # noqa: SLF001
-
-            assert routed == []
-            assert conn._pairing_message_queue is None  # noqa: SLF001
-            assert client.connected
-            await conn.end_pairing()
             await _await_left_pairing(client)
+            assert client.connected
         finally:
             await client.disconnect()
 
@@ -1891,52 +1996,6 @@ async def test_stray_pairing_frame_outside_pairing_is_discarded() -> None:
             )
             await asyncio.sleep(0.1)  # a fatal frame would have torn the connection down
             assert client.connected
-        finally:
-            await client.disconnect()
-
-
-async def test_end_pairing_after_failed_attempt_leaves_pairing() -> None:
-    """After a failed attempt, end_pairing leaves pairing without dropping the connection."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    client_identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-
-    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-
-    async def display(pairing_code: str | None, **_kwargs: object) -> None:
-        if pairing_code is not None and not shown.done():
-            shown.set_result(pairing_code)
-
-    async def wrong_code() -> str:
-        pairing_code = await shown
-        return "000000" if pairing_code != "000000" else "111111"
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=client_identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=display),
-        )
-        try:
-            await client.connect(url)
-            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            with pytest.raises(PairingAbortError):
-                await conn.initiate_pairing(
-                    PairingAttempt(
-                        method=PairMethod.DYNAMIC_PAIRING_CODE,
-                        pairing_code_provider=wrong_code,
-                        pairing_format=PairingCodeFormat.DIGITS,
-                    )
-                )
-            assert Activity.PAIRING in client.activities
-
-            await server.end_pairing(client_identity.peer_id)
-            await _await_left_pairing(client)
-            assert client.connected
-            assert await client_store.record_by_server_id(server.id) is None
         finally:
             await client.disconnect()
 
@@ -2016,6 +2075,46 @@ async def test_end_pairing_during_attempt_leaves_pairing() -> None:
                 attempt.cancel()
                 with suppress(asyncio.CancelledError, PairingAbortError):
                     await attempt
+            await client.disconnect()
+
+
+async def test_end_pairing_returns_with_roles_restored() -> None:
+    """end_pairing on a quiesced long-term session returns only once its roles are back."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    waiting = asyncio.Event()
+
+    async def provide() -> str:
+        await shown.get()
+        waiting.set()
+        return await asyncio.get_running_loop().create_future()
+
+    client = await _code_pairing_client(
+        identity, client_store, PairMethod.DYNAMIC_PAIRING_CODE, shown
+    )
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            assert _server_active_role_count(server, identity.peer_id) == 1
+            attempt = asyncio.create_task(
+                conn.initiate_pairing(
+                    replace(_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide), verify=True)
+                )
+            )
+            async with asyncio.timeout(5):
+                await waiting.wait()
+            assert _server_active_role_count(server, identity.peer_id) == 0
+
+            await conn.end_pairing()
+            assert _server_active_role_count(server, identity.peer_id) == 1
+            with pytest.raises(PairingAbortError):
+                await attempt
+        finally:
             await client.disconnect()
 
 
@@ -3576,6 +3675,43 @@ async def test_pairing_on_a_long_term_session_quiesces_first() -> None:
             await client.disconnect()
 
 
+@pytest.mark.parametrize("method", _CODE_METHODS)
+async def test_code_re_pairing_on_a_long_term_session_runs_over_the_sentinel(
+    method: PairMethod,
+) -> None:
+    """Code re-pairing on a long-term session runs over the Sentinel PSK."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    old_record = await server_store.record_by_client_id(identity.peer_id)
+    assert old_record is not None
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    categories: list[PskCategory] = []
+
+    async def provide() -> str:
+        code = await shown.get()
+        assert client.noise_psk is not None
+        categories.append(client.noise_psk.category)
+        return code
+
+    client = await _code_pairing_client(identity, client_store, method, shown)
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            await _await_connected_client(server, identity.peer_id)
+            await server.initiate_pairing(identity.peer_id, _code_attempt(method, provide))
+
+            assert categories == [PskCategory.SENTINEL]
+            await _await_paired_session(client)
+            new_record = await server_store.record_by_client_id(identity.peer_id)
+            assert new_record is not None
+            assert new_record.psk != old_record.psk
+        finally:
+            await client.disconnect()
+
+
 async def _await_player_state(conn: SendspinConnection, *, volume: int, muted: bool) -> None:
     async with asyncio.timeout(5):
         while True:
@@ -4515,7 +4651,6 @@ async def test_an_aborted_attempt_off_a_long_term_session_admits_no_playback() -
                         client_id=identity.peer_id,
                     )
                 )
-            await conn.end_pairing()
 
             assert conn._noise_psk is not None  # noqa: SLF001
             assert conn._noise_psk.category is PskCategory.PAIRING  # noqa: SLF001
@@ -4600,7 +4735,6 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
                         pairing_format=PairingCodeFormat.DIGITS,
                     )
                 )
-            await conn.end_pairing()
 
             # Back where trusted-unpaired admits playback, with the record still unusable.
             assert conn._noise_psk.category is PskCategory.SENTINEL  # noqa: SLF001
@@ -4931,7 +5065,7 @@ async def test_rehandshake_reloads_trusted_unpaired_for_the_new_psk() -> None:
             # Once the record is gone, the grant alone admits playback on the Pairing PSK.
             await server_store.remove_record(identity.peer_id)
             conn.forget_credential_mismatch()
-            await conn.end_pairing()
+            await conn.refresh_trusted_unpaired()
             assert conn._playback_capable is True  # noqa: SLF001
             assert _server_active_role_count(server, identity.peer_id) == 1
         finally:

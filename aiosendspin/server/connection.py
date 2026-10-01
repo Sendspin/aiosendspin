@@ -369,6 +369,8 @@ class SendspinConnection:
         self._expects_rehandshake_hellos = False
 
         self._declared_activities: list[Activity] | None = None
+        # Activities of the pairing server/activate, until the next activation replaces it.
+        self._pairing_activities: list[Activity] | None = None
         # Source start commands sent that no client-stream/start has opened a stream for yet.
         # Each is counted: a start crossing a stop or role removal can still open a stream.
         self._source_starts_pending = 0
@@ -435,7 +437,7 @@ class SendspinConnection:
             return False
         reason = self._last_goodbye_reason
         if reason is None:
-            activities = self._declared_activities or []
+            activities = self._pairing_activities or self._declared_activities or []
             return not activities or Activity.PLAYBACK in activities
         return reason is GoodbyeReason.RESTART
 
@@ -1036,7 +1038,7 @@ class SendspinConnection:
 
     @property
     def _pairing_in_progress(self) -> bool:
-        """Whether the connection is in pairing, including between attempts and on connect."""
+        """Whether the connection is in pairing, including on connect."""
         return self._in_pairing or self._pairing_message_queue is not None
 
     async def _establish_transport(
@@ -1605,7 +1607,8 @@ class SendspinConnection:
         An unpaired connection keeps its playback, roles and group during the attempt; a
         long-term paired one leaves playback and its roles first.
 
-        A pair abort raises and leaves the connection for a retry or ``end_pairing``.
+        A pair abort raises after leaving pairing, keeping the connection unless its reason
+        closes it.
         A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
         after leaving pairing, also keeping the connection; so does a Pairing PSK attempt whose
         ``client_id`` is not this connection's, before entering pairing.
@@ -1626,7 +1629,7 @@ class SendspinConnection:
             if self._legacy_hello:
                 await self._pause_writer()
             self._in_pairing = True
-        # Pairing messages arriving between attempts are discarded rather than queued.
+        # Pairing messages arriving outside an attempt are discarded rather than queued.
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_message_queue = queue
         self._pairing_attempt = attempt
@@ -1637,11 +1640,23 @@ class SendspinConnection:
         try:
             if not await task:
                 raise PairingError("pairing failed")
-        except LocalPairingAbortError:
+        except PairingAbortError as exc:
             current_task = asyncio.current_task()
-            if current_task is not None and current_task.cancelling():
+            if (
+                isinstance(exc, LocalPairingAbortError)
+                and current_task is not None
+                and current_task.cancelling()
+            ):
                 # Our own cancellation was forwarded into the child and converted; restore it.
                 raise asyncio.CancelledError from None
+            cancelled = (
+                isinstance(exc, LocalPairingAbortError)
+                and exc.reason is PairAbortReason.USER_CANCELLED
+            )
+            # A cancelled attempt is left by end_pairing or ended by the disconnect.
+            if not cancelled and exc.reason not in CLOSING_ABORT_REASONS:
+                with suppress(Exception):
+                    await self._leave_pairing()
             raise
         except (PairingTimeoutError, InvalidPairingCodeError):
             # A server has no pair/abort reason for its own timeout or a malformed entry:
@@ -1674,7 +1689,7 @@ class SendspinConnection:
 
     async def _leave_pairing(self) -> None:
         """Exit the pairing state, returning the connection to normal service."""
-        if not self._in_pairing:  # a success and a concurrent end_pairing
+        if not self._in_pairing:  # an attempt's end and a concurrent end_pairing
             return
         self._pairing_message_queue = None
         self._in_pairing = False
@@ -1753,9 +1768,15 @@ class SendspinConnection:
                 else ServerActivateMessage(activation_payload)
             )
             await transport.send_str(activation.to_json())
+            self._pairing_activities = activation_payload.activities
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
             if not self._legacy_hello:
                 self._resume_writer()
+                if self._declared_activities is None:
+                    # The first server/activate is due a group/update even while pairing.
+                    assert self._client is not None
+                    group = self._client.group
+                    self.send_message(group._group_update_message())  # noqa: SLF001
             record = await self._run_pairing_protocol(method, transport, pairing_format)
         except asyncio.CancelledError:
             # A cancelled attempt ends like any local abort: the task never reports
@@ -1918,8 +1939,10 @@ class SendspinConnection:
                 psk_id_for(attempt.pairing_psk), attempt.pairing_psk, PskCategory.PAIRING
             )
         else:
-            if self._noise_psk.category in (PskCategory.SENTINEL, PskCategory.LONG_TERM):
-                # Long-term: verification runs over the existing PSK.
+            if self._noise_psk.category is PskCategory.SENTINEL or (
+                self._noise_psk.category is PskCategory.LONG_TERM and attempt.verify
+            ):
+                # Long-term: verification runs over the existing PSK, outside the activity table.
                 # Sentinel: a fresh pairing-code pairing.
                 return True
             target = ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
@@ -1986,6 +2009,7 @@ class SendspinConnection:
         for role in retiring:
             self._discard_role_queue(role)
         self._retiring_roles = retiring
+        self._pairing_activities = None
         try:
             self._client.deactivate_roles(active_roles)
         finally:
@@ -2048,13 +2072,16 @@ class SendspinConnection:
         """Re-read the trusted-unpaired approval and re-activate roles.
 
         During pairing a grant takes effect when pairing ends, and a revocation ends pairing.
+        On connect a revocation also waits for pairing to end.
         """
         if self._noise_psk is None or self._noise_psk.category is PskCategory.LONG_TERM:
             return
-        if self._client is None or self._declared_activities is None:
+        if self._client is None:
             return
         was_trusted = self._trusted_unpaired
         await self._reload_trusted_unpaired()
+        if self._declared_activities is None:
+            return  # The first server/activate reads the reloaded approval.
         if self._in_pairing:
             # A server/activate would cancel the attempt; the one ending pairing carries the change.
             if was_trusted and not self._trusted_unpaired:
