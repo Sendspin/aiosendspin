@@ -803,6 +803,26 @@ class LegacyServerStateClearMessage(ServerMessage):
         return {"type": "server/state", "payload": {self.role: None}}
 
 
+# DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+@dataclass
+class LegacyServerStateMessage(ServerMessage):
+    """
+    Legacy server/state that sends unset metadata and color fields as null.
+
+    Only for clients that merge each role object into the previous one. Never parsed.
+    """
+
+    payload: ServerStatePayload
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Add every unset metadata and color field as null."""
+        payload = d["payload"]
+        for key, model in (("metadata", SessionUpdateMetadata), ("color", SessionUpdateColor)):
+            if isinstance(role_object := payload.get(key), dict):
+                payload[key] = {f.name: None for f in fields(model)} | role_object
+        return {"type": "server/state", "payload": payload}
+
+
 @dataclass
 class ServerStateMessage(ServerMessage):
     """Message sent by the server to send state updates."""

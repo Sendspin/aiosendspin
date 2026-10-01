@@ -763,6 +763,77 @@ async def test_send_message_stream_end_omits_server_transmitted() -> None:
     assert payload == {"roles": ["player"]}
 
 
+def _json_recording_connection() -> tuple[SendspinConnection, MagicMock, list[str]]:
+    server = _DummyServer(loop=asyncio.get_running_loop(), clock=ManualClock())
+    sent: list[str] = []
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=sent.append)
+    return SendspinConnection(server, wsock_client=wsock), wsock, sent
+
+
+# DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+@pytest.mark.parametrize(
+    ("key", "role_object", "expected"),
+    [
+        (
+            "metadata",
+            SessionUpdateMetadata(timestamp=1, title="Song"),
+            {
+                "timestamp": 1,
+                "title": "Song",
+                "artist": None,
+                "album_artist": None,
+                "album": None,
+                "artwork_url": None,
+                "year": None,
+                "track": None,
+                "progress": None,
+            },
+        ),
+        (
+            "color",
+            SessionUpdateColor(timestamp=1, primary=(1, 2, 3)),
+            {
+                "timestamp": 1,
+                "background_dark": None,
+                "background_light": None,
+                "primary": [1, 2, 3],
+                "accent": None,
+                "on_dark": None,
+                "on_light": None,
+            },
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_legacy_connection_gets_unset_state_fields_as_null(
+    key: str,
+    role_object: SessionUpdateColor | SessionUpdateMetadata,
+    expected: dict[str, object],
+) -> None:
+    """A legacy connection, which merges role objects, gets every unset field as null."""
+    conn, wsock, sent = _json_recording_connection()
+    conn._legacy_hello = True  # noqa: SLF001
+
+    await conn._send_message(wsock, _state(**{key: role_object}))  # noqa: SLF001
+
+    assert json.loads(sent[0])["payload"] == {key: expected}
+
+
+@pytest.mark.asyncio
+async def test_current_connection_gets_unset_state_fields_omitted() -> None:
+    """A current-spec connection gets the full role object with unset fields omitted."""
+    conn, wsock, sent = _json_recording_connection()
+    conn._noise_psk = MagicMock()  # noqa: SLF001
+
+    await conn._send_message(  # noqa: SLF001
+        wsock, _state(metadata=SessionUpdateMetadata(timestamp=1, title="Song"))
+    )
+
+    assert json.loads(sent[0])["payload"] == {"metadata": {"timestamp": 1, "title": "Song"}}
+
+
 @pytest.mark.asyncio
 async def test_send_binary_disconnects_on_per_role_queue_overflow() -> None:
     """Per-role queue overflow should trigger disconnect."""

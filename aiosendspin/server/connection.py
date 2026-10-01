@@ -58,6 +58,7 @@ from aiosendspin.models.core import (
     ClientTimeMessage,
     LegacyServerHelloMessage,
     LegacyServerHelloPayload,
+    LegacyServerStateMessage,
     ServerActivateMessage,
     ServerActivatePayload,
     ServerCommandMessage,
@@ -470,6 +471,12 @@ class SendspinConnection:
         the activation-driven discard.
         """
         return not self.is_encrypted or self._legacy_hello
+
+    # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+    @property
+    def clears_state_fields_with_null(self) -> bool:
+        """Whether the client merges each server/state role object and clears a field on null."""
+        return self._legacy_hello
 
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
@@ -2672,6 +2679,9 @@ class SendspinConnection:
         elif isinstance(message, StreamStartMessage | StreamClearMessage):
             # Stamp send time on the dequeued (send-once) payload.
             message.payload.server_transmitted = self._server.clock.now_us()
+        # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+        elif isinstance(message, ServerStateMessage) and self.clears_state_fields_with_null:
+            message = LegacyServerStateMessage(message.payload)
         await wsock.send_str(message.to_json())
 
     async def _send_binary_data(
