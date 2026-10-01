@@ -141,6 +141,7 @@ async def test_expected_server_id_match_passes() -> None:
         psk_id=psk_id_for(psk),
         psk=psk,
         category=PskCategory.LONG_TERM,
+        counterparty_id=server_id.peer_id,
     )
 
     server_ws, client_ws = make_ws_pair()
@@ -499,7 +500,10 @@ async def test_handshake_timeout_aborts() -> None:
         )
 
 
-async def test_client_post_match_check_rejects_wrong_bound_server_id() -> None:
+@pytest.mark.parametrize("bound_to_other_server", [True, False])
+async def test_client_post_match_check_rejects_wrong_bound_server_id(
+    *, bound_to_other_server: bool
+) -> None:
     """A stored-pubkey PSK whose counterparty_id != the connected server_id is rejected.
 
     This is the spec's stored-pubkey post-match check: the PSK record stores the
@@ -514,13 +518,12 @@ async def test_client_post_match_check_rejects_wrong_bound_server_id() -> None:
         category=PskCategory.LONG_TERM,
         counterparty_id=client_id.peer_id,
     )
-    # Client's record claims the PSK belongs to a *different* server.
-    other_server = Identity.generate()
+    # Client's record claims the PSK belongs to a *different* server, or to none.
     client_resolved = ResolvedPsk(
         psk_id=psk_id_for(psk),
         psk=psk,
         category=PskCategory.LONG_TERM,
-        counterparty_id=other_server.peer_id,
+        counterparty_id=Identity.generate().peer_id if bound_to_other_server else None,
     )
 
     server_ws, client_ws = make_ws_pair()
@@ -544,53 +547,6 @@ async def test_client_post_match_check_rejects_wrong_bound_server_id() -> None:
     server_task.cancel()
 
 
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-async def test_shared_psk_record_admits_any_server() -> None:
-    """A shared-PSK record (counterparty_id=None) skips the post-match check.
-
-    The client accepts the advertised server_id at face value, so the handshake
-    completes even though the record is not bound to this server (spec's
-    shared-PSK model).
-    """
-    server_id = Identity.generate()
-    client_id = Identity.generate()
-    psk = generate_psk()
-    psk_id = psk_id_for(psk)
-    server_resolved = ResolvedPsk(
-        psk_id=psk_id,
-        psk=psk,
-        category=PskCategory.LONG_TERM,
-        counterparty_id=client_id.peer_id,
-    )
-    # Shared-PSK record: no bound server_id.
-    client_resolved = ResolvedPsk(
-        psk_id=psk_id,
-        psk=psk,
-        category=PskCategory.LONG_TERM,
-        counterparty_id=None,
-    )
-
-    server_ws, client_ws = make_ws_pair()
-
-    server_result, client_result = await asyncio.gather(
-        run_handshake_server(
-            server_ws,
-            local_identity=server_id,
-            psk_provider=_provider(server_resolved),
-        ),
-        run_handshake_client(
-            client_ws,
-            local_identity=client_id,
-            suite=NoiseCipherSuite.CHACHAPOLY,
-            psk_resolver=_resolver({client_resolved.psk_id: client_resolved}),
-        ),
-    )
-
-    assert client_result.peer_id == server_id.peer_id
-    assert client_result.psk.counterparty_id is None
-    assert server_result.psk.psk == client_result.psk.psk
-
-
 async def test_psk_mismatch_after_lookup_aborts_initiator() -> None:
     """Responder returning a wrong PSK causes the initiator's msg2 AEAD to fail."""
     server_id = Identity.generate()
@@ -607,6 +563,7 @@ async def test_psk_mismatch_after_lookup_aborts_initiator() -> None:
         psk_id=psk_id_for(real_psk),
         psk=wrong_psk,
         category=PskCategory.LONG_TERM,
+        counterparty_id=server_id.peer_id,
     )
 
     server_ws, client_ws = make_ws_pair()

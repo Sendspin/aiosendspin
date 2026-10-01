@@ -665,8 +665,7 @@ async def _finalize_client(
         on_finalize()
     await ws.send_str(ClientPairFinalizeMessage(payload=payload).to_json())
     await _receive_pairing(ws, ServerPairFinalizeMessage)
-    if record is not None:
-        await store.replace_record_for_server_id(record, protected=protected_psk_ids())
+    await store.replace_record_for_server_id(record, protected=protected_psk_ids())
 
 
 async def _finalize_server(

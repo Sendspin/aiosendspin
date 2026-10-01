@@ -1893,15 +1893,10 @@ class SendspinConnection:
         return True
 
     async def _handle_unpair(self) -> None:
-        """Handle server/unpair: drop the matched record (unless shared) and close."""
+        """Handle server/unpair: drop the matched record and close."""
         if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
             return  # Not a long-term session (pairing / unpaired): ignore and continue.
-        store = self._client.pairing_store
-        record = await store.record_by_psk_id(self._noise_psk.psk_id)
-        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-        # The server_id check skips shared record-mode records.
-        if record is not None and record.server_id is not None:
-            await store.remove_record(record.psk_id)
+        await self._client.pairing_store.remove_record(self._noise_psk.psk_id)
         await self.goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
 
     def _configure_audio_output(self, audio_format: AudioFormat) -> None:
