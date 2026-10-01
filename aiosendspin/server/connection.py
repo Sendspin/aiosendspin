@@ -387,6 +387,7 @@ class SendspinConnection:
         self._disconnecting = False
 
         self._initial_state_received = False
+        self._client_state_received = False
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
         self._activation_state_timeout_handle: asyncio.TimerHandle | None = None
         # Binary held while a role that receives binary awaits the initial client/state.
@@ -2548,7 +2549,7 @@ class SendspinConnection:
 
         # Applied before the initial state joins the stream, which must see this availability.
         if payload.available is not None and payload.available != self._client.available:
-            if is_initial:
+            if is_initial or not self._client_state_received:
                 # The state a connection opens with is not a change: a client still
                 # syncing its clock reports unavailable and keeps its group.
                 await self._client.set_availability(available=payload.available)
@@ -2563,6 +2564,7 @@ class SendspinConnection:
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
             self._flush_pending_binary()
+        self._client_state_received = True
 
         for role in self._client.active_roles:
             role.on_client_state(payload)
