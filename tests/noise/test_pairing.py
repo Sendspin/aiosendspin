@@ -28,6 +28,8 @@ from aiosendspin.noise.models import (
     ClientPairPendingMessage,
     ClientPairPendingPayload,
     ClientPairRetryMessage,
+    PairAbortMessage,
+    PairAbortPayload,
     ServerPairAuthMessage,
     ServerPairAuthPayload,
     ServerPairConfirmMessage,
@@ -43,6 +45,7 @@ from aiosendspin.noise.pairing import (
     PairingAttempt,
     PairingError,
     PairingTimeoutError,
+    RemotePairingAbortError,
     _legacy_pake_sid,
     _legacy_pin_digits,
     _pake_sid,
@@ -577,6 +580,53 @@ async def test_dynamic_pairing_code_server_times_out_mid_attempt(
     await client_ews.receive()  # server/pair-init
     await client_ews.receive()  # server/pair-auth
     assert client_raw.incoming.qsize() == 0
+
+
+@pytest.mark.parametrize(
+    "method", [PairMethod.STATIC_PAIRING_CODE, PairMethod.DYNAMIC_PAIRING_CODE]
+)
+async def test_code_server_ends_on_client_abort_without_a_code(method: PairMethod) -> None:
+    """A client pair/abort during the code wait ends the attempt and cancels the provider."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    pairing_code_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    commit_b = (
+        b64url_encode(pairing_code_mod.commit(pairing_code_mod.generate_nonce()))
+        if method is PairMethod.DYNAMIC_PAIRING_CODE
+        else None
+    )
+    await client_ews.send_str(
+        ClientPairInitMessage(
+            payload=ClientPairInitPayload(pairing_index=0, commit_B=commit_b),
+        ).to_json(),
+    )
+    await client_ews.send_str(
+        PairAbortMessage(payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED)).to_json()
+    )
+    server = (
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_code_provider=lambda: pairing_code_future,
+            pairing_format=PairingCodeFormat.DIGITS,
+            client_id="client-X",
+            store=server_store,
+        )
+        if method is PairMethod.DYNAMIC_PAIRING_CODE
+        else run_static_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_code_provider=lambda: pairing_code_future,
+            client_id="client-X",
+            store=server_store,
+        )
+    )
+    with pytest.raises(RemotePairingAbortError) as excinfo:
+        await server
+    assert excinfo.value.reason is PairAbortReason.USER_CANCELLED
+    assert pairing_code_future.cancelled()
 
 
 async def test_finalize_rotate_preserves_birth_and_appends_method() -> None:
