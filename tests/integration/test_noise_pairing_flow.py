@@ -51,6 +51,10 @@ from aiosendspin.noise.constants import MSG_TYPE_JSON_BODY
 from aiosendspin.noise.driver import HandshakeAbortedError, InitRejectedError
 from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
+    ClientPairAuthMessage,
+    ClientPairAuthPayload,
+    ClientPairConfirmMessage,
+    ClientPairConfirmPayload,
     ClientPairFinalizeMessage,
     ClientPairFinalizePayload,
     ClientPairInitMessage,
@@ -91,6 +95,7 @@ from aiosendspin.server.server import (
 from tests.conftest import make_sdk_client
 
 if TYPE_CHECKING:
+    from aiosendspin.noise.models import PairingMessage
     from aiosendspin.noise.trust_store import ClientPairingStore
 
 
@@ -1593,6 +1598,83 @@ async def test_pair_retry_in_flight_does_not_fail_the_next_attempt() -> None:
             assert client.connected
             assert client.noise_psk is not None
             assert client.noise_psk.category is PskCategory.LONG_TERM
+        finally:
+            await client.disconnect()
+
+
+_LEFTOVER_AUTH = ClientPairAuthMessage(
+    payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(bytes(32)))
+)
+_LEFTOVER_CONFIRM = ClientPairConfirmMessage(
+    payload=ClientPairConfirmPayload(client_kc=b64url_encode(bytes(64)))
+)
+_LEFTOVER_FINALIZE = ClientPairFinalizeMessage(
+    payload=ClientPairFinalizePayload(wrapped_psk=b64url_encode(bytes(48)))
+)
+
+
+@pytest.mark.parametrize(
+    ("method", "leftover"),
+    [
+        pytest.param(PairMethod.DYNAMIC_PAIRING_CODE, _LEFTOVER_AUTH, id="code_auth"),
+        pytest.param(PairMethod.DYNAMIC_PAIRING_CODE, _LEFTOVER_CONFIRM, id="code_confirm"),
+        pytest.param(PairMethod.DYNAMIC_PAIRING_CODE, _LEFTOVER_FINALIZE, id="code_finalize"),
+        pytest.param(PairMethod.PAIRING_PSK, _LEFTOVER_AUTH, id="psk_auth"),
+        pytest.param(PairMethod.PAIRING_PSK, _LEFTOVER_CONFIRM, id="psk_confirm"),
+    ],
+)
+async def test_cancelled_code_attempt_message_in_flight_does_not_fail_the_next_attempt(
+    method: PairMethod, leftover: PairingMessage
+) -> None:
+    """A code attempt's message sent before the client saw the cancel is discarded by the next."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        if pairing_code is not None:
+            shown.put_nowait(pairing_code)
+
+    async def provide() -> str:
+        return await shown.get()
+
+    if method is PairMethod.PAIRING_PSK:
+        pairing = generate_psk()
+        await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+        client_flow = "run_pairing_psk_client"
+        attempt = PairingAttempt(
+            method=method, pairing_psk=pairing, client_id=client_identity.peer_id
+        )
+    else:
+        client_flow = "run_dynamic_pairing_code_client"
+        attempt = _code_attempt(method, provide)
+    run_client = getattr(client_connection_module, client_flow)
+
+    async def client_with_leftover_in_flight(ws: EncryptedWebSocket, **kwargs: Any) -> Any:
+        # The cancelled attempt's message reaches the server after its next pairing activate.
+        await ws.send_str(leftover.to_json())
+        return await run_client(ws, **kwargs)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            with patch.object(
+                client_connection_module, client_flow, client_with_leftover_in_flight
+            ):
+                await server.initiate_pairing(client_identity.peer_id, attempt)
+            await _await_long_term_record(client_store, server.id)
+            assert client.connected
+            assert await server_store.record_by_client_id(client_identity.peer_id) is not None
         finally:
             await client.disconnect()
 

@@ -227,27 +227,22 @@ async def run_pairing_psk_server(
     """Run the server side of the Pairing PSK flow.
 
     ``on_pair_init`` is called for every ``client/pair-init`` received, whatever its index.
-    ``client/pair-finalize`` and ``client/pair-retry`` messages preceding the matching
-    ``client/pair-init`` are discarded as leftovers, except that with ``on_legacy_finalize``
-    set, a finalize carrying only ``long_term_psk`` and arriving before any
-    ``client/pair-init`` is accepted as this attempt's unless it raises.
+    ``client/pair-auth``, ``client/pair-confirm``, ``client/pair-finalize`` and
+    ``client/pair-retry`` messages preceding the matching ``client/pair-init`` are discarded as
+    leftovers, except that with ``on_legacy_finalize`` set, a finalize carrying only
+    ``long_term_psk`` and arriving before any ``client/pair-init`` is accepted as this attempt's
+    unless it raises.
     """
     finalize: ClientPairFinalizeMessage | None = None
     pair_init_seen = False
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
+            # Pairing-code exchange messages are leftovers from a superseded attempt.
             message = await _receive_pairing(
                 ws,
-                (
-                    ClientPairInitMessage,
-                    ClientPairPendingMessage,
-                    ClientPairFinalizeMessage,
-                    ClientPairRetryMessage,
-                ),
+                (ClientPairInitMessage, ClientPairPendingMessage, ClientPairFinalizeMessage),
+                discard=(ClientPairAuthMessage, ClientPairConfirmMessage, ClientPairRetryMessage),
             )
-            if isinstance(message, ClientPairRetryMessage):
-                # A leftover from a superseded dynamic-pairing-code attempt: discard silently.
-                continue
             if isinstance(message, ClientPairFinalizeMessage):
                 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
                 if (
@@ -791,51 +786,57 @@ async def abort_pairing(ws: EncryptedWebSocket, reason: PairAbortReason) -> NoRe
 
 
 @overload
-async def _receive_pairing[T: PairingMessage](ws: EncryptedWebSocket, expected: type[T]) -> T: ...
+async def _receive_pairing[T: PairingMessage](
+    ws: EncryptedWebSocket,
+    expected: type[T],
+    *,
+    discard: tuple[type[PairingMessage], ...] = (),
+) -> T: ...
 
 
 @overload
 async def _receive_pairing[T: PairingMessage, U: PairingMessage](
-    ws: EncryptedWebSocket, expected: tuple[type[T], type[U]]
+    ws: EncryptedWebSocket,
+    expected: tuple[type[T], type[U]],
+    *,
+    discard: tuple[type[PairingMessage], ...] = (),
 ) -> T | U: ...
 
 
 @overload
 async def _receive_pairing[T: PairingMessage, U: PairingMessage, V: PairingMessage](
-    ws: EncryptedWebSocket, expected: tuple[type[T], type[U], type[V]]
+    ws: EncryptedWebSocket,
+    expected: tuple[type[T], type[U], type[V]],
+    *,
+    discard: tuple[type[PairingMessage], ...] = (),
 ) -> T | U | V: ...
-
-
-@overload
-async def _receive_pairing[
-    T: PairingMessage,
-    U: PairingMessage,
-    V: PairingMessage,
-    W: PairingMessage,
-](ws: EncryptedWebSocket, expected: tuple[type[T], type[U], type[V], type[W]]) -> T | U | V | W: ...
 
 
 async def _receive_pairing(
     ws: EncryptedWebSocket,
     expected: type[PairingMessage]
     | tuple[type[PairingMessage], type[PairingMessage]]
-    | tuple[type[PairingMessage], type[PairingMessage], type[PairingMessage]]
-    | tuple[type[PairingMessage], type[PairingMessage], type[PairingMessage], type[PairingMessage]],
+    | tuple[type[PairingMessage], type[PairingMessage], type[PairingMessage]],
+    *,
+    discard: tuple[type[PairingMessage], ...] = (),
 ) -> PairingMessage:
-    """Receive the next pairing frame, requiring it to be of an ``expected`` type."""
+    """Receive the next pairing frame not of a ``discard`` type, requiring an ``expected`` type."""
     kinds = expected if isinstance(expected, tuple) else (expected,)
     expected_names = _expected_names(expected)
-    msg = await ws.receive()
-    if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-        raise PairingError(f"connection closed while awaiting {expected_names}")
-    if msg.type is not WSMsgType.TEXT:
-        raise PairingError(f"expected a JSON frame ({expected_names}), got {msg.type.name}")
-    try:
-        message = PairingMessage.from_json(cast("str", msg.data))
-    except (ValueError, LookupError) as exc:
-        raise PairingError(f"malformed message awaiting {expected_names}") from exc
-    if isinstance(message, PairAbortMessage):
-        raise RemotePairingAbortError(message.payload.reason)
+    while True:
+        msg = await ws.receive()
+        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+            raise PairingError(f"connection closed while awaiting {expected_names}")
+        if msg.type is not WSMsgType.TEXT:
+            raise PairingError(f"expected a JSON frame ({expected_names}), got {msg.type.name}")
+        try:
+            message = PairingMessage.from_json(cast("str", msg.data))
+        except (ValueError, LookupError) as exc:
+            raise PairingError(f"malformed message awaiting {expected_names}") from exc
+        if isinstance(message, PairAbortMessage):
+            raise RemotePairingAbortError(message.payload.reason)
+        if not isinstance(message, discard):
+            break
     if not isinstance(message, kinds):
         raise PairingError(f"expected {expected_names}, got {type(message).__name__}")
     return message
@@ -865,16 +866,22 @@ async def _receive_pair_init(
     """Receive this attempt's ``client/pair-init``.
 
     It allows one gesture-extending ``client/pair-pending``.
-    It also discards any leftover pair-init/pair-pending/pair-retry from a superseded attempt.
+    It also discards any leftover pair-init/pair-pending/pair-auth/pair-confirm/pair-finalize/
+    pair-retry from a superseded attempt.
     """
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
+            # Messages without a pairing_index are leftovers from a superseded attempt.
             message = await _receive_pairing(
-                ws, (ClientPairInitMessage, ClientPairPendingMessage, ClientPairRetryMessage)
+                ws,
+                (ClientPairInitMessage, ClientPairPendingMessage),
+                discard=(
+                    ClientPairAuthMessage,
+                    ClientPairConfirmMessage,
+                    ClientPairFinalizeMessage,
+                    ClientPairRetryMessage,
+                ),
             )
-            if isinstance(message, ClientPairRetryMessage):
-                # A leftover from a superseded attempt: discard silently.
-                continue
             if message.payload.pairing_index > pairing_index:
                 raise PairingError(
                     f"{type(message).__name__} pairing_index is ahead of the server's count"
