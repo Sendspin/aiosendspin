@@ -21,7 +21,13 @@ from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
 from tests.server.test_group_add_client import _DummyConnection, _DummyServer, _make_player
 from tests.server.test_group_add_client import _hello as _owner_hello
-from tests.server.test_role_activation import _PLAYER_STATE, _client, _connect, _hello
+from tests.server.test_role_activation import (
+    _PLAYER_STATE,
+    _client,
+    _connect,
+    _hello,
+    _set_trusted,
+)
 
 _FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
@@ -231,6 +237,31 @@ async def test_initial_unavailable_state_leaves_a_solo_group_playing(
         lambda _client_id: False,
         raising=False,
     )
+    group = _client(conn).group
+    stream = group.start_stream()
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, player=_PLAYER_STATE)
+    )
+
+    assert not _client(conn).available
+    assert group.state == PlaybackStateType.PLAYING
+    stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_first_state_after_roles_activate_leaves_a_solo_group_playing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first available: false on a connection opened without roles keeps its group playing."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), trusted=False)
+    monkeypatch.setattr(
+        conn._server,  # noqa: SLF001
+        "request_client_playback_connection",
+        lambda _client_id: False,
+        raising=False,
+    )
+    await _set_trusted(conn, trusted=True)
     group = _client(conn).group
     stream = group.start_stream()
 

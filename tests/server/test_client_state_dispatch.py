@@ -54,7 +54,7 @@ class _DummyServer:
 
 @pytest.mark.asyncio
 async def test_available_false_drives_external_source_transition() -> None:
-    """A new client's `available: false` must trigger the external-source transition."""
+    """A later `available: false` must trigger the external-source transition."""
     loop = asyncio.get_running_loop()
     conn = SendspinConnection(
         _DummyServer(loop=loop, clock=LoopClock(loop)), wsock_client=MagicMock()
@@ -66,6 +66,7 @@ async def test_available_false_drives_external_source_transition() -> None:
     client.active_roles = []
     conn._client = client  # noqa: SLF001
     conn._initial_state_received = True  # noqa: SLF001
+    conn._client_state_received = True  # noqa: SLF001
 
     await conn._handle_message(  # noqa: SLF001
         ClientStateMessage(payload=ClientStatePayload(available=False)), timestamp_us=0
@@ -556,6 +557,7 @@ async def test_unrecognized_player_command_is_flagged_and_state_still_applies() 
     """An unrecognized player command is dropped and flagged; the rest of the state applies."""
     conn, client = _conn_with_client()
     conn._initial_state_received = True  # noqa: SLF001
+    conn._client_state_received = True  # noqa: SLF001
     client.available = True
     client.handle_availability_change = AsyncMock()
     role = _role("player")
