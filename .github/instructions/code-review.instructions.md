@@ -22,6 +22,21 @@ Review all code changes for:
 - Test coverage
 - Documentation updates if needed
 
+## Specification
+This library implements the [Sendspin spec](https://github.com/Sendspin/spec). When a PR changes protocol behavior (messages, fields, handshake, pairing, timing, or role behavior), read the matching spec file before reviewing: `connection.md`, `pairing.md`, `messaging.md`, or `roles/<family>/v1.md`. If the PR links a spec PR, review against that spec PR instead.
+- A message the library sends, or a field it requires, that differs from the spec is a `[CRITICAL]`.
+- Dropping support for a field the spec renamed or removed, instead of accepting it through `flag_noncompliance`, is a `[PROBLEM]`.
+- Optional spec features the client library does not use yet are not issues.
+
+## Linked Issues
+If the PR references an issue, read it first. Flag as `[CRITICAL]` when the change leaves part of the issue unaddressed, and as `[PROBLEM]` when it patches a symptom or fixes it at the wrong layer.
+
+## Public API
+Other projects use this library. Flag as `[PROBLEM]` any removed or renamed public symbol, changed signature, or new abstract method on a store that the PR does not call out as breaking. Flag as `[PROBLEM]` features that only make sense for one consumer.
+
+## Existing Review Comments
+Flag earlier review comments on the PR that have not been addressed.
+
 ## PR Title
 The PR title must be a functional description of the change. It must NOT contain conventional commit prefixes such as `feat:`, `fix:`, `refactor:`, `chore:`, etc. Labels are used to categorize PRs, not the title. Flag as `[PROBLEM]` if the title uses such prefixes.
 
@@ -65,6 +80,10 @@ Categorize every issue found as one of:
 
 Example:
 This could generate a `KeyError` if `"name"` does not exist in the `dict`. Consider using `.get("name")` or adding a check.
+
+## Avoid These False Positives
+* Do not report a race unless there is an `await` between the check and the change. Code without an `await` runs without interruption in asyncio.
+* Do not report valid Python 3.12 syntax as an error, such as `type X = ...` aliases, `def f[T](...)` type parameters, and nested f-strings.
 
 ## When to Stay Silent
 If you're uncertain whether something is an issue, don't comment.
