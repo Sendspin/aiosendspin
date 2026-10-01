@@ -14,6 +14,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 from aiosendspin.models.types import PairAbortReason, PairingCodeFormat, PairMethod
+from aiosendspin.util import finish_despite_cancel
 
 from . import pairing_code as pairing_code_mod
 from .keys import PSK_SIZE, b64url_decode, b64url_encode, psk_id_for
@@ -60,6 +61,7 @@ _NONCE_WRAP_LABEL = b"sendspin-pair-nonce-wrap-v1"
 _WRAP_NONCE = bytes(12)  # zero nonce is safe: each wrap key is per-field and used once
 _AEAD_TAG_SIZE = 16
 _CLIENT_ATTEMPT_TIMEOUT_S: float = 120.0
+_SERVER_FINALIZE_TIMEOUT_S: float = 30.0
 # Server bounds raise PairingTimeoutError, sending no pairing message: no pair/abort reason is
 # available to a server for its own timeout. They exceed the client's attempt timeout so the
 # client's in-band abort wins when both sides are live.
@@ -76,7 +78,7 @@ class PairingError(Exception):
 
 
 class PairingTimeoutError(PairingError):
-    """A server-side bound on waiting for a client pairing message expired."""
+    """A server-side bound on waiting for a client pairing message or storing its record expired."""
 
 
 class InvalidPairingCodeError(PairingError):
@@ -96,7 +98,7 @@ class PairingAbortError(PairingError):
 
 
 class LocalPairingAbortError(PairingAbortError):
-    """This side aborted the pairing and sent the ``pair/abort``."""
+    """This side aborted the pairing, sending ``pair/abort`` if the client saw the attempt."""
 
 
 class RemotePairingAbortError(PairingAbortError):
@@ -672,30 +674,60 @@ async def _finalize_server(
     """
     if finalize is None:
         finalize = await _receive_pairing(ws, ClientPairFinalizeMessage)
-    existing = await store.record_by_client_id(client_id)
-    record = existing.with_method(method) if existing is not None else None
-    if not verify:
-        psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
-        if record is None:
-            record = ServerPairingRecord(
-                psk_id=psk_id_for(psk),
-                psk=psk,
-                client_id=client_id,
-                pair_methods=[method],
-                owner=owner,
-            )
-        else:
-            # Ownership tracks the latest authorization that minted the credential.
-            record = replace(record, psk_id=psk_id_for(psk), psk=psk, owner=owner)
-    if record is not None and record is not existing:
-        await store.store_record(record)  # persist before acking
-    if verify:
-        return None
-    # The new record supersedes the client's lesser grants.
-    await store.unstage_pairing_psk(client_id)
-    await store.remove_trusted_unpaired(client_id)
-    await ws.send_str(ServerPairFinalizeMessage().to_json())
+    # The client has finalized, so a cancel from here on completes the attempt.
+    record, _ = await finish_despite_cancel(
+        _commit_finalize(
+            ws,
+            finalize,
+            client_id=client_id,
+            store=store,
+            method=method,
+            verify=verify,
+            wrap_key=wrap_key,
+            owner=owner,
+        )
+    )
     return record
+
+
+async def _commit_finalize(
+    ws: EncryptedWebSocket,
+    finalize: ClientPairFinalizeMessage,
+    *,
+    client_id: str,
+    store: ServerPairingStore,
+    method: PairMethod,
+    verify: bool,
+    wrap_key: bytes | None,
+    owner: str | None,
+) -> ServerPairingRecord | None:
+    """Store the record ``finalize`` carries and acknowledge it unless verifying."""
+    # Bounded here, since the caller's timeout and cancels cannot interrupt this step.
+    async with _server_timeout(_SERVER_FINALIZE_TIMEOUT_S, "completion of the pairing finalize"):
+        existing = await store.record_by_client_id(client_id)
+        record = existing.with_method(method) if existing is not None else None
+        if not verify:
+            psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
+            if record is None:
+                record = ServerPairingRecord(
+                    psk_id=psk_id_for(psk),
+                    psk=psk,
+                    client_id=client_id,
+                    pair_methods=[method],
+                    owner=owner,
+                )
+            else:
+                # Ownership tracks the latest authorization that minted the credential.
+                record = replace(record, psk_id=psk_id_for(psk), psk=psk, owner=owner)
+        if record is not None and record is not existing:
+            await store.store_record(record)  # persist before acking
+        if verify:
+            return None
+        # The new record supersedes the client's lesser grants.
+        await store.unstage_pairing_psk(client_id)
+        await store.remove_trusted_unpaired(client_id)
+        await ws.send_str(ServerPairFinalizeMessage().to_json())
+        return record
 
 
 def _unwrap_psk(

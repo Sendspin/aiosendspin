@@ -143,7 +143,7 @@ from aiosendspin.noise.pairing import (
 )
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import create_task, warn_deprecated
+from aiosendspin.util import create_task, finish_despite_cancel, warn_deprecated
 
 from .client import SendspinClient
 from .compliance import ClientComplianceError, describe_client, noncompliance_subject
@@ -809,9 +809,12 @@ class SendspinConnection:
         self._cancel_activation_state_timeout()
 
         if self._pairing_task and not self._pairing_task.done():
+            if self._pairing_message_queue is not None:
+                # Fails a re-handshake the cancel would otherwise wait out.
+                self._pairing_message_queue.put_nowait(WSMessage(WSMsgType.CLOSE, None, ""))
             # Ends like end_pairing: the attempt aborts instead of waiting out its timeout.
             self._pairing_task.cancel()
-            with suppress(PairingError, OSError, asyncio.CancelledError):
+            with suppress(PairingError, HandshakeAbortedError, OSError, asyncio.CancelledError):
                 await self._pairing_task
         if self._writer_task and not self._writer_task.done():
             self._writer_task.cancel()
@@ -1040,8 +1043,8 @@ class SendspinConnection:
         in transition mode, it is accepted unencrypted (the raw socket is the transport,
         and the frame is held for the message loop). Every other TEXT first frame runs
         the Noise initiator handshake and yields an encrypted transport; one that is not
-        a valid ``client/init`` is answered with ``server/error``. Handshake failures
-        raise ``HandshakeAbortedError``.
+        a valid ``client/init`` is answered with ``server/error``. Handshake failures, and a
+        pairing dial the client lacks the Pairing PSK for, raise ``HandshakeAbortedError``.
         """
         first_text = await receive_text_frame(raw, what="first frame")
         if self._peek_message_type(first_text) == "client/hello":
@@ -1063,6 +1066,10 @@ class SendspinConnection:
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         self._logger = logger.getChild(result.peer_id)
+        if result.credential_mismatch and self._pairing_attempt is not None:
+            # Close so the reconnect, which carries no attempt, can use a record this server holds.
+            self._logger.warning("Client lacks the attempt's Pairing PSK, reconnecting without it")
+            raise HandshakeAbortedError("client does not hold the attempt's Pairing PSK")
         self._credential_mismatch = result.credential_mismatch and await self._holds_record(
             result.peer_id
         )
@@ -1685,8 +1692,15 @@ class SendspinConnection:
     async def _pair(self, transport: EncryptedWebSocket) -> bool:
         """Run the pairing exchange."""
         try:
-            if not await self._rehandshake_for_pairing_if_needed(transport):
+            rekeyed, cancelled = await finish_despite_cancel(
+                self._rehandshake_for_pairing_if_needed(transport)
+            )
+            if not rekeyed:
                 return False
+            if cancelled:
+                # The client saw no attempt yet, so leave pairing without a pair/abort.
+                await self._leave_pairing()
+                raise LocalPairingAbortError(PairAbortReason.USER_CANCELLED)
             method = (
                 self._pairing_attempt.method
                 if self._pairing_attempt is not None
@@ -1740,12 +1754,11 @@ class SendspinConnection:
         self.forget_credential_mismatch()
         # The client finalized, so the attempt has succeeded and both sides hold the record:
         # a late cancel must not abort it or corrupt the re-handshake. Complete the tail and
-        # report the success; the one absorbed cancel ends with the pairing in effect.
-        rehandshake = create_task(self._rehandshake_to(transport, record.as_resolved()))
-        try:
-            return await asyncio.shield(rehandshake)
-        except asyncio.CancelledError:
-            return await rehandshake
+        # report the success. An absorbed cancel ends with the pairing in effect.
+        accepted, _ = await finish_despite_cancel(
+            self._rehandshake_to(transport, record.as_resolved())
+        )
+        return accepted
 
     def _pairing_activation(self, pairing: ActivatePairing) -> ServerActivatePayload:
         """Build the ``server/activate`` admitting an attempt.
@@ -1926,6 +1939,9 @@ class SendspinConnection:
         """Send ``server/activate``, reconcile the client's active roles, and resume the writer."""
         assert self._transport is not None
         await self._pause_writer()
+        # Messages queued while the writer was stopped (a re-handshake) follow the activation.
+        held = self._priority_messages.copy()
+        self._priority_messages.clear()
         if self._declared_activities is None:
             self._declared_activities = self._initial_activities
             if self._url is not None:
@@ -1933,6 +1949,7 @@ class SendspinConnection:
         else:
             self._declared_activities = self._desired_activities
         self._send_activation(self._roles_to_activate)
+        self._priority_messages.extend(held)
         # The writer is paused here, so put the queued activation on the wire now.
         while await self._process_priority_messages(self._transport):
             pass

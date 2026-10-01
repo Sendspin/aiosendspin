@@ -26,8 +26,11 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientStatePayload,
+    ClientTimeMessage,
+    ClientTimePayload,
     ServerActivatePayload,
     ServerHelloMessage,
+    ServerTimeMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
@@ -44,7 +47,8 @@ from aiosendspin.models.types import (
     TrustLevel,
 )
 from aiosendspin.noise import pairing as pairing_module
-from aiosendspin.noise.driver import InitRejectedError
+from aiosendspin.noise.constants import MSG_TYPE_JSON_BODY
+from aiosendspin.noise.driver import HandshakeAbortedError, InitRejectedError
 from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
     ClientPairFinalizeMessage,
@@ -73,7 +77,9 @@ from aiosendspin.noise.trust_store import (
     StagedPairingPsk,
     TrustedUnpairedClient,
 )
+from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server import connection as connection_module
+from aiosendspin.server import server as server_module
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
@@ -86,7 +92,6 @@ from tests.conftest import make_sdk_client
 
 if TYPE_CHECKING:
     from aiosendspin.noise.trust_store import ClientPairingStore
-    from aiosendspin.noise.wire import EncryptedWebSocket
 
 
 def _make_server(
@@ -2253,6 +2258,238 @@ async def test_success_rehandshake_handles_client_messages_sent_before_message_1
             await client.disconnect()
 
 
+def _track_sends_across_rekeys(conn: SendspinConnection) -> list[str]:
+    """Record the type of each JSON message ``conn`` sends, with ``<rekey>`` at each key swap."""
+    transport = conn._transport  # noqa: SLF001
+    assert isinstance(transport, EncryptedWebSocket)
+    sent: list[str] = []
+    send_plaintext = transport._send_plaintext  # noqa: SLF001
+    swap_session = transport.swap_session
+
+    async def tracking_send(plaintext: bytes) -> None:
+        if plaintext[0] == MSG_TYPE_JSON_BODY:
+            sent.append(json.loads(plaintext[1:])["type"])
+        await send_plaintext(plaintext)
+
+    def tracking_swap(session: Any) -> None:
+        swap_session(session)
+        sent.append("<rekey>")
+
+    transport._send_plaintext = tracking_send  # type: ignore[method-assign]  # noqa: SLF001
+    transport.swap_session = tracking_swap  # type: ignore[method-assign]
+    return sent
+
+
+async def _pairing_psk_client(
+    identity: Identity, store: InMemoryClientPairingStore
+) -> tuple[SdkClient, PairingAttempt]:
+    """Build a client and a Pairing PSK attempt for the PSK it holds."""
+    client = make_sdk_client(
+        identity=identity, pairing_store=store, client_name="c", roles=[Roles.CONTROLLER]
+    )
+    pairing = generate_psk()
+    await store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+    )
+    return client, attempt
+
+
+async def test_activation_is_first_under_new_keys_despite_queued_replies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server/time reply queued during a re-handshake goes out after the new server/activate."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    client, attempt = await _pairing_psk_client(client_identity, client_store)
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            client_ws = client._admitted_connection._ws  # noqa: SLF001
+            assert client_ws is not None
+            sent = _track_sends_across_rekeys(conn)
+
+            time_reply_queued = asyncio.Event()
+            queue_priority = conn.send_priority_message
+
+            def tracking_queue(message: ServerMessage | bytes) -> None:
+                queue_priority(message)
+                if isinstance(message, ServerTimeMessage):
+                    time_reply_queued.set()
+
+            conn.send_priority_message = tracking_queue  # type: ignore[method-assign]
+            rehandshake = connection_module.run_rehandshake_server
+
+            async def rehandshake_after_client_time(*args: Any, **kwargs: Any) -> Any:
+                # The client sends client/time under the old keys before it sees message 1.
+                time_reply_queued.clear()
+                await client_ws.send_str(
+                    ClientTimeMessage(payload=ClientTimePayload(client_transmitted=1)).to_json()
+                )
+                await time_reply_queued.wait()
+                return await rehandshake(*args, **kwargs)
+
+            monkeypatch.setattr(
+                connection_module, "run_rehandshake_server", rehandshake_after_client_time
+            )
+            await conn.initiate_pairing(attempt)
+
+            after_rekeys = [sent[i + 1] for i, kind in enumerate(sent) if kind == "<rekey>"]
+            assert after_rekeys == ["server/activate", "server/activate"]
+            assert "server/time" in sent
+            assert conn.psk_category is PskCategory.LONG_TERM
+        finally:
+            await client.disconnect()
+
+
+async def _end_pairing_twice(server: SendspinServer, client_id: str) -> list[asyncio.Future[None]]:
+    """Start two end_pairing calls, the second once the attempt has absorbed the first cancel."""
+    first = asyncio.ensure_future(server.end_pairing(client_id))
+    for _ in range(3):
+        await asyncio.sleep(0)  # two cancels before the attempt task runs would merge into one
+    second = asyncio.ensure_future(server.end_pairing(client_id))
+    await asyncio.sleep(0)  # let the second end_pairing cancel the attempt task
+    return [first, second]
+
+
+def _hold_rehandshake_message_2(conn: SendspinConnection) -> tuple[list[Any], asyncio.Event]:
+    """Keep the next Noise message 2 from reaching ``conn``'s pairing attempt."""
+    held: list[Any] = []
+    message_2_held = asyncio.Event()
+    route = conn._try_route_to_pairing_queue  # noqa: SLF001
+
+    def holding_route(msg: Any) -> bool:
+        if (
+            not held
+            and msg.type is WSMsgType.TEXT
+            and json.loads(msg.data)["type"] == "noise/handshake"
+        ):
+            held.append(msg)
+            message_2_held.set()
+            return True
+        return route(msg)
+
+    conn._try_route_to_pairing_queue = holding_route  # type: ignore[method-assign]  # noqa: SLF001
+    return held, message_2_held
+
+
+@pytest.mark.parametrize("via_end_pairing", [True, False])
+async def test_cancel_during_opening_rehandshake_keeps_the_connection(
+    via_end_pairing: bool,  # noqa: FBT001
+) -> None:
+    """A cancel or repeated end_pairing during the re-key finishes it, then leaves pairing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    client, attempt = await _pairing_psk_client(client_identity, client_store)
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            sent = _track_sends_across_rekeys(conn)
+            held, message_2_held = _hold_rehandshake_message_2(conn)
+            pairing = asyncio.ensure_future(conn.initiate_pairing(attempt))
+            await message_2_held.wait()
+            queue = conn._pairing_message_queue  # noqa: SLF001
+            assert queue is not None
+
+            if via_end_pairing:
+                ends = await _end_pairing_twice(server, client_identity.peer_id)
+                queue.put_nowait(held[0])
+                await asyncio.gather(*ends)
+                with pytest.raises(PairingAbortError) as excinfo:
+                    await pairing
+                assert excinfo.value.reason is PairAbortReason.USER_CANCELLED
+            else:
+                pairing.cancel()
+                queue.put_nowait(held[0])
+                with pytest.raises(asyncio.CancelledError):
+                    await pairing
+
+            assert "pair/abort" not in sent
+            assert sent[sent.index("<rekey>") + 1] == "server/activate"
+            assert not conn._in_pairing  # noqa: SLF001
+            assert conn.psk_category is PskCategory.PAIRING
+            # The client followed the re-key: a fresh attempt on the same connection pairs.
+            await conn.initiate_pairing(attempt)
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert await client_store.record_by_server_id(server.id) is not None
+        finally:
+            await client.disconnect()
+
+
+async def test_disconnect_during_opening_rehandshake_completes_teardown() -> None:
+    """A disconnect while the attempt re-keys tears down without waiting for message 2."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    client, attempt = await _pairing_psk_client(client_identity, InMemoryClientPairingStore())
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            server_client = server.get_client(client_identity.peer_id)
+            assert server_client is not None
+            _, message_2_held = _hold_rehandshake_message_2(conn)
+            pairing = asyncio.ensure_future(conn.initiate_pairing(attempt))
+            await message_2_held.wait()
+
+            async with asyncio.timeout(5):
+                await conn.disconnect()
+            assert server_client.connection is None
+            with suppress(HandshakeAbortedError):
+                await pairing
+        finally:
+            await client.disconnect()
+
+
+async def test_end_pairing_during_record_persistence_completes_pairing() -> None:
+    """Repeated end_pairing while the server stores a finalized record completes the pairing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    client, attempt = await _pairing_psk_client(client_identity, client_store)
+
+    storing = asyncio.Event()
+    release = asyncio.Event()
+    store_record = server_store.store_record
+
+    async def stalled_store_record(record: ServerPairingRecord) -> None:
+        storing.set()
+        await release.wait()
+        await store_record(record)
+
+    server_store.store_record = stalled_store_record  # type: ignore[method-assign]
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            pairing = asyncio.ensure_future(conn.initiate_pairing(attempt))
+            await storing.wait()
+
+            ends = await _end_pairing_twice(server, client_identity.peer_id)
+            release.set()
+            await asyncio.gather(*ends)
+            await pairing
+
+            assert conn.psk_category is PskCategory.LONG_TERM
+            client_record = await client_store.record_by_server_id(server.id)
+            server_record = await server_store.record_by_client_id(client_identity.peer_id)
+            assert client_record is not None
+            assert server_record is not None
+            assert client_record.psk == server_record.psk
+        finally:
+            release.set()
+            await client.disconnect()
+
+
 async def test_live_pairing_pairing_psk() -> None:
     """Operator pairs a Sentinel-idle connection via Pairing PSK."""
     server_store = InMemoryServerPairingStore()
@@ -3560,6 +3797,41 @@ async def test_pairing_psk_dial_pairs_the_token_client() -> None:
         async with _host_incoming_client(sdk) as url, _dial(server, url, pairing_attempt=attempt):
             await _await_paired_session(sdk)
             assert await server_store.record_by_client_id(identity.peer_id) is not None
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
+async def test_pairing_psk_dial_without_the_client_psk_reconnects_onto_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paired client answering a stale Pairing PSK dial on the Sentinel ends up on its record."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id=identity.peer_id
+    )
+    rehandshakes: list[Any] = []
+    rehandshake = connection_module.run_rehandshake_server
+
+    async def tracking_rehandshake(*args: Any, **kwargs: Any) -> Any:
+        rehandshakes.append(kwargs["psk"])
+        return await rehandshake(*args, **kwargs)
+
+    monkeypatch.setattr(connection_module, "run_rehandshake_server", tracking_rehandshake)
+    monkeypatch.setattr(server_module, "MAX_RECONNECT_BACKOFF_S", 0)
+    sdk = make_sdk_client(
+        identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+    )
+    try:
+        async with _host_incoming_client(sdk) as url:
+            server.connect_to_client(url, pairing_attempt=attempt)
+            await _await_paired_session(sdk)
+            await sdk.disconnect()
+        assert rehandshakes == []
     finally:
         await sdk.disconnect()
         await server.close()

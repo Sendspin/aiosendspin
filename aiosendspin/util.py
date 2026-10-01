@@ -75,6 +75,22 @@ def create_task[T](
     return task
 
 
+async def finish_despite_cancel[T](coro: Coroutine[None, None, T]) -> tuple[T, bool]:
+    """Run ``coro`` through any cancellation, returning its result and whether one arrived.
+
+    ``coro`` must finish on its own: cancels cannot stop it.
+    """
+    task = asyncio.create_task(coro)
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+
+
 def get_local_ip() -> str | None:
     """Get a local IP address that can be used for mDNS advertising.
 

@@ -707,6 +707,29 @@ def _unexpected_legacy_finalize() -> None:
     pytest.fail("a leftover finalize was accepted as a legacy attempt")
 
 
+async def test_pairing_psk_server_times_out_a_stalled_record_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record store that never returns fails the attempt at the finalize timeout."""
+    monkeypatch.setattr("aiosendspin.noise.pairing._SERVER_FINALIZE_TIMEOUT_S", 0.05)
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+
+    async def stalled_store_record(_record: ServerPairingRecord) -> None:
+        await asyncio.Event().wait()
+
+    server_store.store_record = stalled_store_record  # type: ignore[method-assign]
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    await client_ews.send_str(_psk_finalize(generate_psk()))
+
+    with pytest.raises(PairingTimeoutError):
+        await run_pairing_psk_server(
+            server_ews, pairing_index=1, client_id="client-A", store=server_store
+        )
+
+
 async def test_pairing_psk_server_discards_a_cancelled_attempts_messages() -> None:
     """A late init and finalize from a cancelled attempt do not finalize the next attempt."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
