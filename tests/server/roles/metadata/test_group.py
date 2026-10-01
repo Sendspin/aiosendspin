@@ -339,6 +339,25 @@ def test_metadata_group_role_member_join_does_not_rewind_after_freeze() -> None:
     assert msg.payload.metadata.progress.playback_speed == 0
 
 
+def test_metadata_group_role_member_join_between_streams_gets_advanced_position() -> None:
+    """With no stream active, a playing position still advances for a joining member."""
+    group = _make_group_stub()
+    mgr = MetadataGroupRole(group)
+    mgr.set_metadata(
+        Metadata(title="Test", track_progress=30_000, track_duration=180_000, playback_speed=1000)
+    )
+
+    group._server.clock.now_us.return_value = 11_000_000  # noqa: SLF001
+    new_member = MagicMock()
+    mgr.on_member_join(new_member)
+
+    assert _sent_metadata(new_member) == {
+        "timestamp": 11_000_000,
+        "title": "Test",
+        "progress": {"track_progress": 40_000, "track_duration": 180_000, "playback_speed": 1000},
+    }
+
+
 def _sent_metadata(member: MagicMock) -> dict[str, object]:
     msg = member.send_message.call_args.args[0]
     assert isinstance(msg, ServerStateMessage)
@@ -579,19 +598,19 @@ def test_update_without_position_is_stamped_now() -> None:
     assert _sent_metadata(member) == {"timestamp": 11_000_000, "title": "New Title"}
 
 
-def test_update_without_active_stream_keeps_stored_position() -> None:
-    """Without an active stream the stored position is sent with its own timestamp."""
+def test_update_pause_without_active_stream_freezes_current_position() -> None:
+    """Pausing between streams sends the position reached at the old speed, with speed 0."""
     group, mgr, member = _playing_group_role()
     group.has_active_stream = False
 
-    mgr.update(title="New Title")
+    mgr.update(playback_speed=0)
 
     sent = _sent_metadata(member)
-    assert sent["timestamp"] == 1_000_000
+    assert sent["timestamp"] == 11_000_000
     assert sent["progress"] == {
-        "track_progress": 30_000,
+        "track_progress": 40_000,
         "track_duration": 180_000,
-        "playback_speed": 1000,
+        "playback_speed": 0,
     }
 
 

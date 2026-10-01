@@ -30,7 +30,7 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
     def track_progress(self) -> int | None:
         """Return the playback position in milliseconds as of now, or None when unknown.
 
-        During an active stream the stored position is extrapolated at the playback speed and
+        The stored position is extrapolated from its timestamp at the playback speed and
         clamped to the track duration.
         """
         current_time_us = self._now_us()
@@ -38,11 +38,7 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         if current is None or current.track_progress is None:
             return None
 
-        if (
-            current.timestamp_us is not None
-            and self._group.has_active_stream
-            and current.playback_speed is not None
-        ):
+        if current.timestamp_us is not None and current.playback_speed is not None:
             elapsed_us = current_time_us - current.timestamp_us
             elapsed_ms = (elapsed_us * current.playback_speed) // 1_000_000
             calculated_progress = current.track_progress + elapsed_ms
@@ -139,8 +135,8 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         """Batch update multiple metadata fields.
 
         Fields set to `_UNSET` are left unchanged. Passing `None` clears a field.
-        A supplied `track_progress` is taken as the position now. Otherwise, during an
-        active stream, the update carries the current extrapolated position.
+        A supplied `track_progress` is taken as the position now. Otherwise the update
+        carries the current extrapolated position.
 
         Raises ValueError if the result has a `track_progress` without a `playback_speed`.
         """
@@ -172,7 +168,7 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
 
         if track_progress is not _UNSET or current.track_progress is None:
             kwargs["timestamp_us"] = None
-        elif self._group.has_active_stream:
+        else:
             # The stored position is only valid at its own timestamp, so move it to now.
             kwargs["track_progress"] = self.track_progress
             kwargs["timestamp_us"] = None
