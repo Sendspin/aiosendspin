@@ -1038,7 +1038,7 @@ class SendspinConnection:
 
     @property
     def _pairing_in_progress(self) -> bool:
-        """Whether the connection is in pairing, including between attempts and on connect."""
+        """Whether the connection is in pairing, including on connect."""
         return self._in_pairing or self._pairing_message_queue is not None
 
     async def _establish_transport(
@@ -1607,7 +1607,8 @@ class SendspinConnection:
         An unpaired connection keeps its playback, roles and group during the attempt; a
         long-term paired one leaves playback and its roles first.
 
-        A pair abort raises and leaves the connection for a retry or ``end_pairing``.
+        A pair abort raises after leaving pairing, keeping the connection unless its reason
+        closes it.
         A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
         after leaving pairing, also keeping the connection; so does a Pairing PSK attempt whose
         ``client_id`` is not this connection's, before entering pairing.
@@ -1628,7 +1629,7 @@ class SendspinConnection:
             if self._legacy_hello:
                 await self._pause_writer()
             self._in_pairing = True
-        # Pairing messages arriving between attempts are discarded rather than queued.
+        # Pairing messages arriving outside an attempt are discarded rather than queued.
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_message_queue = queue
         self._pairing_attempt = attempt
@@ -1639,11 +1640,23 @@ class SendspinConnection:
         try:
             if not await task:
                 raise PairingError("pairing failed")
-        except LocalPairingAbortError:
+        except PairingAbortError as exc:
             current_task = asyncio.current_task()
-            if current_task is not None and current_task.cancelling():
+            if (
+                isinstance(exc, LocalPairingAbortError)
+                and current_task is not None
+                and current_task.cancelling()
+            ):
                 # Our own cancellation was forwarded into the child and converted; restore it.
                 raise asyncio.CancelledError from None
+            cancelled = (
+                isinstance(exc, LocalPairingAbortError)
+                and exc.reason is PairAbortReason.USER_CANCELLED
+            )
+            # A cancelled attempt is left by end_pairing or ended by the disconnect.
+            if not cancelled and exc.reason not in CLOSING_ABORT_REASONS:
+                with suppress(Exception):
+                    await self._leave_pairing()
             raise
         except (PairingTimeoutError, InvalidPairingCodeError):
             # A server has no pair/abort reason for its own timeout or a malformed entry:
@@ -1676,7 +1689,7 @@ class SendspinConnection:
 
     async def _leave_pairing(self) -> None:
         """Exit the pairing state, returning the connection to normal service."""
-        if not self._in_pairing:  # a success and a concurrent end_pairing
+        if not self._in_pairing:  # an attempt's end and a concurrent end_pairing
             return
         self._pairing_message_queue = None
         self._in_pairing = False
