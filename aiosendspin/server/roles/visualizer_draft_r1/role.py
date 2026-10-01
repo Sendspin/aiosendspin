@@ -136,8 +136,8 @@ class VisualizerDraftR1Role(Role):
         self.reset_binary_timing()
 
     def on_stream_start(self) -> None:
-        """Start extractor state for a new audio stream."""
-        if self._stream_config is None:
+        """Start extractor state for a new audio stream, once the client is available."""
+        if self._stream_config is None or not self._client.available:
             return
         self.reset_binary_timing()
         # stream/end clears client-side visualizer config, so resend stream/start
@@ -152,6 +152,15 @@ class VisualizerDraftR1Role(Role):
         )
         self._stream_started = True
         self._ensure_buffer_tracker()
+
+    def on_availability_changed(
+        self,
+        old_available: bool,  # noqa: ARG002, FBT001
+        new_available: bool,  # noqa: FBT001
+    ) -> None:
+        """Join the group's running stream once the client becomes available."""
+        if new_available and not self._stream_started:
+            self._client.join_active_stream(self)
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
         """Process audio chunk and emit visualizer binary frame."""
@@ -174,7 +183,8 @@ class VisualizerDraftR1Role(Role):
         """Reset visualizer state and notify client to clear buffered data."""
         if self._extractor is not None:
             self._extractor.reset()
-        self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
+        if self._stream_started:
+            self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
@@ -182,8 +192,9 @@ class VisualizerDraftR1Role(Role):
     def on_stream_end(self) -> None:
         """Reset visualizer state and notify client that stream has ended."""
         self._extractor = None
+        if self._stream_started:
+            self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self._stream_started = False
-        self.send_message(StreamEndMessage(payload=StreamEndPayload(roles=["visualizer"])))
         self.reset_binary_timing()
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()

@@ -782,6 +782,21 @@ def test_unavailable_after_landing_clears_beats_and_reissues() -> None:
     assert list(role._pending_beats) == []  # noqa: SLF001
 
 
+def test_unavailable_after_stream_end_sends_no_stream_start() -> None:
+    """Beats declared unavailable with no active stream send no stream/start."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.on_stream_end()
+    role.append_beats([BeatTiming(1_000_000)])
+    client.send_role_message.reset_mock()
+
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+
+    client.send_role_message.assert_not_called()
+
+
 def test_unavailable_then_pending_requires_fresh_beats_for_reactivation() -> None:
     """PENDING after UNAVAILABLE does not re-add `beat`; a fresh schedule must land."""
     client = _make_beat_client_stub()

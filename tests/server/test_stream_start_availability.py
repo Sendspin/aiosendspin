@@ -8,10 +8,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from PIL import Image
 
+from aiosendspin.models.artwork import ClientStateArtwork
 from aiosendspin.models.core import ClientStatePayload, StreamStartMessage
 from aiosendspin.models.source import SourceStatePayload
 from aiosendspin.models.types import PlaybackStateType, Roles
+from aiosendspin.models.visualizer import VisualizerStatePayload
 from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
@@ -19,9 +22,11 @@ from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from tests.server.test_group_add_client import _DummyConnection, _DummyServer, _make_player
 from tests.server.test_group_add_client import _hello as _owner_hello
 from tests.server.test_role_activation import (
+    _ARTWORK_CHANNEL,
     _PLAYER_STATE,
     _client,
     _connect,
@@ -105,10 +110,10 @@ async def test_add_client_sends_no_stream_start_to_unavailable_player() -> None:
 
 
 async def _joiner_in_playing_group(
-    monkeypatch: pytest.MonkeyPatch, audio_s: int
+    monkeypatch: pytest.MonkeyPatch, audio_s: int, roles: list[str] | None = None
 ) -> tuple[SendspinConnection, PushStream]:
     """Return a connection awaiting its initial client/state, grouped with a playing owner."""
-    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    conn, _fake = await _connect(_hello(roles or [Roles.PLAYER.value]), send_state=False)
     server = conn._server  # noqa: SLF001
     monkeypatch.setattr(
         server, "request_client_playback_connection", lambda _client_id: False, raising=False
@@ -314,4 +319,90 @@ async def test_unavailable_after_the_initial_state_leaves_the_group(
 
     assert joiner.group is not group
     assert joiner.group.clients == [joiner]
+    stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_artwork_starts_with_the_current_image_once_available() -> None:
+    """Artwork declared while unavailable gets its stream/start and current image once available."""
+    conn, _fake = await _connect(_hello([Roles.ARTWORK.value]), send_state=False)
+    group_role = _client(conn).group.group_role("artwork")
+    assert isinstance(group_role, ArtworkGroupRole)
+    await group_role.set_album_artwork(Image.new("RGB", (10, 10)))
+    artwork = ClientStateArtwork(channels=[_ARTWORK_CHANNEL])
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, artwork=artwork)
+    )
+    assert not conn._role_queues.get("artwork")  # noqa: SLF001
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, artwork=artwork)
+    )
+    for _ in range(200):
+        queued = [entry for _, _, entry in sorted(conn._role_queues.get("artwork", []))]  # noqa: SLF001
+        if any(entry.binary is not None for entry in queued):
+            break
+        await asyncio.sleep(0.01)
+
+    assert isinstance(queued[0].json_message, StreamStartMessage)
+    assert queued[1].binary is not None
+
+
+@pytest.mark.asyncio
+async def test_artwork_starts_with_the_channels_of_the_state_that_makes_it_available() -> None:
+    """A client/state reporting available: true with new channels starts only those channels."""
+    conn, _fake = await _connect(_hello([Roles.ARTWORK.value]), send_state=False)
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, artwork=ClientStateArtwork(channels=[_ARTWORK_CHANNEL]))
+    )
+    channel = dataclasses.replace(_ARTWORK_CHANNEL, width=600)
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, artwork=ClientStateArtwork(channels=[channel]))
+    )
+
+    starts = [
+        entry.json_message.payload.artwork
+        for _, _, entry in conn._role_queues.get("artwork", [])  # noqa: SLF001
+        if isinstance(entry.json_message, StreamStartMessage)
+    ]
+    assert [start.channels[0].width for start in starts] == [channel.width]
+
+
+@pytest.mark.asyncio
+async def test_visualizer_stream_starts_once_the_reconnected_client_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A visualizer in a playing group gets stream/start only once the client is available."""
+    conn, stream = await _joiner_in_playing_group(
+        monkeypatch, audio_s=2, roles=[Roles.PLAYER.value, Roles.VISUALIZER.value]
+    )
+    monkeypatch.setattr(
+        conn._server,  # noqa: SLF001
+        "visualizer_pitch_enabled",
+        False,
+        raising=False,
+    )
+    visualizer = VisualizerStatePayload(types=["loudness"], rate_max=30)
+
+    def _visualizer_starts() -> list[Any]:
+        return [
+            entry
+            for _, _, entry in conn._role_queues.get("visualizer", [])  # noqa: SLF001
+            if isinstance(entry.json_message, StreamStartMessage)
+        ]
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, player=_PLAYER_STATE, visualizer=visualizer)
+    )
+    await _commit(stream)
+    assert _visualizer_starts() == []
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE, visualizer=visualizer)
+    )
+    await _commit(stream)
+
+    assert len(_visualizer_starts()) == 1
     stream.stop()

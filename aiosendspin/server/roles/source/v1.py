@@ -285,8 +285,9 @@ class SourceV1Role(Role):
         old_available: bool,  # noqa: ARG002, FBT001
         new_available: bool,  # noqa: FBT001
     ) -> None:
-        """Treat becoming unavailable as an implicit source stop."""
+        """Send a queued start once available, and treat becoming unavailable as a stop."""
         if new_available:
+            self._send_queued_start()
             return
         self._stream_wanted = False
         self._end_stream()

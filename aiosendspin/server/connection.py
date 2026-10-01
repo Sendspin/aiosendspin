@@ -2551,13 +2551,16 @@ class SendspinConnection:
                 self._cancel_activation_state_timeout()
 
         # Applied before the initial state joins the stream, which must see this availability.
+        became_available = False
         if payload.available is not None and payload.available != self._client.available:
             if is_initial or not self._client_state_received:
                 # The state a connection opens with is not a change: a client still
                 # syncing its clock reports unavailable and keeps its group.
                 await self._client.set_availability(available=payload.available)
+            elif payload.available:
+                became_available = True
             else:
-                await self._client.handle_availability_change(available=payload.available)
+                await self._client.handle_availability_change(available=False)
 
         if is_initial:
             self._initial_state_received = True
@@ -2571,6 +2574,9 @@ class SendspinConnection:
 
         for role in self._client.active_roles:
             role.on_client_state(payload)
+        if became_available:
+            # After the dispatch, so streams start from this state's role configuration.
+            await self._client.handle_availability_change(available=True)
         if released:
             # After the dispatch, so the join schedules with this state's timing.
             self._release_roles(released)

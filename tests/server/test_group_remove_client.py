@@ -205,6 +205,10 @@ async def test_removing_sole_player_from_streamless_playing_group_sends_stream_e
 
     player = _make_client(server, "web", supported_roles=[Roles.PLAYER.value])
     group = player.group
+    # The player stream was announced before the track transition kept it open.
+    role = player.role(Roles.PLAYER.value)
+    assert role is not None
+    role._stream_started = True  # noqa: SLF001
     group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
     assert not group.has_active_stream
 
@@ -234,3 +238,21 @@ async def test_deleting_group_cancels_deferred_scheduled_send() -> None:
 
     assert handle.cancelled()
     assert color_role._send_scheduled_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_removing_player_from_stopped_group_sends_no_stream_end() -> None:
+    """A player removed from a stopped multi-client group had no stream, so gets no stream/end."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    owner = _make_client(server, "owner", supported_roles=[Roles.PLAYER.value])
+    member = _make_client(server, "member", supported_roles=[Roles.PLAYER.value])
+    await owner.group.add_client(member)
+    assert owner.group.state == PlaybackStateType.STOPPED
+    connection = member.connection
+    assert connection is not None
+    connection.role_messages.clear()
+
+    await owner.group.remove_client(member)
+
+    assert not any(isinstance(msg, StreamEndMessage) for _, msg in connection.role_messages)

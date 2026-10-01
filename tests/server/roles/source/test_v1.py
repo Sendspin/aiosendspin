@@ -495,8 +495,9 @@ def test_start_queued_while_unavailable() -> None:
     role, _ = _connected_role(client)
 
     _assert_start_queued(role, client)
-    client.available = True
     role.on_client_state(ClientStatePayload(available=True, source=SourceStatePayload()))
+    client.available = True
+    role.on_availability_changed(old_available=False, new_available=True)
 
     assert _commands(client) == ["start"]
 

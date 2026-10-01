@@ -657,14 +657,9 @@ async def test_stop_during_inflight_commit_suppresses_audio_delivery(mock_loop: 
     release_delivery.set()
     await commit_task
 
-    assert any(isinstance(m, StreamEndMessage) for m in conn.sent_json)
+    # The stream stopped before its first chunk, so it was never announced or ended.
+    assert not any(isinstance(m, (StreamStartMessage, StreamEndMessage)) for m in conn.sent_json)
     assert not conn.sent_binary
-
-    stream_end_index = next(
-        i for i, message in enumerate(conn.sent_json) if isinstance(message, StreamEndMessage)
-    )
-    post_end_messages = conn.sent_json[stream_end_index + 1 :]
-    assert not any(isinstance(message, StreamStartMessage) for message in post_end_messages)
 
 
 @pytest.mark.asyncio
@@ -710,7 +705,7 @@ async def test_role_leave_during_inflight_commit_suppresses_stale_audio(mock_loo
     release_transform.set()
     await commit_task
 
-    assert any(isinstance(m, StreamEndMessage) for m in conn.sent_json)
+    assert not any(isinstance(m, (StreamStartMessage, StreamEndMessage)) for m in conn.sent_json)
     assert not conn.sent_binary
 
 
@@ -853,7 +848,7 @@ async def test_clear_during_inflight_commit_suppresses_audio_delivery(mock_loop:
     release_delivery.set()
     await commit_task
 
-    assert any(isinstance(m, StreamClearMessage) for m in conn.sent_json)
+    assert not any(isinstance(m, (StreamStartMessage, StreamClearMessage)) for m in conn.sent_json)
     assert not conn.sent_binary
 
 

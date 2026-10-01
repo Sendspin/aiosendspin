@@ -252,6 +252,7 @@ def test_visualizer_role_on_stream_clear_sends_clear_message() -> None:
     client = _make_client_stub()
     role = VisualizerDraftR1Role(client=client)
     role.on_connect()
+    role.on_stream_start()
     role.on_stream_clear()
 
     _family, message = client.send_role_message.call_args.args
@@ -264,6 +265,7 @@ def test_visualizer_role_on_stream_end_sends_end_message() -> None:
     client = _make_client_stub()
     role = VisualizerDraftR1Role(client=client)
     role.on_connect()
+    role.on_stream_start()
     role.on_stream_end()
 
     _family, message = client.send_role_message.call_args.args
@@ -425,3 +427,30 @@ def test_visualizer_role_audio_chunk_without_stream_start_is_noop() -> None:
     client.send_binary.assert_not_called()
     # Should not have self-initialized the extractor
     assert role._extractor is None  # noqa: SLF001
+
+
+def test_visualizer_role_holds_stream_start_until_available() -> None:
+    """An unavailable client gets no stream/start, and becoming available joins the stream."""
+    client = _make_client_stub()
+    client.available = False
+    role = VisualizerDraftR1Role(client=client)
+    role.on_connect()
+
+    role.on_stream_start()
+    assert not client.send_role_message.called
+
+    client.available = True
+    role.on_availability_changed(old_available=False, new_available=True)
+    client.join_active_stream.assert_called_once_with(role)
+
+
+def test_visualizer_role_sends_no_clear_or_end_without_stream() -> None:
+    """stream/clear and stream/end go only to a stream this role announced."""
+    client = _make_client_stub()
+    role = VisualizerDraftR1Role(client=client)
+    role.on_connect()
+
+    role.on_stream_clear()
+    role.on_stream_end()
+
+    assert not client.send_role_message.called

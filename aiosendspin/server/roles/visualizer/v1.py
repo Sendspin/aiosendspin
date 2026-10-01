@@ -258,6 +258,7 @@ class VisualizerV1Role(Role):
             self._request is None
             or "beat" not in self._request.types
             or self._stream_config is None
+            or not self._stream_started
         ):
             return
         if previous_beat_in_types != self._beat_in_negotiated_types():
@@ -326,9 +327,9 @@ class VisualizerV1Role(Role):
     def on_stream_start(self) -> None:
         """Start extractor state and emit `stream/start` on a fresh stream.
 
-        No-op until the client's requested configuration is known.
+        No-op until the client's requested configuration is known and the client is available.
         """
-        if self._request is None:
+        if self._request is None or not self._client.available:
             return
         # Rebuild the config so any beats that landed before this
         # `on_stream_start` (mid-stream join replay) are reflected.
@@ -352,6 +353,15 @@ class VisualizerV1Role(Role):
         self._rebuild_extractor()
         self._stream_started = True
         self._ensure_buffer_tracker()
+
+    def on_availability_changed(
+        self,
+        old_available: bool,  # noqa: ARG002, FBT001
+        new_available: bool,  # noqa: FBT001
+    ) -> None:
+        """Join the group's running stream once the client becomes available."""
+        if new_available and not self._stream_started:
+            self._client.join_active_stream(self)
 
     def _rebuild_extractor(self) -> None:
         """Create the FFT extractor when at least one FFT-driven type is negotiated.
