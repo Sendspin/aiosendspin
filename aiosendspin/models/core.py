@@ -771,7 +771,7 @@ class ServerActivateMessage(ServerMessage):
 @dataclass
 class LegacyServerActivateMessage(ServerMessage):
     """
-    Legacy server/activate that also names a Pairing PSK attempt in selected_pair_method.
+    Legacy server/activate that also names a Pairing PSK or PIN attempt in selected_pair_method.
 
     Only for clients that read the method from there. Never parsed.
     """
@@ -779,10 +779,14 @@ class LegacyServerActivateMessage(ServerMessage):
     payload: ServerActivatePayload
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
-        """Copy a pairing_psk method to the payload's selected_pair_method."""
+        """Copy a Pairing PSK or PIN method to the payload's selected_pair_method."""
         pairing = self.payload.pairing
-        if pairing is not None and pairing.method is PairMethod.PAIRING_PSK:
-            d["payload"]["selected_pair_method"] = pairing.method.value
+        if pairing is not None and (
+            pairing.method is PairMethod.PAIRING_PSK
+            # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+            or pairing.legacy_pin_wire
+        ):
+            d["payload"]["selected_pair_method"] = d["payload"]["pairing"]["method"]
         return {"type": "server/activate", "payload": d["payload"]}
 
 

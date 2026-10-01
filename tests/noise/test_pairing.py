@@ -2095,6 +2095,7 @@ async def test_legacy_pin_server_pairs_a_dynamic_pin_client() -> None:
         )
         init = ServerPairInitMessage.from_json((await client_ews.receive()).data)
         assert init.payload.nonce_A is not None
+        assert init.payload.pin_length == 6
         pin = _legacy_pin_digits(_HANDSHAKE_HASH, b64url_decode(init.payload.nonce_A), nonce_b)
         pairing_code_future.set_result(pin)
         cpace = CPace.start(role=CPaceRole.RESPONDER, prs=pin.encode(), sid=sid, ad=b"client")
