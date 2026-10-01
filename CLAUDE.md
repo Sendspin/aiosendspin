@@ -24,7 +24,7 @@ The [Sendspin spec](https://github.com/Sendspin/spec) defines every message, fie
 
 `README.md` in the spec repo is generated from these files.
 
-When the spec renames or removes a field, keep accepting the old form and call `flag_noncompliance` (see `server/compliance.py`). The client is only rejected when the server runs with `allow_noncompliant_clients=False`, and in that mode validation happens before any side effect such as marking the client connected or emitting events.
+When the spec renames or removes a field, the server keeps accepting the old form and calls `flag_noncompliance` (see `server/compliance.py`). The client is only rejected when the server runs with `allow_noncompliant_clients=False`, and in that mode validation happens before any side effect such as marking the client connected or emitting events. The client library supports only the current spec and keeps no old forms.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ When the spec renames or removes a field, keep accepting the old form and call `
 
 The package has five main subpackages: `server` (the protocol server), `client` (a Python SDK for building clients), `models` (shared protocol messages and types), `audio` (PCM formats, codecs, and source bridges), and `noise` (Noise encryption, pairing, and trust stores).
 
-Keep the library generic: no features that only one consumer needs. Treat removed or renamed public symbols, changed signatures, and new abstract methods on stores as breaking changes.
+Keep the library generic: no features that only one consumer needs. Policy decisions, such as auto-starting a source when it joins, belong to the application. The library exposes commands and events for them. Treat removed or renamed public symbols, changed signatures, and new abstract methods on stores as breaking changes.
 
 Server-side `SendspinClient` (`server/client.py`) lifetime is decoupled from `SendspinConnection` (WebSocket transport). Clients persist across reconnects and disconnections; roles are retained across reconnections (warm reconnect) and only recreated when the negotiated role set changes (cold reconnect).
 
@@ -87,7 +87,7 @@ User PCM → prepare_audio(pcm, format) → commit_audio()
 
 ### Models & Serialization
 
-Mashumaro `DataClassORJSONMixin` dataclasses with discriminator-based polymorphic dispatch on `"type"` field. Binary messages use a 9-byte header (1B message type + 8B timestamp_us); player audio chunks add a 4B `send_ahead` (13 bytes, `models/player.py`). Key model files:
+`models/` holds only types sent over the wire. Mashumaro `DataClassORJSONMixin` dataclasses with discriminator-based polymorphic dispatch on `"type"` field. Binary messages use a 9-byte header (1B message type + 8B timestamp_us); player audio chunks add a 4B `send_ahead` (13 bytes, `models/player.py`). Key model files:
 
 - `models/core.py`: Protocol messages (`ClientHelloPayload`, `StreamStartPayload`, `ServerTimePayload`, etc.)
 - `models/types.py`: Enums (`AudioCodec`, `BinaryMessageType`, `ClientStateType`, `PlaybackStateType`, etc.)
