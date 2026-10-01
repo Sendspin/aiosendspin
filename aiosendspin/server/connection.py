@@ -1065,6 +1065,9 @@ class SendspinConnection:
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         self._logger = logger.getChild(result.peer_id)
+        if result.credential_mismatch and self._pairing_attempt is not None:
+            self._logger.warning("Client does not hold the attempt's Pairing PSK; not pairing")
+            self._pairing_attempt = None
         self._credential_mismatch = result.credential_mismatch and await self._holds_record(
             result.peer_id
         )
