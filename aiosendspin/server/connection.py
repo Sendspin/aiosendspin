@@ -808,9 +808,12 @@ class SendspinConnection:
         self._cancel_activation_state_timeout()
 
         if self._pairing_task and not self._pairing_task.done():
+            if self._pairing_message_queue is not None:
+                # Fails a re-handshake the cancel would otherwise wait out.
+                self._pairing_message_queue.put_nowait(WSMessage(WSMsgType.CLOSE, None, ""))
             # Ends like end_pairing: the attempt aborts instead of waiting out its timeout.
             self._pairing_task.cancel()
-            with suppress(PairingError, OSError, asyncio.CancelledError):
+            with suppress(PairingError, HandshakeAbortedError, OSError, asyncio.CancelledError):
                 await self._pairing_task
         if self._writer_task and not self._writer_task.done():
             self._writer_task.cancel()
@@ -1679,7 +1682,17 @@ class SendspinConnection:
     async def _pair(self, transport: EncryptedWebSocket) -> bool:
         """Run the pairing exchange."""
         try:
-            if not await self._rehandshake_for_pairing_if_needed(transport):
+            rehandshake = asyncio.create_task(self._rehandshake_for_pairing_if_needed(transport))
+            try:
+                rekeyed = await asyncio.shield(rehandshake)
+            except asyncio.CancelledError:
+                # Finish the re-handshake first. The client saw no attempt yet, so leave
+                # pairing without a pair/abort.
+                if not await rehandshake:
+                    return False
+                await self._leave_pairing()
+                raise LocalPairingAbortError(PairAbortReason.USER_CANCELLED) from None
+            if not rekeyed:
                 return False
             method = (
                 self._pairing_attempt.method

@@ -48,7 +48,7 @@ from aiosendspin.models.types import (
 )
 from aiosendspin.noise import pairing as pairing_module
 from aiosendspin.noise.constants import MSG_TYPE_JSON_BODY
-from aiosendspin.noise.driver import InitRejectedError
+from aiosendspin.noise.driver import HandshakeAbortedError, InitRejectedError
 from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
 from aiosendspin.noise.models import (
     ClientPairFinalizeMessage,
@@ -2340,6 +2340,100 @@ async def test_activation_is_first_under_new_keys_despite_queued_replies(
             assert after_rekeys == ["server/activate", "server/activate"]
             assert "server/time" in sent
             assert conn.psk_category is PskCategory.LONG_TERM
+        finally:
+            await client.disconnect()
+
+
+def _hold_rehandshake_message_2(conn: SendspinConnection) -> tuple[list[Any], asyncio.Event]:
+    """Keep the next Noise message 2 from reaching ``conn``'s pairing attempt."""
+    held: list[Any] = []
+    message_2_held = asyncio.Event()
+    route = conn._try_route_to_pairing_queue  # noqa: SLF001
+
+    def holding_route(msg: Any) -> bool:
+        if (
+            not held
+            and msg.type is WSMsgType.TEXT
+            and json.loads(msg.data)["type"] == "noise/handshake"
+        ):
+            held.append(msg)
+            message_2_held.set()
+            return True
+        return route(msg)
+
+    conn._try_route_to_pairing_queue = holding_route  # type: ignore[method-assign]  # noqa: SLF001
+    return held, message_2_held
+
+
+@pytest.mark.parametrize("via_end_pairing", [True, False])
+async def test_cancel_during_opening_rehandshake_keeps_the_connection(
+    via_end_pairing: bool,  # noqa: FBT001
+) -> None:
+    """A cancel while the attempt re-keys finishes the re-handshake, then leaves pairing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    client, attempt = await _pairing_psk_client(client_identity, client_store)
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            sent = _track_sends_across_rekeys(conn)
+            held, message_2_held = _hold_rehandshake_message_2(conn)
+            pairing = asyncio.ensure_future(conn.initiate_pairing(attempt))
+            await message_2_held.wait()
+            queue = conn._pairing_message_queue  # noqa: SLF001
+            assert queue is not None
+
+            if via_end_pairing:
+                end_task = asyncio.ensure_future(server.end_pairing(client_identity.peer_id))
+                await asyncio.sleep(0)  # let end_pairing cancel the attempt task
+                queue.put_nowait(held[0])
+                await end_task
+                with pytest.raises(PairingAbortError) as excinfo:
+                    await pairing
+                assert excinfo.value.reason is PairAbortReason.USER_CANCELLED
+            else:
+                pairing.cancel()
+                queue.put_nowait(held[0])
+                with pytest.raises(asyncio.CancelledError):
+                    await pairing
+
+            assert "pair/abort" not in sent
+            assert sent[sent.index("<rekey>") + 1] == "server/activate"
+            assert not conn._in_pairing  # noqa: SLF001
+            assert conn.psk_category is PskCategory.PAIRING
+            # The client followed the re-key: a fresh attempt on the same connection pairs.
+            await conn.initiate_pairing(attempt)
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert await client_store.record_by_server_id(server.id) is not None
+        finally:
+            await client.disconnect()
+
+
+async def test_disconnect_during_opening_rehandshake_completes_teardown() -> None:
+    """A disconnect while the attempt re-keys tears down without waiting for message 2."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    client, attempt = await _pairing_psk_client(client_identity, InMemoryClientPairingStore())
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            server_client = server.get_client(client_identity.peer_id)
+            assert server_client is not None
+            _, message_2_held = _hold_rehandshake_message_2(conn)
+            pairing = asyncio.ensure_future(conn.initiate_pairing(attempt))
+            await message_2_held.wait()
+
+            async with asyncio.timeout(5):
+                await conn.disconnect()
+            assert server_client.connection is None
+            with suppress(HandshakeAbortedError):
+                await pairing
         finally:
             await client.disconnect()
 

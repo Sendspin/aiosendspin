@@ -96,7 +96,7 @@ class PairingAbortError(PairingError):
 
 
 class LocalPairingAbortError(PairingAbortError):
-    """This side aborted the pairing and sent the ``pair/abort``."""
+    """This side aborted the pairing, sending ``pair/abort`` if the client saw the attempt."""
 
 
 class RemotePairingAbortError(PairingAbortError):
