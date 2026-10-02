@@ -12,11 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiosendspin.clock import ManualClock
 from aiosendspin.models.artwork import ArtworkChannel, ClientStateArtwork
 from aiosendspin.models.color import SessionUpdateColor
-from aiosendspin.models.core import (
-    ClientStatePayload,
-    LegacyServerStateClearMessage,
-    ServerStateMessage,
-)
+from aiosendspin.models.core import ClientStatePayload, ServerStateMessage
 from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.models.types import ArtworkSource, PictureFormat, ServerMessage, UndefinedField
 from aiosendspin.server.connection import SendspinConnection
@@ -80,13 +76,13 @@ class _SpecClient:
         self.pending: _StateObject | None = None
         self.received = 0
 
-    def receive(self, state: _StateObject | None, server_now_us: int) -> None:
+    def receive(self, state: _StateObject, server_now_us: int) -> None:
         if self.received == 0:
             # messaging.md: the first server/state carries a past or present timestamp.
-            assert state is None or state.timestamp <= server_now_us
+            assert state.timestamp <= server_now_us
         self.received += 1
         self.pending = None
-        if state is not None and state.timestamp > server_now_us + self.error_us:
+        if state.timestamp > server_now_us + self.error_us:
             self.pending = state
         else:
             self.current = state
@@ -98,17 +94,12 @@ class _SpecClient:
 
 
 class _Member:
-    def __init__(self, client: _SpecClient, *, legacy: bool) -> None:
+    def __init__(self, client: _SpecClient) -> None:
         self.client = client
-        self.legacy = legacy
         self.outbox: list[ServerMessage] = []
 
     def send_message(self, message: ServerMessage) -> None:
         self.outbox.append(message)
-
-    # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
-    def clears_state_with_null(self) -> bool:
-        return self.legacy
 
 
 class _Harness:
@@ -126,9 +117,7 @@ class _Harness:
         self.connection._server.clock = clock  # noqa: SLF001
 
     def join(self) -> None:
-        member = _Member(
-            _SpecClient(self.rng.randint(0, _CLOCK_ERROR_US)), legacy=self.rng.random() < 0.3
-        )
+        member = _Member(_SpecClient(self.rng.randint(0, _CLOCK_ERROR_US)))
         self.members.append(member)
         self.role.subscribe(member)
 
@@ -146,10 +135,6 @@ class _Harness:
                         break
                     message = merged
                     outbox.pop(0)
-                if isinstance(message, LegacyServerStateClearMessage):
-                    assert member.legacy
-                    member.client.receive(None, now_us)
-                    continue
                 assert isinstance(message, ServerStateMessage)
                 state = getattr(message.payload, self.name)
                 assert not isinstance(state, UndefinedField)
