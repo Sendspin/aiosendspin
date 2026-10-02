@@ -78,7 +78,8 @@ class ScheduledStateGroupRole[S](GroupRole):
         current = self._current_state(now_us)
         role.send_message(self._state_message(current, now_us))
         scheduled_us = self._state.pending_timestamp_us
-        if scheduled_us is not None and self._scheduled_sent:
+        # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+        if scheduled_us is not None and self._scheduled_sent and role.supports_scheduled_updates():
             scheduled = self._state.pending
             role.send_message(self._state_message(scheduled, scheduled_us))
 
@@ -140,13 +141,29 @@ class ScheduledStateGroupRole[S](GroupRole):
             self._send_to_members(self._state_message(current, now_us))
 
     def _send_scheduled(self) -> None:
-        """Send the scheduled state to all members."""
+        """Send the scheduled state to members that hold it, and to the rest once it is due."""
         self._send_scheduled_handle = None
         scheduled_us = self._state.pending_timestamp_us
         if scheduled_us is not None:
             self._scheduled_sent = True
             scheduled = self._state.pending
-            self._send_to_members(self._state_message(scheduled, scheduled_us))
+            message = self._state_message(scheduled, scheduled_us)
+            # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+            for role in self._members:
+                if role.supports_scheduled_updates():
+                    role.send_message(message)
+            # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+            self._send_scheduled_handle = self._group._server.loop.call_later(  # noqa: SLF001
+                (scheduled_us - self._now_us()) / 1_000_000, self._send_due, message
+            )
+
+    # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+    def _send_due(self, message: ServerStateMessage) -> None:
+        """Send the scheduled state as it takes effect to members that apply it on receipt."""
+        self._send_scheduled_handle = None
+        for role in self._members:
+            if not role.supports_scheduled_updates():
+                role.send_message(message)
 
     def _cancel_send_scheduled(self) -> None:
         self._scheduled_sent = False

@@ -17,7 +17,7 @@ from aiosendspin.models.artwork import ArtworkChannel, ClientHelloArtworkSupport
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.events import ArtworkClearedEvent, ArtworkUpdatedEvent
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
-from aiosendspin.server.roles.artwork.v1 import MAX_ANNOUNCE_LEAD_US, ArtworkV1Role
+from aiosendspin.server.roles.artwork.v1 import ArtworkV1Role
 
 
 def _make_group_stub() -> MagicMock:
@@ -299,7 +299,7 @@ async def test_cancel_scheduled_artwork() -> None:
 
 @pytest.mark.asyncio
 async def test_replacing_scheduled_artwork_restates_current_for_single_message_clients() -> None:
-    """A single-message client drops a sent scheduled image before a farther one is held."""
+    """A single-message client gets the current image restated, then a farther image once due."""
     group, clock = _make_scheduling_group()
     agr = ArtworkGroupRole(group)
     client = MagicMock()
@@ -328,10 +328,10 @@ async def test_replacing_scheduled_artwork_restates_current_for_single_message_c
     await agr.set_album_artwork(_image(3), timestamp_us=far_us)
     await _settle()
 
-    assert legacy_sent == [(None, 1_000_000), (1, 1_000_000), (2, 2_000_000), (1, 1_000_000)]
+    assert legacy_sent == [(None, 1_000_000), (1, 1_000_000), (1, 1_000_000)]
     assert member.sent == [(None, 1_000_000), (1, 1_000_000), (2, 2_000_000), (3, far_us)]
-    clock.now_us_value = far_us - MAX_ANNOUNCE_LEAD_US
+    clock.now_us_value = far_us
     legacy._queue_changed.set()  # noqa: SLF001
     await _settle()
-    assert legacy_sent[4:] == [(3, far_us)]
+    assert legacy_sent[3:] == [(3, far_us)]
     legacy.on_disconnect()

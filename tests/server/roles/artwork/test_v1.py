@@ -975,15 +975,16 @@ def test_legacy_hello_client_gets_single_message_artwork() -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
 @pytest.mark.asyncio
-async def test_legacy_hello_client_gets_scheduled_artwork_at_most_20s_ahead() -> None:
-    """A single-message client gets a far-future image only 20 s ahead, unless replaced."""
+async def test_legacy_hello_client_gets_scheduled_artwork_once_due() -> None:
+    """A single-message client gets a scheduled image only at its timestamp, unless replaced."""
     client = _make_legacy_client_stub(_ALBUM)
     clock = client._server.clock  # noqa: SLF001
     role = ArtworkV1Role(client=client)
     role.on_connect()
     client.send_binary.reset_mock()
-    later_us = _NOW_US + MAX_ANNOUNCE_LEAD_US + 1_000
+    later_us = _NOW_US + 1_000
 
     role.send_artwork(channel=0, image_data=b"later", timestamp_us=later_us)
     await asyncio.sleep(0)
