@@ -740,7 +740,7 @@ class ServerActivatePayload(SendspinModel):
     """Parameters of the admitted pairing attempt. Required when 'pairing' is in activities."""
     ignored_activities: list[str] | None = None
     """Activities this implementation does not recognize, dropped during parse and
-    recorded for the client to log. Not part of the wire schema (omitted when None)."""
+    recorded for the client to reject. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
@@ -788,6 +788,20 @@ class LegacyServerActivateMessage(ServerMessage):
         ):
             d["payload"]["selected_pair_method"] = d["payload"]["pairing"]["method"]
         return {"type": "server/activate", "payload": d["payload"]}
+
+
+# Server -> Client: server/unpair
+@dataclass
+class ServerUnpairPayload(SendspinModel):
+    """Empty ``server/unpair`` payload."""
+
+
+@dataclass
+class ServerUnpairMessage(ServerMessage):
+    """Tells the client to drop this server's pairing record and close (no payload fields)."""
+
+    payload: ServerUnpairPayload = field(default_factory=ServerUnpairPayload)
+    type: Literal["server/unpair"] = "server/unpair"
 
 
 # Server -> Client: server/time
