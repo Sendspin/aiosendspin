@@ -790,6 +790,20 @@ class LegacyServerActivateMessage(ServerMessage):
         return {"type": "server/activate", "payload": d["payload"]}
 
 
+# Server -> Client: server/unpair
+@dataclass
+class ServerUnpairPayload(SendspinModel):
+    """Empty ``server/unpair`` payload."""
+
+
+@dataclass
+class ServerUnpairMessage(ServerMessage):
+    """Tells the client to drop this server's pairing record and close (no payload fields)."""
+
+    payload: ServerUnpairPayload = field(default_factory=ServerUnpairPayload)
+    type: Literal["server/unpair"] = "server/unpair"
+
+
 # Server -> Client: server/time
 @dataclass
 class ServerTimePayload(SendspinModel):

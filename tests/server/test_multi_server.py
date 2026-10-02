@@ -1014,22 +1014,12 @@ class TestLegacyServerHello:
 
         assert reasons == [ConnectionReason.PLAYBACK.value, ConnectionReason.DISCOVERY.value]
 
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    @pytest.mark.asyncio
-    async def test_management_dial_reason_seeds_management(self, mock_server: _MockServer) -> None:
-        """A connection dialed for management starts with the management activity enabled."""
-        url = "ws://192.168.1.100:8927/sendspin"
-        mock_server._connection_reasons[url] = ConnectionReason.MANAGEMENT  # noqa: SLF001
-        conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
-
-        assert conn._management_active is True  # noqa: SLF001
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_legacy_hello_clamps_post_legacy_reasons(self, mock_server: _MockServer) -> None:
         """Reasons legacy clients cannot parse are sent as discovery."""
         url = "ws://192.168.1.100:8927/sendspin"
-        mock_server._connection_reasons[url] = ConnectionReason.MANAGEMENT  # noqa: SLF001
+        mock_server._connection_reasons[url] = ConnectionReason.PAIRING  # noqa: SLF001
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock(), url=url)
 
         fake = _FakeTransport()

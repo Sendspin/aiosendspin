@@ -792,7 +792,7 @@ async def test_overlapping_window_waits_share_the_prompt() -> None:
 
 
 async def test_await_pairing_window_resolves_on_explicit_open() -> None:
-    """open_pairing_window (gesture handler or management) satisfies the wait directly."""
+    """open_pairing_window (gesture handler) satisfies the wait directly."""
     client = make_sdk_client(client_name="C", roles=[Roles.CONTROLLER])
     connection = SendspinConnection(client)
     waiter = asyncio.ensure_future(client.await_pairing_window(connection))

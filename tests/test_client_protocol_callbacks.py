@@ -399,13 +399,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
         # Long-term PSK: [] or ['playback'].
         (PskCategory.LONG_TERM, [], [], False, None),
         (PskCategory.LONG_TERM, [Activity.PLAYBACK], [Roles.PLAYER.value], False, None),
-        (
-            PskCategory.LONG_TERM,
-            [Activity.PLAYBACK, Activity.MANAGEMENT],
-            [],
-            False,
-            GoodbyeReason.UNAUTHORIZED,
-        ),
         # Roles allowed without 'playback' in activities: the set is playback-capable.
         (PskCategory.LONG_TERM, [], [Roles.PLAYER.value], False, None),
         # A long-term PSK admits no pairing, alone or alongside playback.
@@ -413,13 +406,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
         (
             PskCategory.LONG_TERM,
             [Activity.PAIRING, Activity.PLAYBACK],
-            [],
-            False,
-            GoodbyeReason.UNAUTHORIZED,
-        ),
-        (
-            PskCategory.LONG_TERM,
-            [Activity.PAIRING, Activity.MANAGEMENT],
             [],
             False,
             GoodbyeReason.UNAUTHORIZED,
@@ -451,7 +437,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
             False,
             GoodbyeReason.PAIRING_REQUIRED,
         ),
-        (PskCategory.PAIRING, [Activity.MANAGEMENT], [], True, GoodbyeReason.UNAUTHORIZED),
         # Sentinel: the same sets as the pairing PSK.
         (PskCategory.SENTINEL, [], [], False, None),
         (PskCategory.SENTINEL, [Activity.PAIRING], [], False, None),
@@ -464,15 +449,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
             False,
             GoodbyeReason.PAIRING_REQUIRED,
         ),
-        # Management is the real problem here, so unauthorized wins over pairing_required.
-        (
-            PskCategory.SENTINEL,
-            [Activity.PLAYBACK, Activity.MANAGEMENT],
-            [],
-            False,
-            GoodbyeReason.UNAUTHORIZED,
-        ),
-        (PskCategory.SENTINEL, [Activity.MANAGEMENT], [], False, GoodbyeReason.UNAUTHORIZED),
         # source@v1 ranks like any other role; the server gates it behind its own approval.
         (PskCategory.LONG_TERM, [Activity.PLAYBACK], [Roles.SOURCE.value], False, None),
         (PskCategory.PAIRING, [Activity.PLAYBACK], [Roles.SOURCE.value], True, None),
