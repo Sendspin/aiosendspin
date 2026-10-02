@@ -149,6 +149,7 @@ from aiosendspin.util import create_task, finish_despite_cancel, warn_deprecated
 from .client import SendspinClient
 from .compliance import ClientComplianceError, describe_client, noncompliance_subject
 from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
+from .roles.controller.group import ControllerGroupRole
 from .roles.negotiation import negotiate_roles
 from .roles.registry import ROLE_FACTORIES, ROLE_SUPPORT_SPECS, role_requires_pairing
 from .roles.source import SourceV1Role
@@ -481,6 +482,12 @@ class SendspinConnection:
     @property
     def clears_state_fields_with_null(self) -> bool:
         """Whether the client merges each server/state role object and clears a field on null."""
+        return self._legacy_hello
+
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    @property
+    def reads_repeat_shuffle_from_metadata(self) -> bool:
+        """Whether the client reads repeat and shuffle from the metadata object."""
         return self._legacy_hello
 
     def requires_initial_state(self) -> bool:
@@ -2750,6 +2757,12 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
         elif isinstance(message, ServerStateMessage) and self.clears_state_fields_with_null:
             message = LegacyServerStateMessage(message.payload)
+            # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+            if self.reads_repeat_shuffle_from_metadata and self._client is not None:
+                controller = self._client.group.group_role("controller")
+                if isinstance(controller, ControllerGroupRole):
+                    message.metadata_repeat = controller.repeat
+                    message.metadata_shuffle = controller.shuffle
         await wsock.send_str(message.to_json())
 
     async def _send_binary_data(
