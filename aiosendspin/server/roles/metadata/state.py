@@ -36,7 +36,7 @@ class Metadata:
     # Progress fields:
     # A track_progress requires a playback_speed; progress is sent whenever both are set
     track_progress: int | None = None
-    """Track progress in milliseconds at the last update time. Requires `playback_speed`."""
+    """Track progress in milliseconds at `timestamp_us`. Requires `playback_speed`."""
     track_duration: int | None = None
     """
     Track duration in milliseconds.
@@ -48,10 +48,10 @@ class Metadata:
 
     timestamp_us: int | None = None
     """
-    Timestamp in microseconds when this metadata was captured.
+    Server time in microseconds at which `track_progress` was measured.
 
-    You don't need to set this, since it will be set automatically by set_metadata() if not
-    provided.
+    Defaults to the time the metadata takes effect. To schedule metadata, pass `timestamp_us`
+    to `set_metadata()` instead.
     """
 
     def __post_init__(self) -> None:

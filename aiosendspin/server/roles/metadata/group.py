@@ -74,20 +74,25 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
             replace(metadata, track_progress=0, playback_speed=0, timestamp_us=None), force=True
         )
 
-    def set_metadata(self, metadata: Metadata | None) -> None:
+    def set_metadata(self, metadata: Metadata | None, *, timestamp_us: int | None = None) -> None:
         """Set metadata and push the full metadata state to all subscribed roles.
 
         Nothing is sent when the metadata is unchanged. `None` clears the metadata, and
         any scheduled metadata, at once.
 
-        Metadata whose `timestamp_us` is in the future is scheduled to take effect then,
-        replacing any metadata already scheduled. It is sent to clients at most 20
-        seconds ahead, and `MetadataUpdatedEvent` fires now, carrying that timestamp.
-        Metadata taking effect now cancels scheduled metadata; so do `update()`, `seek()`
-        and `reset_progress()`. To show two tracks in sequence, schedule the second only after
+        A future `timestamp_us` schedules the metadata to take effect then, replacing any
+        metadata already scheduled. It is sent to clients at most 20 seconds ahead, and
+        `MetadataUpdatedEvent` fires now, carrying that timestamp. Otherwise the metadata
+        applies at once and cancels scheduled metadata, as do `update()`, `seek()` and
+        `reset_progress()`. To show two tracks in sequence, schedule the second only after
         the first took effect.
+
+        The stored and sent metadata carries the time it takes effect as its `timestamp_us`,
+        with `track_progress` moved to that time.
+
+        Raises ValueError when scheduling None. Schedule `Metadata()` to blank the metadata.
         """
-        self._apply_metadata(metadata, force=False)
+        self._apply_metadata(metadata, timestamp_us=timestamp_us, force=False)
 
     def seek(self, track_progress: int) -> None:
         """Set the playback position in milliseconds as of now and push it to all members.
@@ -167,16 +172,22 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         """Clear all metadata, and any scheduled metadata, at once."""
         self.set_metadata(None)
 
-    def _apply_metadata(self, metadata: Metadata | None, *, force: bool) -> None:
+    def _apply_metadata(
+        self, metadata: Metadata | None, *, timestamp_us: int | None = None, force: bool
+    ) -> None:
         """Apply or schedule metadata and push it, skipping unchanged metadata unless `force`."""
         now_us = self._now_us()
+        timestamp = now_us if timestamp_us is None else timestamp_us
+        if metadata is None and timestamp > now_us:
+            raise ValueError("schedule Metadata() instead of a metadata clear")
         last_metadata = self._state.current(now_us)
-        timestamp = now_us
         if metadata is not None:
-            if metadata.timestamp_us is None:
-                metadata = replace(metadata, timestamp_us=timestamp)
-            else:
-                timestamp = metadata.timestamp_us
+            # Clients measure track_progress at the time the metadata takes effect.
+            metadata = replace(
+                metadata,
+                track_progress=metadata.track_progress_at(timestamp),
+                timestamp_us=timestamp,
+            )
 
         if metadata is not None and timestamp > now_us:
             self._schedule(metadata, timestamp)
