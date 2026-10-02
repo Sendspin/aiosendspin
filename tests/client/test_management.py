@@ -243,7 +243,6 @@ async def test_get_pairing_config_projects_state() -> None:
     await store.store_pairing_config(
         replace(
             await store.get_pairing_config(),
-            pairing_psk_enabled=False,
             unpaired_access_enabled=True,
         )
     )
@@ -256,7 +255,7 @@ async def test_get_pairing_config_projects_state() -> None:
     data = payload.data
     assert data is not None
     assert data.pairing_psk is not None
-    assert data.pairing_psk.enabled is False
+    assert data.pairing_psk.enabled is True
     assert data.pairing_psk.escalated is None  # not the dynamic-pairing-code method
     assert data.dynamic_pairing_code is not None
     assert data.dynamic_pairing_code.escalated is True
@@ -282,8 +281,8 @@ async def test_get_pairing_config_shows_static_pairing_code_when_implemented() -
 # --- set-pairing-config -------------------------------------------------------
 
 
-async def test_set_pairing_config_toggles_enabled() -> None:
-    """Toggling a method's enabled flag persists to the config."""
+async def test_set_pairing_config_rejects_disabling_pairing_psk() -> None:
+    """Pairing PSK is mandatory, so a patch disabling it is invalid."""
     store = InMemoryClientPairingStore()
     payload, effect = await handle_set_pairing_config(
         store,
@@ -291,9 +290,8 @@ async def test_set_pairing_config_toggles_enabled() -> None:
         implemented_pair_methods=_ALL_METHODS,
         config_lock=asyncio.Lock(),
     )
-    assert payload.result is ManagementResult.OK
+    assert payload.result is ManagementResult.INVALID
     assert effect is ManagementEffect.NONE
-    assert (await store.get_pairing_config()).pairing_psk_enabled is False
 
 
 async def test_set_pairing_config_rotates_psk() -> None:

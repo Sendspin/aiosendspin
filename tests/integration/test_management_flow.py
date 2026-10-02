@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestServer
 
 from aiosendspin.client.client import SendspinClient as SdkClient
 from aiosendspin.client.models import PairingSupport
-from aiosendspin.models.management import ManagementSetPairingConfigPayload, SetPairingPskConfig
+from aiosendspin.models.management import ManagementSetPairingConfigPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
     Activity,
@@ -549,56 +549,6 @@ async def test_get_pairing_config_returns_view_without_secrets() -> None:
             assert b64url_encode(secret) not in data.to_json()
         finally:
             await client.disconnect()
-
-
-async def test_set_pairing_config_disables_offered_method() -> None:
-    """Disabling the Pairing PSK method stops the client offering it on the next connection."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-    await _seed_pairing(server, server_store, client_store, identity.peer_id)
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-        )
-        try:
-            await client.connect(url)
-            first = await _await_connected_client(server, identity.peer_id)
-            assert first.connection is not None
-            info = first.connection._client_info  # noqa: SLF001
-            assert info.supported_pair_methods is not None
-            assert info.supported_pair_methods.pairing_psk is not None
-
-            conn = server.enable_management(identity.peer_id)
-            await _await_activity(client, Activity.MANAGEMENT)
-            result = await conn.set_pairing_config(
-                ManagementSetPairingConfigPayload(pairing_psk=SetPairingPskConfig(enabled=False))
-            )
-            assert result is ManagementResult.OK
-        finally:
-            await client.disconnect()
-
-        # Reconnect (same store): the client no longer offers the disabled method.
-        reconnect = make_sdk_client(
-            identity=identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-        )
-        try:
-            await reconnect.connect(url)
-            again = await _await_connected_client(server, identity.peer_id)
-            assert again.connection is not None
-            info = again.connection._client_info  # noqa: SLF001
-            assert info.supported_pair_methods is not None
-            assert info.supported_pair_methods.pairing_psk is None
-        finally:
-            await reconnect.disconnect()
 
 
 async def test_open_pairing_window_round_trip() -> None:

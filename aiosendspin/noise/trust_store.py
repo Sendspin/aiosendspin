@@ -229,7 +229,6 @@ class ClientPairingRecord:
 class ClientPairingConfig:
     """Pairing policy a client persists."""
 
-    pairing_psk_enabled: bool = True
     dynamic_pairing_code_enabled: bool = True
     static_pairing_code_enabled: bool = False
     unpaired_access_enabled: bool = False
@@ -240,7 +239,6 @@ class ClientPairingConfig:
     def to_dict(self) -> dict[str, object]:
         """Serialize to a JSON-friendly dict."""
         return {
-            "pairing_psk_enabled": self.pairing_psk_enabled,
             "dynamic_pin_enabled": self.dynamic_pairing_code_enabled,
             "static_pin_enabled": self.static_pairing_code_enabled,
             "unpaired_access_enabled": self.unpaired_access_enabled,
@@ -251,7 +249,6 @@ class ClientPairingConfig:
     def from_dict(cls, data: Mapping[str, object]) -> ClientPairingConfig:
         """Reconstruct from ``to_dict`` output (defaults for absent keys)."""
         return cls(
-            pairing_psk_enabled=_bool(data, "pairing_psk_enabled", default=True),
             dynamic_pairing_code_enabled=_bool(data, "dynamic_pin_enabled", default=True),
             static_pairing_code_enabled=_bool(data, "static_pin_enabled", default=False),
             unpaired_access_enabled=_bool(data, "unpaired_access_enabled", default=False),

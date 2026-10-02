@@ -145,7 +145,7 @@ async def handle_get_pairing_config(
     """Assemble the pairing-config view; secrets are never included."""
     config = await store.get_pairing_config()
     data = ManagementResultData(
-        pairing_psk=PairingMethodConfig(enabled=config.pairing_psk_enabled),
+        pairing_psk=PairingMethodConfig(enabled=True),
         static_pairing_code=(
             PairingMethodConfig(enabled=config.static_pairing_code_enabled)
             if PairMethod.STATIC_PAIRING_CODE in implemented_pair_methods
@@ -186,6 +186,8 @@ async def handle_set_pairing_config(
     if any(cfg is not None and method not in implemented_pair_methods for method, cfg in methods):
         return _result(ManagementResult.INVALID), ManagementEffect.NONE
     # 2. Validate secrets and record mode before mutating anything.
+    if payload.pairing_psk is not None and payload.pairing_psk.enabled is False:
+        return _result(ManagementResult.INVALID), ManagementEffect.NONE
     psk_bytes: bytes | None = None
     if payload.pairing_psk is not None and payload.pairing_psk.psk is not None:
         psk_bytes = _decode_psk(payload.pairing_psk.psk)
@@ -217,9 +219,6 @@ async def handle_set_pairing_config(
         await store.store_pairing_config(
             replace(
                 config,
-                pairing_psk_enabled=_merge_enabled(
-                    payload.pairing_psk, current=config.pairing_psk_enabled
-                ),
                 static_pairing_code_enabled=_merge_enabled(
                     payload.static_pairing_code, current=config.static_pairing_code_enabled
                 ),

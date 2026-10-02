@@ -4349,15 +4349,21 @@ async def test_moving_onto_a_pairing_psk_keeps_the_playback_hold() -> None:
             await client.disconnect()
 
 
+async def _abort_pairing_psk(ws: EncryptedWebSocket, **_kwargs: object) -> None:
+    await pairing_module.abort_pairing(ws, PairAbortReason.METHOD_NOT_SUPPORTED)
+
+
+def _client_aborts_pairing_psk() -> Any:
+    """Patch the SDK client to abort a Pairing PSK attempt once the re-handshake lands."""
+    return patch.object(client_connection_module, "run_pairing_psk_client", _abort_pairing_psk)
+
+
 async def test_an_aborted_attempt_off_a_long_term_session_admits_no_playback() -> None:
     """A session re-keyed away from its record carries no playback until the pairing lands."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     identity = Identity.generate()
     client_store = await _unpaired_enabled_store()
-    config = await client_store.get_pairing_config()
-    # Holds the Pairing PSK but does not offer the method, so the attempt aborts.
-    await client_store.store_pairing_config(replace(config, pairing_psk_enabled=False))
     pairing = generate_psk()
     await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
     long_term = generate_psk()
@@ -4384,7 +4390,7 @@ async def test_an_aborted_attempt_off_a_long_term_session_admits_no_playback() -
             await server.trust_unpaired(identity.peer_id)
             assert _server_active_role_count(server, identity.peer_id) == 1
 
-            with pytest.raises(PairingAbortError):
+            with _client_aborts_pairing_psk(), pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.PAIRING_PSK,
@@ -4414,17 +4420,12 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
     server = _make_server(server_store)
     identity = Identity.generate()
 
-    # Holds the Pairing PSK so the re-handshake onto it lands, but offers neither method,
-    # so each attempt is aborted by the client once it sees the activation.
+    # Holds the Pairing PSK so the re-handshake onto it lands, but each attempt is aborted
+    # by the client once it sees the activation.
     client_store = InMemoryClientPairingStore()
     config = await client_store.get_pairing_config()
     await client_store.store_pairing_config(
-        replace(
-            config,
-            unpaired_access_enabled=True,
-            pairing_psk_enabled=False,
-            dynamic_pairing_code_enabled=False,
-        )
+        replace(config, unpaired_access_enabled=True, dynamic_pairing_code_enabled=False)
     )
     pairing = generate_psk()
     await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
@@ -4457,7 +4458,7 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
             await server.trust_unpaired(identity.peer_id)
             assert conn._credential_mismatch is True  # noqa: SLF001
 
-            with pytest.raises(PairingAbortError):
+            with _client_aborts_pairing_psk(), pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.PAIRING_PSK,
@@ -4527,10 +4528,8 @@ async def test_sentinel_switch_exchanges_hellos_once() -> None:
     """Moving a Pairing PSK session to the Sentinel, then long-term, keeps one hello pair."""
     server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
     identity = Identity.generate()
-    # Holds the Pairing PSK, so the first attempt lands on it, but refuses that method.
+    # Holds the Pairing PSK, so the first attempt lands on it before the client aborts it.
     client_store = InMemoryClientPairingStore()
-    config = await client_store.get_pairing_config()
-    await client_store.store_pairing_config(replace(config, pairing_psk_enabled=False))
     pairing = generate_psk()
     await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
     shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
@@ -4554,7 +4553,7 @@ async def test_sentinel_switch_exchanges_hellos_once() -> None:
             with _count_hellos() as hellos:
                 await client.connect(url)
                 conn = await _find_connection_by_client_id(server, identity.peer_id)
-                with pytest.raises(PairingAbortError):
+                with _client_aborts_pairing_psk(), pytest.raises(PairingAbortError):
                     await conn.initiate_pairing(
                         PairingAttempt(
                             method=PairMethod.PAIRING_PSK,
@@ -4761,10 +4760,8 @@ async def test_rehandshake_reloads_trusted_unpaired_for_the_new_psk() -> None:
     server = _make_server(server_store)
     identity = Identity.generate()
     await server_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=identity.peer_id))
-    # Admits unpaired access and holds the Pairing PSK, but refuses to pair with it.
+    # Admits unpaired access and holds the Pairing PSK.
     client_store = await _unpaired_enabled_store()
-    config = await client_store.get_pairing_config()
-    await client_store.store_pairing_config(replace(config, pairing_psk_enabled=False))
     long_term = generate_psk()
     long_term_id = psk_id_for(long_term)
     await server_store.store_record(
@@ -4792,7 +4789,7 @@ async def test_rehandshake_reloads_trusted_unpaired_for_the_new_psk() -> None:
             # A long-term session never reads the grant.
             assert conn._trusted_unpaired is False  # noqa: SLF001
 
-            with pytest.raises(PairingAbortError):
+            with _client_aborts_pairing_psk(), pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.PAIRING_PSK,
