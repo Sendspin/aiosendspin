@@ -274,8 +274,7 @@ def _activities_allowed(
 ) -> bool:
     """Whether ``activities`` is an allowed set for the matched PSK."""
     if category is PskCategory.LONG_TERM:
-        # ['pairing'] alone carries a server's re-verification of the existing pairing.
-        return activities == {Activity.PAIRING} or activities <= {
+        return activities <= {
             Activity.PLAYBACK,
             # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
             Activity.MANAGEMENT,

@@ -133,8 +133,6 @@ class PairingAttempt:
 
     The attempt runs only on a connection presenting this ``client_id``.
     """
-    verify: bool = False
-    """Re-verify an already-paired client instead of pairing anew."""
     on_pair_pending: Callable[[str | None], None] | None = None
     """Called when the client reports the attempt gesture-gated or held back.
 
@@ -155,9 +153,6 @@ class PairingAttempt:
                 raise ValueError(msg)
             if self.pairing_code_provider is not None or self.pairing_format is not None:
                 msg = "PAIRING_PSK does not use code pairing fields"
-                raise ValueError(msg)
-            if self.verify:
-                msg = "PAIRING_PSK does not support verification"
                 raise ValueError(msg)
             if self.on_pair_pending is not None:
                 msg = "PAIRING_PSK does not use on_pair_pending"
@@ -275,7 +270,7 @@ async def run_pairing_psk_server(
                 raise PairingError("client/pair-init carries commit_B for Pairing PSK")
             break
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
-        record = await _finalize_server(
+        return await _finalize_server(
             ws,
             client_id=client_id,
             store=store,
@@ -283,8 +278,6 @@ async def run_pairing_psk_server(
             owner=owner,
             finalize=finalize,
         )
-    assert record is not None
-    return record
 
 
 async def run_dynamic_pairing_code_client(
@@ -376,17 +369,16 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     pairing_format: PairingCodeFormat,
     client_id: str,
     store: ServerPairingStore,
-    verify: bool = False,
     on_pair_pending: Callable[[str | None], None] | None = None,
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
     # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
     legacy_pin: bool = False,
-) -> ServerPairingRecord | None:
+) -> ServerPairingRecord:
     """Run the server side of the dynamic-pairing-code flow.
 
-    Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
+    Returns the persisted record.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds: one round under the ``sid`` without a round number. ``legacy_pin``
     serves a dynamic PIN client predating the pairing-code rename, which reveals ``nonce_B``
@@ -475,7 +467,6 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
             client_id=client_id,
             store=store,
             method=PairMethod.DYNAMIC_PAIRING_CODE,
-            verify=verify,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             owner=owner,
         )
@@ -534,15 +525,14 @@ async def run_static_pairing_code_server(
     pairing_code_provider: PairingCodeProvider,
     client_id: str,
     store: ServerPairingStore,
-    verify: bool = False,
     on_pair_pending: Callable[[str | None], None] | None = None,
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
-) -> ServerPairingRecord | None:
+) -> ServerPairingRecord:
     """Run the server side of the static-pairing-code flow.
 
-    Returns the persisted record, or ``None`` when ``verify`` is set (re-verified, left pairing).
+    Returns the persisted record.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds with the ``sid`` without a round number.
     """
@@ -576,7 +566,6 @@ async def run_static_pairing_code_server(
             client_id=client_id,
             store=store,
             method=PairMethod.STATIC_PAIRING_CODE,
-            verify=verify,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             owner=owner,
         )
@@ -682,12 +671,11 @@ async def _finalize_server(
     client_id: str,
     store: ServerPairingStore,
     method: PairMethod,
-    verify: bool = False,
     wrap_key: bytes | None = None,
     owner: str | None = None,
     finalize: ClientPairFinalizeMessage | None = None,
-) -> ServerPairingRecord | None:
-    """Consume ``client/pair-finalize``: finalize a record, or re-verify (returns ``None``).
+) -> ServerPairingRecord:
+    """Consume ``client/pair-finalize`` and finalize the record it carries.
 
     A ``finalize`` already received is consumed instead of reading the next frame.
     """
@@ -701,7 +689,6 @@ async def _finalize_server(
             client_id=client_id,
             store=store,
             method=method,
-            verify=verify,
             wrap_key=wrap_key,
             owner=owner,
         )
@@ -716,32 +703,28 @@ async def _commit_finalize(
     client_id: str,
     store: ServerPairingStore,
     method: PairMethod,
-    verify: bool,
     wrap_key: bytes | None,
     owner: str | None,
-) -> ServerPairingRecord | None:
-    """Store the record ``finalize`` carries and acknowledge it unless verifying."""
+) -> ServerPairingRecord:
+    """Store the record ``finalize`` carries and acknowledge it."""
     # Bounded here, since the caller's timeout and cancels cannot interrupt this step.
     async with _server_timeout(_SERVER_FINALIZE_TIMEOUT_S, "completion of the pairing finalize"):
         existing = await store.record_by_client_id(client_id)
-        record = existing.with_method(method) if existing is not None else None
-        if not verify:
-            psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
-            if record is None:
-                record = ServerPairingRecord(
-                    psk_id=psk_id_for(psk),
-                    psk=psk,
-                    client_id=client_id,
-                    pair_methods=[method],
-                    owner=owner,
-                )
-            else:
-                # Ownership tracks the latest authorization that minted the credential.
-                record = replace(record, psk_id=psk_id_for(psk), psk=psk, owner=owner)
-        if record is not None and record is not existing:
-            await store.store_record(record)  # persist before acking
-        if verify:
-            return None
+        psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
+        if existing is None:
+            record = ServerPairingRecord(
+                psk_id=psk_id_for(psk),
+                psk=psk,
+                client_id=client_id,
+                pair_methods=[method],
+                owner=owner,
+            )
+        else:
+            # Ownership tracks the latest authorization that minted the credential.
+            record = replace(
+                existing.with_method(method), psk_id=psk_id_for(psk), psk=psk, owner=owner
+            )
+        await store.store_record(record)  # persist before acking
         # The new record supersedes the client's lesser grants.
         await store.unstage_pairing_psk(client_id)
         await store.remove_trusted_unpaired(client_id)

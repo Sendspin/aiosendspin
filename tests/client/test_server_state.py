@@ -88,20 +88,29 @@ def test_server_state_keeps_omitted_roles_and_replaces_present_ones() -> None:
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("category", "payload"),
     [
-        ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
-        ServerActivatePayload(activities=[Activity.PAIRING]),
-        ServerActivatePayload(
-            activities=[Activity.PLAYBACK],
-            active_roles=["metadata@v2", "color@v2", "controller@v2", "_acme@v2"],
+        (
+            PskCategory.LONG_TERM,
+            ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
+        ),
+        (PskCategory.SENTINEL, ServerActivatePayload(activities=[Activity.PAIRING])),
+        (
+            PskCategory.LONG_TERM,
+            ServerActivatePayload(
+                activities=[Activity.PLAYBACK],
+                active_roles=["metadata@v2", "color@v2", "controller@v2", "_acme@v2"],
+            ),
         ),
     ],
     ids=["explicit", "not-playback-capable", "version-replacement"],
 )
-async def test_activation_discards_removed_role_state(payload: ServerActivatePayload) -> None:
+async def test_activation_discards_removed_role_state(
+    category: PskCategory, payload: ServerActivatePayload
+) -> None:
     """Applying a server/activate discards every removed state role and signals None."""
     conn, client = _activated_connection()
+    conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, category)  # noqa: SLF001
 
     assert await conn._apply_activation(payload) is None  # noqa: SLF001
 

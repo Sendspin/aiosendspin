@@ -403,16 +403,8 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
         (PskCategory.LONG_TERM, [Activity.PLAYBACK, Activity.MANAGEMENT], [], False, None),
         # Roles allowed without 'playback' in activities: the set is playback-capable.
         (PskCategory.LONG_TERM, [Activity.MANAGEMENT], [Roles.PLAYER.value], False, None),
-        # ['pairing'] alone re-verifies the pairing; it is not playback-capable.
-        (PskCategory.LONG_TERM, [Activity.PAIRING], [], False, None),
-        (
-            PskCategory.LONG_TERM,
-            [Activity.PAIRING],
-            [Roles.PLAYER.value],
-            False,
-            GoodbyeReason.UNAUTHORIZED,
-        ),
-        # Pairing never runs alongside playback on a long-term PSK.
+        # A long-term PSK admits no pairing, alone or alongside playback.
+        (PskCategory.LONG_TERM, [Activity.PAIRING], [], False, GoodbyeReason.UNAUTHORIZED),
         (
             PskCategory.LONG_TERM,
             [Activity.PAIRING, Activity.PLAYBACK],
@@ -496,11 +488,11 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
         ),
         # Roles still need a playback-capable connection, source included.
         (
-            PskCategory.LONG_TERM,
+            PskCategory.SENTINEL,
             [Activity.PAIRING],
             [Roles.SOURCE.value],
             False,
-            GoodbyeReason.UNAUTHORIZED,
+            GoodbyeReason.PAIRING_REQUIRED,
         ),
     ],
 )
@@ -554,8 +546,6 @@ async def test_unrecognized_activity_is_ignored_and_activation_applies() -> None
 @pytest.mark.parametrize(
     ("category", "unpaired", "activities"),
     [
-        # Pairing on a long-term PSK is never playback-capable.
-        (PskCategory.LONG_TERM, False, [Activity.PAIRING]),
         # Without unpaired access an unpaired session is never playback-capable.
         (PskCategory.SENTINEL, False, [Activity.PAIRING]),
         (PskCategory.PAIRING, False, []),
@@ -612,9 +602,9 @@ async def test_persisted_source_role_stays_on_an_unpaired_session() -> None:
 
 @pytest.mark.asyncio
 async def test_lapsed_source_role_ends_its_stream() -> None:
-    """A source role emptied by a pairing activation on a long-term PSK ends its stream."""
+    """A source role emptied by a pairing activation on an unpaired session ends its stream."""
     connection = await _connection(
-        PskCategory.LONG_TERM,
+        PskCategory.SENTINEL,
         roles=[Roles.SOURCE],
         source_support=ClientHelloSourceSupport(
             features=ClientHelloSourceFeatures(line_sense=True)

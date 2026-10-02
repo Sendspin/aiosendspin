@@ -1699,8 +1699,8 @@ class SendspinConnection:
     def _pairing_quiesces(self) -> bool:
         """Whether pairing takes the connection out of playback.
 
-        Pairing never runs alongside playback on a long-term PSK: an attempt there either
-        keeps that PSK or moves the session off the record it holds.
+        Pairing never runs alongside playback on a long-term PSK: an attempt there moves the
+        session off the record it holds.
         """
         # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
         # Legacy-generation clients admit no activity set that mixes pairing and playback.
@@ -1783,11 +1783,6 @@ class SendspinConnection:
             # cancelled(), so awaiting callers see the abort rather than the cancel.
             await abort_pairing(transport, PairAbortReason.USER_CANCELLED)
         self._pairing_attempt = None
-        if record is None:  # verified an existing pairing: no new record, no re-handshake
-            self._logger.info(
-                "Verified pairing with client %s via %s", self._client_id, method.value
-            )
-            return True
         self._logger.info("Paired with client %s via %s", self._client_id, method.value)
         self.forget_credential_mismatch()
         # The client finalized, so the attempt has succeeded and both sides hold the record:
@@ -1804,10 +1799,9 @@ class SendspinConnection:
         A connection that can carry playback alongside pairing keeps its active roles; any
         other connection, including on its first activation, declares none.
         """
-        alongside_playback = self._playback_capable and not self._is_long_term_paired
         # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
         # Legacy-generation clients expect pairing to replace playback and roles.
-        if self._declared_activities is None or self._legacy_hello or not alongside_playback:
+        if self._declared_activities is None or self._legacy_hello or not self._playback_capable:
             return ServerActivatePayload(
                 activities=[Activity.PAIRING], active_roles=[], pairing=pairing
             )
@@ -1821,8 +1815,8 @@ class SendspinConnection:
         method: PairMethod,
         transport: EncryptedWebSocket,
         pairing_format: PairingCodeFormat | None,
-    ) -> ServerPairingRecord | None:
-        """Run ``method``'s exchange, returning the record (``None`` when verifying)."""
+    ) -> ServerPairingRecord:
+        """Run ``method``'s exchange, returning the record."""
         assert self._client_id is not None
         self._pairing_index += 1
         pairing_index = self._pairing_index
@@ -1843,11 +1837,7 @@ class SendspinConnection:
         assert self._pairing_attempt is not None
         assert self._pairing_attempt.pairing_code_provider is not None
         assert self._handshake_hash is not None
-        assert self._noise_psk is not None
         assert self._client_info is not None
-        verify = self._pairing_attempt.verify
-        if verify and self._noise_psk.category is not PskCategory.LONG_TERM:
-            raise PairingError("verification requires an existing pairing")
         # The list form of supported_pair_methods predates pairing rounds.
         # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
         legacy_rounds = bool(self._client_info.legacy_pair_methods_list_used)
@@ -1859,7 +1849,6 @@ class SendspinConnection:
                 pairing_code_provider=self._pairing_attempt.pairing_code_provider,
                 client_id=self._client_id,
                 store=self._server.pairing_store,
-                verify=verify,
                 on_pair_pending=self._pairing_attempt.on_pair_pending,
                 owner=self._pairing_attempt.owner,
                 legacy_rounds=legacy_rounds,
@@ -1873,7 +1862,6 @@ class SendspinConnection:
             pairing_format=pairing_format,
             client_id=self._client_id,
             store=self._server.pairing_store,
-            verify=verify,
             on_pair_pending=self._pairing_attempt.on_pair_pending,
             owner=self._pairing_attempt.owner,
             legacy_rounds=legacy_rounds,
@@ -1939,11 +1927,7 @@ class SendspinConnection:
                 psk_id_for(attempt.pairing_psk), attempt.pairing_psk, PskCategory.PAIRING
             )
         else:
-            if self._noise_psk.category is PskCategory.SENTINEL or (
-                self._noise_psk.category is PskCategory.LONG_TERM and attempt.verify
-            ):
-                # Long-term: verification runs over the existing PSK, outside the activity table.
-                # Sentinel: a fresh pairing-code pairing.
+            if self._noise_psk.category is PskCategory.SENTINEL:
                 return True
             target = ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
         assert isinstance(transport, EncryptedWebSocket)

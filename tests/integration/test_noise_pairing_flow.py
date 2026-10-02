@@ -2078,46 +2078,6 @@ async def test_end_pairing_during_attempt_leaves_pairing() -> None:
             await client.disconnect()
 
 
-async def test_end_pairing_returns_with_roles_restored() -> None:
-    """end_pairing on a quiesced long-term session returns only once its roles are back."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-    await _seed_long_term(server, server_store, client_store, identity.peer_id)
-    shown: asyncio.Queue[str] = asyncio.Queue()
-    waiting = asyncio.Event()
-
-    async def provide() -> str:
-        await shown.get()
-        waiting.set()
-        return await asyncio.get_running_loop().create_future()
-
-    client = await _code_pairing_client(
-        identity, client_store, PairMethod.DYNAMIC_PAIRING_CODE, shown
-    )
-    async with _serve(server) as url:
-        try:
-            await client.connect(url)
-            conn = await _find_connection_by_client_id(server, identity.peer_id)
-            assert _server_active_role_count(server, identity.peer_id) == 1
-            attempt = asyncio.create_task(
-                conn.initiate_pairing(
-                    replace(_code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide), verify=True)
-                )
-            )
-            async with asyncio.timeout(5):
-                await waiting.wait()
-            assert _server_active_role_count(server, identity.peer_id) == 0
-
-            await conn.end_pairing()
-            assert _server_active_role_count(server, identity.peer_id) == 1
-            with pytest.raises(PairingAbortError):
-                await attempt
-        finally:
-            await client.disconnect()
-
-
 async def test_gesture_timeout_leaves_pairing_without_dropping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3112,65 +3072,6 @@ async def test_pairing_finalize_clears_staged_and_trusted_unpaired() -> None:
             await client.disconnect()
 
 
-async def test_reverification_leaves_staged_and_trusted_unpaired() -> None:
-    """A verify attempt finalizes no record and leaves staged/trusted-unpaired entries alone."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    client_identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-
-    long_term = generate_psk()
-    long_term_id = psk_id_for(long_term)
-    await server_store.store_record(
-        ServerPairingRecord(
-            psk_id=long_term_id, psk=long_term, client_id=client_identity.peer_id, pair_methods=[]
-        )
-    )
-    await client_store.store_record(
-        ClientPairingRecord(psk_id=long_term_id, psk=long_term, server_id=server.id)
-    )
-    staged = generate_psk()
-    await server_store.stage_pairing_psk(
-        client_identity.peer_id, StagedPairingPsk(psk_id=psk_id_for(staged), psk=staged)
-    )
-    await server_store.add_trusted_unpaired(
-        TrustedUnpairedClient(client_id=client_identity.peer_id)
-    )
-
-    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-
-    async def display(pairing_code: str | None, **_kwargs: object) -> None:
-        if pairing_code is not None and not shown.done():
-            shown.set_result(pairing_code)
-
-    async def provide() -> str:
-        return await shown
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=client_identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=display),
-        )
-        try:
-            await client.connect(url)
-            await server.initiate_pairing(
-                client_identity.peer_id,
-                PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE,
-                    pairing_code_provider=provide,
-                    verify=True,
-                    pairing_format=PairingCodeFormat.DIGITS,
-                ),
-            )
-            assert await server_store.staged_pairing_psk(client_identity.peer_id) is not None
-            assert await server_store.trusted_unpaired(client_identity.peer_id) is not None
-        finally:
-            await client.disconnect()
-
-
 async def test_live_pairing_static_pairing_code() -> None:
     """Operator pairs a Sentinel-idle connection via a static pairing code once the window opens."""
     server_store = InMemoryServerPairingStore()
@@ -3728,12 +3629,11 @@ async def _await_player_state(conn: SendspinConnection, *, volume: int, muted: b
 
 
 async def test_resync_resends_current_player_state() -> None:
-    """After a re-verification, the client re-pushes its *current* player state.
+    """After a re-pairing, the client re-pushes its *current* player state.
 
-    Dynamic pairing code over the long-term PSK re-verifies the pairing: the channel stays on the
-    long-term PSK (no re-handshake), and the leave-pairing server/activate reactivates the
-    player role. The client follows it with a fresh client/state carrying the volume/mute it
-    last reported, not the construction-time initial values.
+    The server/activate that ends a dynamic pairing code re-pairing reactivates the player role.
+    The client follows it with a fresh client/state carrying the volume/mute it last reported,
+    not the construction-time initial values.
     """
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
@@ -3811,7 +3711,6 @@ async def test_resync_resends_current_player_state() -> None:
                 PairingAttempt(
                     method=PairMethod.DYNAMIC_PAIRING_CODE,
                     pairing_code_provider=provide,
-                    verify=True,
                     pairing_format=PairingCodeFormat.DIGITS,
                 )
             )
@@ -3832,164 +3731,6 @@ async def _await_connected_client(server: SendspinServer, client_id: str) -> Sen
             if client is not None and client.is_connected:
                 return client
             await asyncio.sleep(0.01)
-
-
-async def test_reverification_over_long_term_keeps_pairing() -> None:
-    """Dynamic pairing code over a long-term PSK re-verifies without disturbing the pairing.
-
-    The server runs the dynamic PAKE round but leaves pairing instead of finalizing: the
-    connection stays on the *same* long-term PSK, no new record is stored on either side,
-    and roles are reactivated. A successful round resets the failure counter like any other.
-    """
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    client_identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-
-    long_term = generate_psk()
-    long_term_id = psk_id_for(long_term)
-    await server_store.store_record(
-        ServerPairingRecord(
-            psk_id=long_term_id, psk=long_term, client_id=client_identity.peer_id, pair_methods=[]
-        )
-    )
-    await client_store.store_record(
-        ClientPairingRecord(psk_id=long_term_id, psk=long_term, server_id=server.id)
-    )
-    # A pre-existing dynamic-pairing-code round count is reset by a successful re-verification.
-    await client_store.record_pairing_round()
-
-    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-
-    async def display(pairing_code: str | None, **_kwargs: object) -> None:
-        if pairing_code is not None and not shown.done():
-            shown.set_result(pairing_code)
-
-    async def provide() -> str:
-        return await shown
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=client_identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=display),
-        )
-        try:
-            await client.connect(url)
-            assert client.noise_psk is not None
-            assert client.noise_psk.category is PskCategory.LONG_TERM
-
-            server_client = await _await_connected_client(server, client_identity.peer_id)
-            # The accessor reports the pre-check security state.
-            assert server_client.is_paired
-            security = server_client.connection_security
-            assert security is not None
-            assert security.psk_category is PskCategory.LONG_TERM
-            assert security.trust_level is TrustLevel.USER
-
-            await server.initiate_pairing(
-                client_identity.peer_id,
-                PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE,
-                    pairing_code_provider=provide,
-                    verify=True,
-                    pairing_format=PairingCodeFormat.DIGITS,
-                ),
-            )
-
-            # The connection survives and stays on the *same* long-term PSK.
-            assert client.connected
-            assert client.noise_psk is not None
-            assert client.noise_psk.category is PskCategory.LONG_TERM
-            assert client.noise_psk.psk == long_term
-            assert server_client.is_paired
-
-            # The pairing PSK is unchanged on both sides; the verification is recorded server-side.
-            client_record = await client_store.record_by_server_id(server.id)
-            server_record = await server_store.record_by_client_id(client_identity.peer_id)
-            assert client_record is not None
-            assert server_record is not None
-            assert client_record.psk == long_term
-            assert server_record.psk == long_term
-            assert server_record.pair_methods == [PairMethod.DYNAMIC_PAIRING_CODE]
-            # The seeded long-term record plus the pre-provisioned shared fallback; nothing new.
-            stored_pubkey = [
-                r for r in await client_store.list_records() if r.server_id is not None
-            ]
-            assert len(stored_pubkey) == 1
-            # server_kc verified, so the round count resets to zero.
-            assert await client_store.pairing_round_count() == 0
-        finally:
-            await client.disconnect()
-
-
-async def test_reverification_at_round_limit_is_held_back() -> None:
-    """Re-verification at the round limit waits for the pairing window, then resets the count."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    client_identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-
-    long_term = generate_psk()
-    long_term_id = psk_id_for(long_term)
-    await server_store.store_record(
-        ServerPairingRecord(
-            psk_id=long_term_id, psk=long_term, client_id=client_identity.peer_id, pair_methods=[]
-        )
-    )
-    await client_store.store_record(
-        ClientPairingRecord(psk_id=long_term_id, psk=long_term, server_id=server.id)
-    )
-    for _ in range(PAIRING_ROUND_LIMIT):
-        await client_store.record_pairing_round()
-    assert await client_store.is_pairing_round_limit_reached()
-
-    window_opened = asyncio.get_running_loop().create_future()
-
-    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
-        if active and not window_opened.done():
-            window_opened.set_result(None)
-            client.open_pairing_window()
-
-    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-
-    async def display(pairing_code: str | None, **_kwargs: object) -> None:
-        if pairing_code is not None and not shown.done():
-            shown.set_result(pairing_code)
-
-    async def provide() -> str:
-        return await shown
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=client_identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(
-                gesture_prompt=gesture_prompt, pairing_code_display=display
-            ),
-        )
-        try:
-            await client.connect(url)
-            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            await conn.initiate_pairing(
-                PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE,
-                    pairing_code_provider=provide,
-                    verify=True,
-                    pairing_format=PairingCodeFormat.DIGITS,
-                )
-            )
-            assert window_opened.done()  # the attempt waited for the gesture
-            assert client.connected
-            assert client.noise_psk is not None
-            assert client.noise_psk.psk == long_term  # same long-term PSK, no re-pair
-            assert await client_store.pairing_round_count() == 0
-        finally:
-            await client.disconnect()
 
 
 async def test_initiate_pairing_refuses_a_pairing_psk_token_for_another_client() -> None:
