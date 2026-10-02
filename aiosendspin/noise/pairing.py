@@ -401,7 +401,9 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
         round_number = 1
         while True:
             await ws.send_str(ServerPairInitMessage(payload=init_payload).to_json())
-            prs = _entered_dynamic_prs(await pairing_code_provider(), pairing_format)
+            prs = _entered_dynamic_prs(
+                await _await_pairing_code(ws, pairing_code_provider), pairing_format
+            )
             # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
             sid = (
                 _legacy_pake_sid(handshake_hash, pairing_index)
@@ -546,7 +548,9 @@ async def run_static_pairing_code_server(
     if init.payload.commit_B is not None:
         raise PairingError("client/pair-init carries commit_B for static pairing code")
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
-        pairing_code = pairing_code_mod.strip_separators(await pairing_code_provider())
+        pairing_code = pairing_code_mod.strip_separators(
+            await _await_pairing_code(ws, pairing_code_provider)
+        )
         if not pairing_code_mod.is_valid_static_pairing_code(pairing_code):
             raise InvalidPairingCodeError("static pairing code must be exactly 8 decimal digits")
         cpace = await _run_server_pake(ws, pairing_code.encode("ascii"), sid)
@@ -862,6 +866,23 @@ async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
     """
     await _receive_pairing(ws, PairAbortMessage)
     raise PairingError("expected pair/abort")
+
+
+async def _await_pairing_code(
+    ws: EncryptedWebSocket, pairing_code_provider: PairingCodeProvider
+) -> str:
+    """Await the operator's pairing code, ending early on the client's ``pair/abort``."""
+    code = asyncio.ensure_future(pairing_code_provider())
+    abort = asyncio.create_task(receive_pairing_abort(ws))
+    try:
+        await asyncio.wait((code, abort), return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        code.cancel()
+        abort.cancel()
+        await asyncio.wait((code, abort))
+    if not abort.cancelled():
+        await abort
+    return code.result()
 
 
 async def _receive_pair_init(
