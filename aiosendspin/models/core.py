@@ -539,6 +539,7 @@ class ClientStatePayload(SendspinModel):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
     legacy_state_used: bool | None = None
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
@@ -558,6 +559,7 @@ class ClientStatePayload(SendspinModel):
         Application-specific role objects are nested under `application_objects`.
         """
         d = collect_application_objects(d)
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         legacy_state = "state" in d
         if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"

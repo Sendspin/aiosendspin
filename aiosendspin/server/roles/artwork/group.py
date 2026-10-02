@@ -343,6 +343,7 @@ class ArtworkGroupRole(GroupRole):
                 resized_image.save(img_bytes, format="JPEG", quality=85)
             elif art_format == PictureFormat.PNG:
                 resized_image.save(img_bytes, format="PNG", compress_level=6)
+            # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
             elif art_format == PictureFormat.BMP:
                 resized_image.save(img_bytes, format="BMP")
             else:

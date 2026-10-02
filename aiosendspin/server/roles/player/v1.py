@@ -530,6 +530,7 @@ class PlayerV1Role(Role):
         — a client that only declared the pre-rename 'set_static_delay' still
         receives a delay command it can act on.
         """
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if PlayerCommand.SET_OUTPUT_DELAY in self.state_supported_commands:
             command = PlayerCommand.SET_OUTPUT_DELAY
         elif PlayerCommand.SET_STATIC_DELAY in self.state_supported_commands:
@@ -687,10 +688,12 @@ class PlayerV1Role(Role):
             reasons.append("omitted muted despite declaring the mute command")
         if state.state is not None:
             reasons.append("used legacy player.state instead of top-level available")
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if state.legacy_delay_key:
             reasons.append(f"used the pre-rename '{state.legacy_delay_key}' key")
         if state.ignored_commands:
             reasons.append("declared unrecognized supported_commands")
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if state.supported_commands and PlayerCommand.SET_STATIC_DELAY in state.supported_commands:
             reasons.append("declared the pre-rename 'set_static_delay' command")
         if state.format is not None and not self._is_declared_format(state.format):

@@ -1862,6 +1862,7 @@ class SendspinConnection:
             payload = replace(payload, player=None)
         if payload.player is not None:
             player_cmd = payload.player
+            # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
             if (
                 player_cmd.command
                 in (PlayerCommand.SET_OUTPUT_DELAY, PlayerCommand.SET_STATIC_DELAY)

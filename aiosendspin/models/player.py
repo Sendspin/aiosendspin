@@ -16,10 +16,12 @@ from typing import Any, NamedTuple
 from .base import SendspinConfig, SendspinModel, split_enum_values
 from .types import AudioCodec, BinaryMessageType, PlayerCommand
 
+# DEPRECATED(spec-pr-164): remove in aiosendspin <version>
 # Pre-rename delay key, superseded by `output_delay_ms`.
 _LEGACY_DELAY_KEY = "static_delay_ms"
 
 
+# DEPRECATED(spec-pr-164): remove in aiosendspin <version>
 def _rewrite_legacy_delay_key(d: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of `d` with the pre-rename `static_delay_ms` key on `output_delay_ms`."""
     normalized = dict(d)
@@ -202,6 +204,7 @@ class PlayerStatePayload(SendspinModel):
     Required in every player object and empty when the player accepts no commands.
     DEPRECATED(spec-pr-175): omitted in incremental updates means unchanged.
     """
+    # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
     legacy_delay_key: str | None = None
     """Pre-rename delay key the parser rewrote, recorded for the role to flag.
     Not part of the wire schema (omitted when None)."""
@@ -220,6 +223,7 @@ class PlayerStatePayload(SendspinModel):
 
         Supported commands this implementation does not recognize are dropped and recorded.
         """
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         normalized = _rewrite_legacy_delay_key(d)
         # Always overwrite so a client cannot spoof the records via the wire.
         normalized["legacy_delay_key"] = _LEGACY_DELAY_KEY if _LEGACY_DELAY_KEY in d else None
@@ -268,6 +272,7 @@ class PlayerCommandPayload(SendspinModel):
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Accept the pre-rename `static_delay_ms` spelling and clamp the delay to 0-5000."""
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         normalized = _rewrite_legacy_delay_key(d)
         delay_ms = normalized.get("output_delay_ms")
         if isinstance(delay_ms, int):
@@ -290,6 +295,7 @@ class PlayerCommandPayload(SendspinModel):
         elif self.mute is not None:
             raise ValueError(f"Mute should not be provided for command '{self.command.value}'")
 
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if self.command in (PlayerCommand.SET_OUTPUT_DELAY, PlayerCommand.SET_STATIC_DELAY):
             if self.output_delay_ms is None:
                 raise ValueError(
@@ -304,6 +310,7 @@ class PlayerCommandPayload(SendspinModel):
                 f"output_delay_ms should not be provided for command '{self.command.value}'"
             )
 
+    # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Serialize `output_delay_ms` under the wire key matching `command`.
 
