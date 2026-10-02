@@ -82,13 +82,6 @@ def undefined_field() -> UndefinedField:
 # Enums
 
 
-class TrustLevel(Enum):
-    """Trust a connection carries, derived from the PSK category that admitted it."""
-
-    NONE = "none"
-    USER = "user"
-
-
 class Roles(Enum):
     """Client roles with explicit versioning."""
 
@@ -280,7 +273,7 @@ class GoodbyeReason(Enum):
     USER_REQUEST = "user_request"
     """User explicitly requested to disconnect from this server."""
     UNAUTHORIZED = "unauthorized"
-    """Server requested an activity the client's trust level does not permit."""
+    """Server requested an activity the client is not authorized for."""
     PAIRING_REQUIRED = "pairing_required"
     """Server requested playback but the client requires pairing first."""
     CONCURRENT_ATTEMPT = "concurrent_attempt"
