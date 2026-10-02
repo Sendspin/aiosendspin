@@ -35,22 +35,9 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         """
         current_time_us = self._now_us()
         current = self._state.current(current_time_us)
-        if current is None or current.track_progress is None:
+        if current is None:
             return None
-
-        if current.timestamp_us is not None and current.playback_speed is not None:
-            elapsed_us = current_time_us - current.timestamp_us
-            elapsed_ms = (elapsed_us * current.playback_speed) // 1_000_000
-            calculated_progress = current.track_progress + elapsed_ms
-
-            if current.track_duration is not None and current.track_duration > 0:
-                calculated_progress = max(0, min(calculated_progress, current.track_duration))
-            else:
-                calculated_progress = max(0, calculated_progress)
-
-            return calculated_progress
-
-        return current.track_progress
+        return current.track_progress_at(current_time_us)
 
     def freeze_progress(self) -> None:
         """Snapshot current progress and stop further client-side progress extrapolation."""

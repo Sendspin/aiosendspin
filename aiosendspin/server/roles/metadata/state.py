@@ -113,6 +113,18 @@ class Metadata:
         progress_drift = abs(actual_progress_change - expected_progress_change)
         return progress_drift <= progress_tolerance_ms
 
+    def track_progress_at(self, timestamp_us: int) -> int | None:
+        """Return the position in milliseconds at `timestamp_us`, clamped to the track duration."""
+        if self.track_progress is None:
+            return None
+        if self.timestamp_us is None or self.playback_speed is None:
+            return self.track_progress
+        elapsed_ms = ((timestamp_us - self.timestamp_us) * self.playback_speed) // 1_000_000
+        progress = max(0, self.track_progress + elapsed_ms)
+        if self.track_duration is not None and self.track_duration > 0:
+            progress = min(progress, self.track_duration)
+        return progress
+
     def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
         """Build a SessionUpdateMetadata carrying the full current state."""
         progress = None
