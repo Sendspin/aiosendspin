@@ -54,6 +54,7 @@ from .types import (
     PairingCodeFormat,
     PairMethod,
     PlaybackStateType,
+    RepeatMode,
     Roles,
     ServerMessage,
     UndefinedField,
@@ -892,13 +893,25 @@ class LegacyServerStateMessage(ServerMessage):
     """
 
     payload: ServerStatePayload
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    metadata_repeat: RepeatMode | None = None
+    """Repeat mode added to the metadata object, for clients that read it there."""
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    metadata_shuffle: bool | None = None
+    """Shuffle state added to the metadata object, for clients that read it there."""
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
-        """Add every unset metadata and color field as null."""
+        """Add every unset metadata and color field as null, and any metadata repeat and shuffle."""
         payload = d["payload"]
         for key, model in (("metadata", SessionUpdateMetadata), ("color", SessionUpdateColor)):
             if isinstance(role_object := payload.get(key), dict):
                 payload[key] = {f.name: None for f in fields(model)} | role_object
+        # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+        if isinstance(metadata := payload.get("metadata"), dict):
+            if self.metadata_repeat is not None:
+                metadata["repeat"] = self.metadata_repeat.value
+            if self.metadata_shuffle is not None:
+                metadata["shuffle"] = self.metadata_shuffle
         return {"type": "server/state", "payload": payload}
 
 
