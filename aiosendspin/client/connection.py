@@ -824,15 +824,13 @@ class SendspinConnection:
             await receive
 
     async def _supported_pair_methods(self) -> tuple[PairMethod, ...]:
-        """Methods this client advertises: each implemented method that config enables.
+        """Methods this client advertises: Pairing PSK and each implemented method config enables.
 
         ``static_pairing_code`` additionally requires a configured pairing code.
         """
         implemented = self._client.implemented_pair_methods
         config = await self._client.pairing_store.get_pairing_config()
-        methods: list[PairMethod] = []
-        if config.pairing_psk_enabled:
-            methods.append(PairMethod.PAIRING_PSK)
+        methods: list[PairMethod] = [PairMethod.PAIRING_PSK]
         if (
             PairMethod.STATIC_PAIRING_CODE in implemented
             and config.static_pairing_code_enabled
