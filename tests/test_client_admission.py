@@ -80,14 +80,6 @@ def test_activity_rank_orders_playback_over_pairing() -> None:
     assert rank([]) == 0
 
 
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-def test_activity_rank_ignores_management() -> None:
-    """Management adds nothing to a connection's rank."""
-    rank = SendspinClient._activity_rank
-    assert rank([Activity.MANAGEMENT, Activity.PLAYBACK]) == 2
-    assert rank([Activity.MANAGEMENT]) == 0
-
-
 # --- _should_admit_connection ---
 
 
@@ -126,28 +118,6 @@ async def test_lower_rank_rejected() -> None:
     assert client._should_admit_connection(incoming) is False
 
 
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-async def test_management_does_not_outrank_playback() -> None:
-    """A management-only connection does not displace an admitted playback connection."""
-    client = _client()
-    client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
-        activities=[Activity.PLAYBACK]
-    )
-    incoming = _FakeConnection(activities=[Activity.MANAGEMENT])
-    assert client._should_admit_connection(incoming) is False
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-async def test_management_ranks_with_its_other_activities() -> None:
-    """Management alongside playback ranks as playback against an admitted playback holder."""
-    client = _client()
-    client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
-        activities=[Activity.PLAYBACK]
-    )
-    incoming = _FakeConnection(activities=[Activity.PLAYBACK, Activity.MANAGEMENT])
-    assert client._should_admit_connection(incoming) is True
-
-
 async def test_equal_nonempty_rank_admitted() -> None:
     """An incoming playback connection displaces an admitted playback connection."""
     client = _client()
@@ -175,21 +145,6 @@ async def test_inflight_pairing_not_displaced_by_playback() -> None:
         activities=[Activity.PAIRING], pairing_attempt_in_progress=True
     )
     incoming = _FakeConnection(activities=[Activity.PLAYBACK])
-    assert client._should_admit_connection(incoming) is False
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-@pytest.mark.parametrize(
-    "activities",
-    [[Activity.MANAGEMENT], [Activity.PLAYBACK, Activity.MANAGEMENT]],
-)
-async def test_inflight_pairing_not_displaced_by_management(activities: list[Activity]) -> None:
-    """Management never displaces an in-flight pairing attempt."""
-    client = _client()
-    client._admitted_connection = _FakeConnection(  # type: ignore[assignment]
-        activities=[Activity.PAIRING], pairing_attempt_in_progress=True
-    )
-    incoming = _FakeConnection(activities=activities)
     assert client._should_admit_connection(incoming) is False
 
 

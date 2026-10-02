@@ -82,7 +82,6 @@ from .trust_store import (
     ServerPairingRecord,
     ServerPairingStore,
     StagedPairingPsk,
-    StorageExhaustedError,
     TrustedUnpairedClient,
     TrustLevel,
 )
@@ -141,7 +140,6 @@ __all__ = [
     "ServerPairingRecord",
     "ServerPairingStore",
     "StagedPairingPsk",
-    "StorageExhaustedError",
     "TrustLevel",
     "TrustedUnpairedClient",
     "b64url_decode",

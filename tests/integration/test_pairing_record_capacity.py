@@ -100,7 +100,7 @@ async def _await_paired_session(client: SdkClient) -> None:
 
 
 async def _per_server_psk_ids(store: InMemoryClientPairingStore) -> set[str]:
-    return {r.psk_id for r in await store.list_records() if r.server_id is not None}
+    return {r.psk_id for r in await store.list_records()}
 
 
 @pytest.mark.parametrize("protect_oldest", [False, True])

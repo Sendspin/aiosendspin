@@ -1,4 +1,4 @@
-"""Constrained pairing-store fakes shared across the noise/client/integration suites."""
+"""Pairing-store helpers shared across the noise/client/integration suites."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ from aiosendspin.noise.keys import generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
     ClientPairingRecord,
     ClientPairingStore,
-    InMemoryClientPairingStore,
-    StorageReport,
 )
 
 
@@ -29,22 +27,3 @@ async def seed_used_client_records(
         await store.store_record(record)
         records.append(record)
     return records
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-class ExhaustedClientStore(InMemoryClientPairingStore):
-    """Client store that cannot persist new records (exercises the shared-PSK fallback)."""
-
-    async def can_store_record(self) -> bool:
-        """Refuse: there is no capacity for a new record."""
-        return False
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-class BoundedClientStore(InMemoryClientPairingStore):
-    """Client store with a fixed four-slot record budget (one slot per record)."""
-
-    async def storage_accounting(self) -> StorageReport:
-        """Report a four-slot budget, one slot consumed per stored record."""
-        used = len(await self.list_records())
-        return StorageReport(capacity=4, free=4 - used, cost_individual=1, cost_shared=1)
