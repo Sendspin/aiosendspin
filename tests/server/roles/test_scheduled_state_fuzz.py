@@ -207,14 +207,13 @@ def _make_group(clock: ManualClock) -> MagicMock:
     return group
 
 
-def _random_metadata(rng: random.Random, timestamp_us: int | None) -> Metadata:
+def _random_metadata(rng: random.Random) -> Metadata:
     return Metadata(
         title=rng.choice(["A", "B", "C"]),
         artist=rng.choice([None, "Artist"]),
         track_progress=rng.randint(0, 100_000),
         track_duration=rng.choice([0, 200_000]),
         playback_speed=rng.choice([0, 1000]),
-        timestamp_us=timestamp_us,
     )
 
 
@@ -237,10 +236,10 @@ def _run_state_scenario(rng: random.Random, *, metadata: bool) -> None:
             return _state_fields(state.snapshot_update(state.timestamp_us), progress_at)
 
         def set_now() -> None:
-            role.set_metadata(_random_metadata(rng, None))
+            role.set_metadata(_random_metadata(rng))
 
         def schedule(timestamp_us: int) -> None:
-            role.set_metadata(_random_metadata(rng, timestamp_us))
+            role.set_metadata(_random_metadata(rng), timestamp_us=timestamp_us)
 
     else:
         role = ColorGroupRole(group)

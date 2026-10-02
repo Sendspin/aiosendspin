@@ -36,7 +36,7 @@ class Metadata:
     # Progress fields:
     # A track_progress requires a playback_speed; progress is sent whenever both are set
     track_progress: int | None = None
-    """Track progress in milliseconds at the last update time. Requires `playback_speed`."""
+    """Track progress in milliseconds at `timestamp_us`. Requires `playback_speed`."""
     track_duration: int | None = None
     """
     Track duration in milliseconds.
@@ -48,10 +48,10 @@ class Metadata:
 
     timestamp_us: int | None = None
     """
-    Timestamp in microseconds when this metadata was captured.
+    Server time in microseconds at which `track_progress` was measured.
 
-    You don't need to set this, since it will be set automatically by set_metadata() if not
-    provided.
+    Defaults to the time the metadata takes effect. To schedule metadata, pass `timestamp_us`
+    to `set_metadata()` instead.
     """
 
     def __post_init__(self) -> None:
@@ -112,6 +112,18 @@ class Metadata:
         # Check if the difference between expected and actual is within tolerance
         progress_drift = abs(actual_progress_change - expected_progress_change)
         return progress_drift <= progress_tolerance_ms
+
+    def track_progress_at(self, timestamp_us: int) -> int | None:
+        """Return the position in milliseconds at `timestamp_us`, clamped to the track duration."""
+        if self.track_progress is None:
+            return None
+        if self.timestamp_us is None or self.playback_speed is None:
+            return self.track_progress
+        elapsed_ms = ((timestamp_us - self.timestamp_us) * self.playback_speed) // 1_000_000
+        progress = max(0, self.track_progress + elapsed_ms)
+        if self.track_duration is not None and self.track_duration > 0:
+            progress = min(progress, self.track_duration)
+        return progress
 
     def snapshot_update(self, timestamp: int) -> SessionUpdateMetadata:
         """Build a SessionUpdateMetadata carrying the full current state."""
