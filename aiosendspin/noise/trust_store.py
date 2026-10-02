@@ -49,8 +49,6 @@ __all__ = [
     "ServerPairingRecord",
     "ServerPairingStore",
     "StagedPairingPsk",
-    "StorageExhaustedError",
-    "StorageReport",
     "TrustLevel",
     "TrustedUnpairedClient",
 ]
@@ -89,24 +87,8 @@ _PSK_CATEGORY_CODES: dict[PskCategory, str] = {
 _PSK_CATEGORIES_BY_CODE: dict[str, PskCategory] = {c: k for k, c in _PSK_CATEGORY_CODES.items()}
 
 
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-class StorageExhaustedError(Exception):
-    """A pairing cannot persist its record and has no shared-PSK fallback."""
-
-
 class _UnknownPairMethodError(ValueError):
     """A stored record names a pair method this version does not recognise."""
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-@dataclass(frozen=True, slots=True)
-class StorageReport:
-    """A bounded client's record-storage accounting."""
-
-    capacity: int
-    free: int
-    cost_individual: int
-    cost_shared: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,9 +163,7 @@ class ClientPairingRecord:
 
     psk_id: str
     psk: bytes
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    # ``None`` marks a shared record-mode record.
-    server_id: str | None = None
+    server_id: str
     used: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_used_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -216,7 +196,7 @@ class ClientPairingRecord:
         return cls(
             psk_id=_str(data, "psk_id"),
             psk=b64url_decode(_str(data, "psk")),
-            server_id=_opt_str(data, "server_id"),
+            server_id=_str(data, "server_id"),
             used=_bool(data, "used"),
             created_at=created_at,
             last_used_at=(
@@ -232,9 +212,6 @@ class ClientPairingConfig:
     dynamic_pairing_code_enabled: bool = True
     static_pairing_code_enabled: bool = False
     unpaired_access_enabled: bool = False
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    record_mode_psk_id: str
-    """Shared-PSK record used as the storage-exhaustion fallback when pairing."""
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to a JSON-friendly dict."""
@@ -242,7 +219,6 @@ class ClientPairingConfig:
             "dynamic_pin_enabled": self.dynamic_pairing_code_enabled,
             "static_pin_enabled": self.static_pairing_code_enabled,
             "unpaired_access_enabled": self.unpaired_access_enabled,
-            "record_mode_psk_id": self.record_mode_psk_id,
         }
 
     @classmethod
@@ -252,7 +228,6 @@ class ClientPairingConfig:
             dynamic_pairing_code_enabled=_bool(data, "dynamic_pin_enabled", default=True),
             static_pairing_code_enabled=_bool(data, "static_pin_enabled", default=False),
             unpaired_access_enabled=_bool(data, "unpaired_access_enabled", default=False),
-            record_mode_psk_id=_str(data, "record_mode_psk_id"),
         )
 
 
@@ -495,91 +470,41 @@ class ClientPairingStore(ABC):
     async def set_last_playback_server_id(self, server_id: str | None) -> None:
         """Persist the last-playback server id."""
 
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    async def can_store_record(self) -> bool:
-        """Return whether the store can persist another record (default: unlimited)."""
-        return True
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    async def storage_accounting(self) -> StorageReport | None:
-        """Return record-storage accounting, or ``None`` if storage is unbounded/unknown."""
-        return None
-
     async def resolve_pairing_outcome(
         self,
         *,
         server_id: str,
-    ) -> tuple[bytes, ClientPairingRecord | None]:
-        """Decide a pairing's outcome: a fresh per-server record, or the shared-PSK fallback."""
-        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-        # Only a store whose can_store_record refuses reaches the shared-PSK fallback.
-        if await self.can_store_record():
-            psk = generate_psk()
-            record = ClientPairingRecord(
-                psk_id=psk_id_for(psk),
-                psk=psk,
-                server_id=server_id,
-            )
-            return psk, record
-        # Storage exhausted: admit under the shared-PSK fallback record.
-        psk_id = (await self.get_pairing_config()).record_mode_psk_id
-        resolved = await self.resolve_by_psk_id(psk_id)
-        if resolved is None or not _is_shared_record(resolved):
-            msg = f"shared-PSK fallback record {psk_id!r} is missing or not shared"
-            raise StorageExhaustedError(msg)
-        return resolved.psk, None
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    async def set_record_mode_psk_id(self, psk_id: str) -> None:
-        """Set the shared-PSK fallback record; ``psk_id`` must name a shared record."""
-        resolved = await self.resolve_by_psk_id(psk_id)
-        if resolved is None:
-            msg = f"record_mode psk_id {psk_id!r} references no record"
-            raise ValueError(msg)
-        if not _is_shared_record(resolved):
-            msg = f"record_mode psk_id {psk_id!r} must reference a shared-PSK record"
-            raise ValueError(msg)
-        config = await self.get_pairing_config()
-        await self.store_pairing_config(replace(config, record_mode_psk_id=psk_id))
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    async def _record_mode_references(self, psk_id: str) -> bool:
-        """Return whether the record_mode fallback references ``psk_id``."""
-        return (await self.get_pairing_config()).record_mode_psk_id == psk_id
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    async def can_remove_record(self, psk_id: str) -> bool:
-        """Return whether the record at ``psk_id`` may be removed (not record_mode-referenced)."""
-        return not await self._record_mode_references(psk_id)
+    ) -> tuple[bytes, ClientPairingRecord]:
+        """Decide a pairing's outcome: a fresh per-server record."""
+        psk = generate_psk()
+        record = ClientPairingRecord(
+            psk_id=psk_id_for(psk),
+            psk=psk,
+            server_id=server_id,
+        )
+        return psk, record
 
     async def replace_record_for_server_id(
         self, record: ClientPairingRecord, *, protected: AbstractSet[str] = frozenset()
     ) -> None:
-        """Persist ``record``, dropping any prior removable record bound to the same server.
+        """Persist ``record``, dropping any prior record bound to the same server.
 
         Records whose ``psk_id`` is in ``protected`` (the records backing open connections)
         are never removed, even the same server's prior record. Past ``record_capacity``
-        per-server records, the least recently used others are evicted. Shared records are
-        never evicted. When nothing is evictable, ``record`` is still persisted and the store
-        exceeds its capacity.
+        per-server records, the least recently used others are evicted. When nothing is
+        evictable, ``record`` is still persisted and the store exceeds its capacity.
         """
-        stale = (
-            [
-                existing.psk_id
-                for existing in await self.list_records()
-                if existing.server_id == record.server_id
-                and existing.psk_id != record.psk_id
-                and existing.psk_id not in protected
-            ]
-            if record.server_id is not None
-            else []
-        )
+        stale = [
+            existing.psk_id
+            for existing in await self.list_records()
+            if existing.server_id == record.server_id
+            and existing.psk_id != record.psk_id
+            and existing.psk_id not in protected
+        ]
         await self.store_record(record)
         for psk_id in stale:
-            if await self.can_remove_record(psk_id):
-                await self.remove_record(psk_id)
-        if record.server_id is not None:
-            await self._evict_over_capacity(keep={record.psk_id, *protected})
+            await self.remove_record(psk_id)
+        await self._evict_over_capacity(keep={record.psk_id, *protected})
 
     async def remove_superseded_records(self, *, protected: AbstractSet[str]) -> None:
         """Remove per-server records a newer record for the same server replaced.
@@ -590,17 +515,12 @@ class ClientPairingStore(ABC):
         records = await self.list_records()
         newest = _newest_per_server(records)
         for record in records:
-            if (
-                record.server_id is not None
-                and newest[record.server_id] is not record
-                and record.psk_id not in protected
-                and await self.can_remove_record(record.psk_id)
-            ):
+            if newest[record.server_id] is not record and record.psk_id not in protected:
                 await self.remove_record(record.psk_id)
 
     async def _evict_over_capacity(self, *, keep: AbstractSet[str]) -> None:
         """Evict least recently used per-server records outside ``keep`` down to capacity."""
-        per_server = [r for r in await self.list_records() if r.server_id is not None]
+        per_server = await self.list_records()
         excess = len(per_server) - self.record_capacity
         if excess <= 0:
             return
@@ -740,7 +660,7 @@ class _ClientPairingStoreBase(ClientPairingStore):
     """Shared query/mutation logic for client pairing stores; subclasses add persistence."""
 
     def __init__(self, *, record_capacity: int = _DEFAULT_RECORD_CAPACITY) -> None:
-        """Start with empty state; subclasses provision the shared-PSK fallback record.
+        """Start with empty state and the default pairing policy.
 
         Raises ValueError when ``record_capacity`` is below the spec minimum of 5.
         """
@@ -752,7 +672,7 @@ class _ClientPairingStoreBase(ClientPairingStore):
         self._pairing_psk: PairingPsk | None = None
         self._static_pairing_code: str | None = None
         self._pairing_rounds = 0
-        self._pairing_config: ClientPairingConfig | None = None
+        self._pairing_config = ClientPairingConfig()
         self._last_playback_server_id: str | None = None
 
     async def _save(self) -> None:
@@ -819,7 +739,6 @@ class _ClientPairingStoreBase(ClientPairingStore):
 
     async def get_pairing_config(self) -> ClientPairingConfig:
         """Return the pairing policy."""
-        assert self._pairing_config is not None, "store is not initialized"
         return self._pairing_config
 
     async def store_pairing_config(self, config: ClientPairingConfig) -> None:
@@ -883,18 +802,6 @@ class _ClientPairingStoreBase(ClientPairingStore):
 class InMemoryClientPairingStore(_ClientPairingStoreBase):
     """In-memory reference ``ClientPairingStore`` (tests, ephemeral clients); not persisted."""
 
-    def __init__(self, *, record_capacity: int = _DEFAULT_RECORD_CAPACITY) -> None:
-        """Start with a pre-provisioned shared-PSK fallback record and no other state.
-
-        Raises ValueError when ``record_capacity`` is below the spec minimum of 5.
-        """
-        super().__init__(record_capacity=record_capacity)
-        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-        shared_psk = generate_psk()
-        shared = ClientPairingRecord(psk_id=psk_id_for(shared_psk), psk=shared_psk)
-        self._records[shared.psk_id] = shared
-        self._pairing_config = ClientPairingConfig(record_mode_psk_id=shared.psk_id)
-
 
 class FileClientPairingStore(_ClientPairingStoreBase):
     """A ``ClientPairingStore`` persisted atomically to a single JSON file."""
@@ -923,12 +830,16 @@ class FileClientPairingStore(_ClientPairingStoreBase):
         """Populate state from the JSON file, seeding a fresh store if absent."""
         data = await asyncio.to_thread(_read_json_object, self._path)
         if data is None:
-            await self._seed()
+            await self._save()
             return
-        self._records = {
-            psk_id: ClientPairingRecord.from_dict(v)
-            for psk_id, v in _section(data, "records").items()
-        }
+        self._records = {}
+        for psk_id, v in _section(data, "records").items():
+            # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+            # Stores written before 10.0 hold shared record-mode records with no server_id.
+            if v.get("server_id") is None:
+                logger.info("Dropping the shared pairing record %s", psk_id)
+                continue
+            self._records[psk_id] = ClientPairingRecord.from_dict(v)
         self._pairing_config = ClientPairingConfig.from_dict(_object(data, "pairing_config"))
         raw_psk = data.get("pairing_psk")
         self._pairing_psk = PairingPsk.from_dict(raw_psk) if isinstance(raw_psk, Mapping) else None
@@ -945,19 +856,9 @@ class FileClientPairingStore(_ClientPairingStoreBase):
         self._pairing_rounds = raw_failures
         self._last_playback_server_id = _opt_str(data, "last_playback_server_id")
 
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    async def _seed(self) -> None:
-        """Provision the default pre-provisioned shared-PSK fallback record (spec §Record mode)."""
-        shared_psk = generate_psk()
-        shared = ClientPairingRecord(psk_id=psk_id_for(shared_psk), psk=shared_psk)
-        self._records[shared.psk_id] = shared
-        self._pairing_config = ClientPairingConfig(record_mode_psk_id=shared.psk_id)
-        await self._save()
-
     async def _save(self) -> None:
         """Atomically write the current state to the JSON file."""
         async with self._lock:
-            assert self._pairing_config is not None
             payload: dict[str, object] = {
                 "records": {psk_id: r.to_dict() for psk_id, r in self._records.items()},
                 "pairing_config": self._pairing_config.to_dict(),
@@ -972,18 +873,10 @@ class FileClientPairingStore(_ClientPairingStoreBase):
 # --- private helpers -----------------------------------------------------
 
 
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-def _is_shared_record(resolved: ResolvedPsk) -> bool:
-    """Return whether ``resolved`` is a shared-PSK record (long-term, no counterparty)."""
-    return resolved.category is PskCategory.LONG_TERM and resolved.counterparty_id is None
-
-
 def _newest_per_server(records: Iterable[ClientPairingRecord]) -> dict[str, ClientPairingRecord]:
     """Map each server to its newest record, the later-stored one on equal creation times."""
     newest: dict[str, ClientPairingRecord] = {}
     for record in records:
-        if record.server_id is None:
-            continue
         current = newest.get(record.server_id)
         if current is None or record.created_at >= current.created_at:
             newest[record.server_id] = record

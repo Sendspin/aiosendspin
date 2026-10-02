@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, assert_never
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
@@ -63,18 +63,7 @@ from aiosendspin.models.core import (
     SupportedPairMethods,
     UnpairedAccess,
 )
-from aiosendspin.models.management import (
-    MANAGEMENT_DEPRECATION,
-    ManagementAddRecordMessage,
-    ManagementGetPairingConfigMessage,
-    ManagementListRecordsMessage,
-    ManagementOpenPairingWindowMessage,
-    ManagementRemoveRecordMessage,
-    ManagementResultMessage,
-    ManagementResultPayload,
-    ManagementSetPairingConfigMessage,
-    ServerUnpairMessage,
-)
+from aiosendspin.models.management import ServerUnpairMessage
 from aiosendspin.models.player import (
     PLAYER_AUDIO_HEADER_SIZE,
     PlayerStatePayload,
@@ -94,7 +83,6 @@ from aiosendspin.models.types import (
     ArtworkSource,
     AudioCodec,
     GoodbyeReason,
-    ManagementResult,
     MediaCommand,
     PairAbortReason,
     PairingCodeFormat,
@@ -135,19 +123,7 @@ from aiosendspin.noise.pairing import (
 from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import warn_deprecated
 
-from .management import (
-    ManagementEffect,
-    handle_add_record,
-    handle_get_pairing_config,
-    handle_list_records,
-    handle_open_pairing_window,
-    handle_remove_record,
-    handle_set_pairing_config,
-    handle_unpair,
-    with_storage,
-)
 from .models import AudioFormat, PCMFormat, ServerInfo
 from .time_sync import SendspinTimeFilter
 
@@ -158,15 +134,6 @@ logger = logging.getLogger(__name__)
 
 # Codecs the SDK can decode. Anything else would be silently dropped.
 DECODABLE_CODECS = (AudioCodec.PCM, AudioCodec.FLAC)
-
-_ManagementRequest = (
-    ManagementListRecordsMessage
-    | ManagementAddRecordMessage
-    | ManagementRemoveRecordMessage
-    | ManagementGetPairingConfigMessage
-    | ManagementSetPairingConfigMessage
-    | ManagementOpenPairingWindowMessage
-)
 
 # A provisional connection must complete bring-up through its first server/activate
 # within this window or be dropped (spec: multi-server admission).
@@ -274,11 +241,7 @@ def _activities_allowed(
 ) -> bool:
     """Whether ``activities`` is an allowed set for the matched PSK."""
     if category is PskCategory.LONG_TERM:
-        return activities <= {
-            Activity.PLAYBACK,
-            # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-            Activity.MANAGEMENT,
-        }
+        return activities <= {Activity.PLAYBACK}
     if unpaired_access:
         return activities <= {Activity.PLAYBACK, Activity.PAIRING}
     return activities <= {Activity.PAIRING}
@@ -1535,15 +1498,6 @@ class SendspinConnection:
                 await self._handle_server_command(payload)
             case ServerUnpairMessage():
                 await self._handle_unpair()
-            case (
-                ManagementListRecordsMessage()
-                | ManagementAddRecordMessage()
-                | ManagementRemoveRecordMessage()
-                | ManagementGetPairingConfigMessage()
-                | ManagementSetPairingConfigMessage()
-                | ManagementOpenPairingWindowMessage()
-            ):
-                await self._handle_management_request(message)
             case _:
                 logger.debug("Unhandled server message type: %s", type(message).__name__)
 
@@ -1937,68 +1891,11 @@ class SendspinConnection:
         return True
 
     async def _handle_unpair(self) -> None:
-        """Handle server/unpair: drop the matched record (unless shared) and close."""
+        """Handle server/unpair: drop the matched record and close."""
         if self._noise_psk is None or self._noise_psk.category is not PskCategory.LONG_TERM:
             return  # Not a long-term session (pairing / unpaired): ignore and continue.
-        await handle_unpair(self._client.pairing_store, matched_psk_id=self._noise_psk.psk_id)
+        await self._client.pairing_store.remove_record(self._noise_psk.psk_id)
         await self.goodbye_and_disconnect(GoodbyeReason.UNPAIRED)
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    async def _handle_management_request(self, message: _ManagementRequest) -> None:
-        """Handle a management/* request, gating on the management activity.
-
-        Deprecated: the Sendspin spec no longer defines the management activity.
-        """
-        warn_deprecated("management/* request handling", MANAGEMENT_DEPRECATION)
-        if Activity.MANAGEMENT not in self._activities:
-            await self._send_message(
-                ManagementResultMessage(
-                    payload=ManagementResultPayload(result=ManagementResult.PERMISSION_DENIED)
-                ).to_json()
-            )
-            return
-        store = self._client.pairing_store
-        match message:
-            case ManagementListRecordsMessage():
-                payload, effect = await handle_list_records(store)
-            case ManagementAddRecordMessage(payload=request):
-                payload, effect = await handle_add_record(store, request)
-            case ManagementRemoveRecordMessage(payload=request):
-                assert self._noise_psk is not None
-                payload, effect = await handle_remove_record(
-                    store,
-                    request,
-                    requester_psk_id=self._noise_psk.psk_id,
-                )
-            case ManagementGetPairingConfigMessage():
-                payload, effect = await handle_get_pairing_config(
-                    store, implemented_pair_methods=self._client.implemented_pair_methods
-                )
-            case ManagementSetPairingConfigMessage(payload=request):
-                payload, effect = await handle_set_pairing_config(
-                    store,
-                    request,
-                    implemented_pair_methods=self._client.implemented_pair_methods,
-                    config_lock=self._client.admission_lock,
-                )
-            case ManagementOpenPairingWindowMessage():
-                payload, effect = await handle_open_pairing_window(
-                    store,
-                    implemented_pair_methods=self._client.implemented_pair_methods,
-                    open_window=self._client.open_pairing_window,
-                )
-            case _:
-                assert_never(message)
-        payload = await with_storage(
-            payload,
-            store,
-            include_static=isinstance(
-                message, ManagementListRecordsMessage | ManagementGetPairingConfigMessage
-            ),
-        )
-        await self._send_message(ManagementResultMessage(payload=payload).to_json())
-        if effect is ManagementEffect.GOODBYE_UNAUTHORIZED:
-            await self.goodbye_and_disconnect(GoodbyeReason.UNAUTHORIZED)
 
     def _configure_audio_output(self, audio_format: AudioFormat) -> None:
         """Store the current audio format for use in callbacks."""

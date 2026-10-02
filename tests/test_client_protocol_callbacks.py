@@ -396,13 +396,18 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
 @pytest.mark.parametrize(
     ("category", "activities", "roles", "unpaired", "expected"),
     [
-        # Long-term PSK: [] or ['playback'], plus management.
+        # Long-term PSK: [] or ['playback'].
         (PskCategory.LONG_TERM, [], [], False, None),
         (PskCategory.LONG_TERM, [Activity.PLAYBACK], [Roles.PLAYER.value], False, None),
-        (PskCategory.LONG_TERM, [Activity.MANAGEMENT], [], False, None),
-        (PskCategory.LONG_TERM, [Activity.PLAYBACK, Activity.MANAGEMENT], [], False, None),
+        (
+            PskCategory.LONG_TERM,
+            [Activity.PLAYBACK, Activity.MANAGEMENT],
+            [],
+            False,
+            GoodbyeReason.UNAUTHORIZED,
+        ),
         # Roles allowed without 'playback' in activities: the set is playback-capable.
-        (PskCategory.LONG_TERM, [Activity.MANAGEMENT], [Roles.PLAYER.value], False, None),
+        (PskCategory.LONG_TERM, [], [Roles.PLAYER.value], False, None),
         # A long-term PSK admits no pairing, alone or alongside playback.
         (PskCategory.LONG_TERM, [Activity.PAIRING], [], False, GoodbyeReason.UNAUTHORIZED),
         (

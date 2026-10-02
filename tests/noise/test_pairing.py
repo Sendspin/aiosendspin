@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
@@ -15,7 +14,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from aiosendspin.models.core import ServerActivateMessage, ServerActivatePayload
 from aiosendspin.models.types import Activity, PairAbortReason, PairingCodeFormat, PairMethod
 from aiosendspin.noise import pairing_code as pairing_code_mod
-from aiosendspin.noise.keys import b64url_decode, b64url_encode, generate_psk, psk_id_for
+from aiosendspin.noise.keys import b64url_decode, b64url_encode, generate_psk
 from aiosendspin.noise.models import (
     ClientPairAuthMessage,
     ClientPairAuthPayload,
@@ -58,19 +57,13 @@ from aiosendspin.noise.pairing import (
 )
 from aiosendspin.noise.trust_store import (
     PAIRING_ROUND_LIMIT,
-    ClientPairingRecord,
     InMemoryClientPairingStore,
     InMemoryServerPairingStore,
     ServerPairingRecord,
 )
 from aiosendspin.noise.wire import EncryptedWebSocket
 from tests.noise.conftest import make_paired_encrypted_ws
-from tests.pairing_stores import ExhaustedClientStore, seed_used_client_records
-
-
-def _added_records(records: Sequence[ClientPairingRecord]) -> list[ClientPairingRecord]:
-    """Stored-pubkey records added by pairing (excludes the pre-provisioned shared record)."""
-    return [r for r in records if r.server_id is not None]
+from tests.pairing_stores import seed_used_client_records
 
 
 async def _code() -> str:
@@ -196,7 +189,7 @@ async def test_pairing_at_capacity_spares_records_of_open_connections() -> None:
 
     new = await client_store.record_by_server_id("server-X")
     assert new is not None
-    remaining = {r.psk_id for r in _added_records(await client_store.list_records())}
+    remaining = {r.psk_id for r in await client_store.list_records()}
     assert remaining == {new.psk_id, seeded[0].psk_id, *(r.psk_id for r in seeded[2:])}
     assert protected_reads == [True]
 
@@ -716,8 +709,8 @@ async def test_client_finalize_raises_if_server_closes_before_ack() -> None:
             server_id="server-X",
             store=client_store,
         )
-    # Nothing persisted on failure (only the pre-provisioned shared record remains).
-    assert _added_records(await client_store.list_records()) == []
+    # Nothing persisted on failure.
+    assert list(await client_store.list_records()) == []
 
 
 async def test_server_finalize_raises_if_client_closes_first() -> None:
@@ -1371,7 +1364,7 @@ async def test_dynamic_pairing_code_aborts_at_round_limit_and_persists_nothing()
     assert client_rec.types().count("client/pair-retry") == PAIRING_ROUND_LIMIT - 1
     assert client_rec.types()[-1] == "pair/abort"
     assert await client_store.pairing_round_count() == PAIRING_ROUND_LIMIT
-    assert _added_records(await client_store.list_records()) == []
+    assert list(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
 
 
@@ -1564,7 +1557,7 @@ async def test_client_stores_nothing_without_the_finalize_ack() -> None:
             server_leaves_pairing(),
         )
 
-    assert _added_records(await client_store.list_records()) == []
+    assert list(await client_store.list_records()) == []
     # server_kc verified, so the round count resets like any other attempt.
     assert await client_store.pairing_round_count() == 0
 
@@ -1646,7 +1639,7 @@ async def test_static_pairing_code_wrong_code_aborts_and_persists_nothing() -> N
 
     assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
     assert await client_store.pairing_round_count() == 0
-    assert _added_records(await client_store.list_records()) == []
+    assert list(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
 
 
@@ -1727,7 +1720,7 @@ async def test_static_pairing_code_invalid_server_share_is_protocol_error(pake_m
 
     assert not isinstance(excinfo.value, PairingAbortError)
     assert await client_store.pairing_round_count() == 0
-    assert _added_records(await client_store.list_records()) == []
+    assert list(await client_store.list_records()) == []
 
 
 async def test_static_pairing_code_malformed_client_share_raises() -> None:
@@ -2263,39 +2256,3 @@ async def test_dynamic_pairing_code_missing_wrapped_nonce_is_protocol_error() ->
 
     assert not isinstance(excinfo.value, PairingAbortError)
     assert await server_store.record_by_client_id("client-A") is None
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-async def test_pairing_psk_falls_back_to_shared_when_storage_exhausted() -> None:
-    """On storage exhaustion the client hands the server its configured shared PSK.
-
-    No new record is created on the client; the server stores the shared PSK as
-    its own long-term record keyed by client_id.
-    """
-    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
-    client_store = ExhaustedClientStore()
-    server_store = InMemoryServerPairingStore()
-
-    shared_psk = generate_psk()
-    shared = ClientPairingRecord(psk_id=psk_id_for(shared_psk), psk=shared_psk, server_id=None)
-    await client_store.store_record(shared)
-    await client_store.set_record_mode_psk_id(shared.psk_id)
-
-    _client_ret, server_record = await asyncio.gather(
-        run_pairing_psk_client(
-            client_ews,
-            pairing_index=0,
-            server_id="server-X",
-            store=client_store,
-        ),
-        run_pairing_psk_server(
-            server_ews, pairing_index=0, client_id="client-A", store=server_store
-        ),
-    )
-
-    # The client admitted the server under the shared record: no new stored-pubkey record.
-    assert _added_records(await client_store.list_records()) == []
-    assert await client_store.record_by_psk_id(shared.psk_id) is not None
-    # The server received and stored the shared PSK.
-    assert server_record.psk == shared_psk
-    assert await server_store.record_by_client_id("client-A") == server_record
