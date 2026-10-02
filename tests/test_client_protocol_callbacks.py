@@ -1440,6 +1440,29 @@ async def test_server_command_set_output_delay_applies_and_notifies() -> None:
     assert received == [payload]
 
 
+async def test_server_command_out_of_range_output_delay_is_clamped() -> None:
+    """A server/command with output_delay_ms above 5000 applies a 5000 ms delay."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+        state_supported_commands=[PlayerCommand.SET_OUTPUT_DELAY],
+    )
+    connection, _ = await _reporting_connection(client)
+    client._admitted_connection = connection  # noqa: SLF001
+
+    await connection._handle_json_message(  # noqa: SLF001
+        json.dumps(
+            {
+                "type": "server/command",
+                "payload": {"player": {"command": "set_output_delay", "output_delay_ms": 6000}},
+            }
+        )
+    )
+
+    assert client.output_delay_us == 5_000_000
+
+
 async def test_server_command_pre_rename_delay_applies_and_notifies() -> None:
     """A pre-rename server/command set_static_delay updates the offset and fires the callback."""
     client = make_sdk_client(
