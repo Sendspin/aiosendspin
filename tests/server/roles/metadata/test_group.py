@@ -883,6 +883,22 @@ def test_metadata_reaches_member_applying_on_receipt_once_due() -> None:
         assert sent[0]["timestamp"] == 1_500_000
 
 
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+def test_rescheduling_sends_metadata_in_effect_to_member_applying_on_receipt() -> None:
+    """Scheduling new metadata sends the metadata already in effect if its due send has not run."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    member.supports_scheduled_updates.return_value = False
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Next", 0), timestamp_us=1_500_000)
+    clock.advance_us(500_000)
+
+    mgr.set_metadata(_track("Later", 0), timestamp_us=200_000_000)
+
+    assert [sent and sent["title"] for sent in _all_sent_metadata(member)] == ["Next"]
+
+
 def test_sent_metadata_replaced_by_deferred_one_is_cancelled() -> None:
     """Replacing sent metadata with metadata sent only later restates the current metadata now."""
     group, _clock = _make_scheduling_group()

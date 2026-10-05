@@ -125,6 +125,16 @@ class ScheduledStateGroupRole[S](GroupRole):
         # Building the message first rejects a state that cannot be sent.
         self._state_message(state, timestamp_us)
         replaced_sent = self._scheduled_sent and self._state.pending_timestamp_us is not None
+        # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+        # The server clock can make a state current before the loop timer sends it.
+        if (
+            self._scheduled_sent
+            and self._send_scheduled_handle is not None
+            and self._state.pending_timestamp_us is None
+        ):
+            self._send_scheduled_handle.cancel()
+            now_us = self._now_us()
+            self._send_due(self._state_message(self._current_state(now_us), now_us))
         self._cancel_send_scheduled()
         self._state.schedule(state, timestamp_us)
         delay_us = timestamp_us - MAX_SCHEDULED_LEAD_US - self._now_us()
