@@ -399,13 +399,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
         # Long-term PSK: [] or ['playback'].
         (PskCategory.LONG_TERM, [], [], False, None),
         (PskCategory.LONG_TERM, [Activity.PLAYBACK], [Roles.PLAYER.value], False, None),
-        (
-            PskCategory.LONG_TERM,
-            [Activity.PLAYBACK, Activity.MANAGEMENT],
-            [],
-            False,
-            GoodbyeReason.UNAUTHORIZED,
-        ),
         # Roles allowed without 'playback' in activities: the set is playback-capable.
         (PskCategory.LONG_TERM, [], [Roles.PLAYER.value], False, None),
         # A long-term PSK admits no pairing, alone or alongside playback.
@@ -413,13 +406,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
         (
             PskCategory.LONG_TERM,
             [Activity.PAIRING, Activity.PLAYBACK],
-            [],
-            False,
-            GoodbyeReason.UNAUTHORIZED,
-        ),
-        (
-            PskCategory.LONG_TERM,
-            [Activity.PAIRING, Activity.MANAGEMENT],
             [],
             False,
             GoodbyeReason.UNAUTHORIZED,
@@ -451,7 +437,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
             False,
             GoodbyeReason.PAIRING_REQUIRED,
         ),
-        (PskCategory.PAIRING, [Activity.MANAGEMENT], [], True, GoodbyeReason.UNAUTHORIZED),
         # Sentinel: the same sets as the pairing PSK.
         (PskCategory.SENTINEL, [], [], False, None),
         (PskCategory.SENTINEL, [Activity.PAIRING], [], False, None),
@@ -464,15 +449,6 @@ async def test_start_runs_pairing_alongside_reader_and_time_sync(
             False,
             GoodbyeReason.PAIRING_REQUIRED,
         ),
-        # Management is the real problem here, so unauthorized wins over pairing_required.
-        (
-            PskCategory.SENTINEL,
-            [Activity.PLAYBACK, Activity.MANAGEMENT],
-            [],
-            False,
-            GoodbyeReason.UNAUTHORIZED,
-        ),
-        (PskCategory.SENTINEL, [Activity.MANAGEMENT], [], False, GoodbyeReason.UNAUTHORIZED),
         # source@v1 ranks like any other role; the server gates it behind its own approval.
         (PskCategory.LONG_TERM, [Activity.PLAYBACK], [Roles.SOURCE.value], False, None),
         (PskCategory.PAIRING, [Activity.PLAYBACK], [Roles.SOURCE.value], True, None),
@@ -518,14 +494,13 @@ async def test_activation_admissibility(
 
 
 @pytest.mark.asyncio
-async def test_unrecognized_activity_is_ignored_and_activation_applies() -> None:
-    """A server/activate naming an unknown activity still applies its known fields."""
-    connection = await _connection(PskCategory.LONG_TERM)
-    handled: list[ServerActivatePayload] = []
+async def test_unrecognized_activity_rejects_activation() -> None:
+    """An unknown activity is never an allowed set, so unauthorized wins over pairing_required."""
+    connection = await _connection(PskCategory.SENTINEL)
+    reasons: list[GoodbyeReason | None] = []
 
     async def _record(payload: ServerActivatePayload) -> None:
-        handled.append(payload)
-        assert await connection._apply_activation(payload) is None  # noqa: SLF001
+        reasons.append(await connection._apply_activation(payload))  # noqa: SLF001
 
     connection._handle_server_activate = _record  # type: ignore[method-assign]  # noqa: SLF001
 
@@ -533,19 +508,13 @@ async def test_unrecognized_activity_is_ignored_and_activation_applies() -> None
         json.dumps(
             {
                 "type": "server/activate",
-                "payload": {
-                    "activities": ["playback", "teleport"],
-                    "active_roles": [Roles.PLAYER.value],
-                },
+                "payload": {"activities": ["playback", "management"], "active_roles": []},
             }
         )
     )
 
-    (payload,) = handled
-    assert payload.activities == [Activity.PLAYBACK]
-    assert payload.ignored_activities == ["teleport"]
-    assert connection._activities == [Activity.PLAYBACK]  # noqa: SLF001
-    assert connection._active_roles == [Roles.PLAYER.value]  # noqa: SLF001
+    assert reasons == [GoodbyeReason.UNAUTHORIZED]
+    assert connection._activities == []  # noqa: SLF001
 
 
 @pytest.mark.parametrize(

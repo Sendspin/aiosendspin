@@ -244,9 +244,6 @@ class ConnectionReason(Enum):
     """Server is performing a pairing handshake."""
     PLAYBACK = "playback"
     """Server needs client for active or upcoming playback."""
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    MANAGEMENT = "management"
-    """Server is opening a dedicated management session (deprecated)."""
 
 
 class Activity(Enum):
@@ -256,9 +253,6 @@ class Activity(Enum):
     """Active or upcoming playback."""
     PAIRING = "pairing"
     """A pairing exchange."""
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    MANAGEMENT = "management"
-    """A dedicated management session (deprecated)."""
 
 
 class GoodbyeReason(Enum):
@@ -324,18 +318,6 @@ class ServerErrorReason(Enum):
 
 # The sender closes the connection after these abort reasons; every other reason keeps it open.
 CLOSING_ABORT_REASONS: frozenset[PairAbortReason] = frozenset({PairAbortReason.CONCURRENT_ATTEMPT})
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-class ManagementResult(Enum):
-    """Result code carried by management/result."""
-
-    OK = "ok"
-    PERMISSION_DENIED = "permission_denied"
-    ALREADY_EXISTS = "already_exists"
-    INVALID = "invalid"
-    NOT_FOUND = "not_found"
-    STORAGE_EXHAUSTED = "storage_exhausted"
 
 
 # Role ID helpers for spec-compliant role negotiation

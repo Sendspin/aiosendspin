@@ -1,4 +1,4 @@
-"""End-to-end management gating and unpair tests."""
+"""End-to-end unpair tests."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from aiosendspin.client.client import SendspinClient as SdkClient
 from aiosendspin.models.types import (
-    Activity,
     GoodbyeReason,
     Roles,
 )
@@ -81,36 +79,6 @@ async def _await_disconnected(client: SdkClient) -> None:
     async with asyncio.timeout(5):
         while client.connected:  # noqa: ASYNC110
             await asyncio.sleep(0.01)
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-async def test_management_request_without_session_is_not_sent() -> None:
-    """The server refuses a management/* request on a connection it never enabled."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-    await _seed_pairing(server, server_store, client_store, identity.peer_id)
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-        )
-        try:
-            await client.connect(url)
-            server_client = await _await_connected_client(server, identity.peer_id)
-            conn = server_client.connection
-            assert conn is not None
-            # The embedder never enabled management, so no activation declared it.
-            assert Activity.MANAGEMENT not in client.activities
-            assert Activity.MANAGEMENT not in (conn._declared_activities or [])  # noqa: SLF001
-            with pytest.raises(RuntimeError, match="management is not enabled"):
-                await conn.remove_record(psk_id=psk_id_for(generate_psk()))
-        finally:
-            await client.disconnect()
 
 
 async def test_unpair_drops_record_and_closes() -> None:

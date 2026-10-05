@@ -26,9 +26,8 @@ from aiosendspin.models.core import (
     StreamRequestFormatMessage,
     StreamRequestFormatPayload,
 )
-from aiosendspin.models.management import ManagementResultMessage, ManagementResultPayload
 from aiosendspin.models.player import PlayerStatePayload, StreamRequestFormatPlayer
-from aiosendspin.models.types import ArtworkSource, ManagementResult, MediaCommand, PlayerCommand
+from aiosendspin.models.types import ArtworkSource, MediaCommand, PlayerCommand
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamRequestFormatVisualizer,
@@ -95,18 +94,6 @@ async def test_second_client_hello_is_flagged() -> None:
         timestamp_us=0,
     )
     client.flag_noncompliance.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_unsolicited_management_result_is_flagged() -> None:
-    """A management/result with no request in flight is flagged as non-compliant."""
-    conn, client = _conn_with_client()
-    conn._management_waiter = None  # noqa: SLF001
-    await conn._handle_message(  # noqa: SLF001
-        ManagementResultMessage(payload=ManagementResultPayload(result=ManagementResult.OK)),
-        timestamp_us=0,
-    )
-    client.flag_noncompliance.assert_called_once_with("sent an unsolicited management/result")
 
 
 @pytest.mark.asyncio
