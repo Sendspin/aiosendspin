@@ -181,6 +181,28 @@ async def test_initial_state_timing_applies_before_the_stream_join(
 
 
 @pytest.mark.asyncio
+async def test_player_available_after_initial_state_starts_near_the_playhead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A player that opens unavailable starts at the playhead, not at the producer's tail."""
+    conn, stream = await _joiner_in_playing_group(monkeypatch, audio_s=10)
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=False, player=_PLAYER_STATE)
+    )
+    now_us = conn._server.clock.now_us()  # noqa: SLF001
+
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+    await _commit(stream)
+
+    binary = [entry for entry in _queued_player_entries(conn) if entry.binary is not None]
+    assert binary
+    assert min(entry.timestamp_us for entry in binary) < now_us + 2_000_000
+    stream.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "reconnect_roles",
     [[Roles.PLAYER.value], [Roles.PLAYER.value, Roles.CONTROLLER.value]],

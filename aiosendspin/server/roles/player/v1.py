@@ -273,6 +273,15 @@ class PlayerV1Role(Role):
         """Player role requires initial state with volume/mute info."""
         return True
 
+    def on_availability_changed(
+        self,
+        old_available: bool,  # noqa: FBT001
+        new_available: bool,  # noqa: FBT001
+    ) -> None:
+        """Rejoin the running stream at the playhead once a held stream/start may be sent."""
+        if new_available and not old_available and self._pending_stream_start:
+            self._client.join_active_stream(self)
+
     def on_group_changed(self, group: object) -> None:
         """Refresh transformer selection when group changes."""
         super().on_group_changed(group)
