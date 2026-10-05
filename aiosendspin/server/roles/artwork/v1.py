@@ -186,6 +186,11 @@ class ArtworkV1Role(Role):
         now_us = self._client._server.clock.now_us()  # noqa: SLF001
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self.uses_single_message_framing():
+            # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+            # The server clock can make a queued image due before the transfer loop sends it.
+            if timestamp_us > now_us:
+                for due_image, due_us in self._current_queued(channel, now_us):
+                    self._send_single_message(channel, due_image, due_us)
             self._queued.pop(channel, None)
             self._queue_changed.set()
             if timestamp_us - self._announce_lead_us() <= now_us:

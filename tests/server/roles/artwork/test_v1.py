@@ -1009,6 +1009,29 @@ async def test_legacy_hello_client_gets_scheduled_artwork_once_due() -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_legacy_hello_client_gets_due_image_when_next_one_is_scheduled() -> None:
+    """Scheduling an image sends a queued one already due before the transfer loop woke."""
+    client = _make_legacy_client_stub(_ALBUM)
+    clock = client._server.clock  # noqa: SLF001
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    client.send_binary.reset_mock()
+    role.send_artwork(channel=0, image_data=b"next", timestamp_us=_NOW_US + 1_000)
+    await asyncio.sleep(0)
+
+    clock.advance_us(1_000)
+    role.send_artwork(channel=0, image_data=b"later", timestamp_us=_NOW_US + 10_000_000)
+    await asyncio.sleep(0)
+
+    assert [call.args[0] for call in client.send_binary.call_args_list] == [
+        pack_binary_header_raw(8, _NOW_US + 1_000) + b"next"
+    ]
+    role.on_disconnect()
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 @pytest.mark.asyncio
 async def test_legacy_hello_client_cannot_cancel_scheduled_artwork() -> None:
     """A single-message client needs the current image re-sent to drop a scheduled one."""
