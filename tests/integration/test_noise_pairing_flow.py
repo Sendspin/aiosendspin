@@ -76,6 +76,7 @@ from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     PairingPsk,
     PskCategory,
+    ResolvedPsk,
     ServerPairingRecord,
     StagedPairingPsk,
     TrustedUnpairedClient,
@@ -4852,5 +4853,47 @@ async def test_cancelled_code_re_pairing_restores_the_long_term_session() -> Non
             assert client.noise_psk is not None
             assert client.noise_psk.category is PskCategory.LONG_TERM
             assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_a_failed_return_to_the_record_closes_the_connection() -> None:
+    """A re-handshake back onto the record that fails on the server side closes the connection."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    never: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    real_rehandshake = connection_module.run_rehandshake_server
+
+    async def provide() -> str:
+        return await never
+
+    async def fail_onto_long_term(*args: Any, psk: ResolvedPsk, **kwargs: Any) -> Any:
+        if psk.category is PskCategory.LONG_TERM:
+            raise HandshakeAbortedError("timed out awaiting Noise message 2")
+        return await real_rehandshake(*args, psk=psk, **kwargs)
+
+    method = PairMethod.DYNAMIC_PAIRING_CODE
+    client = await _code_pairing_client(identity, client_store, method, shown)
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            server_client = await _await_connected_client(server, identity.peer_id)
+            attempt = asyncio.create_task(
+                server.initiate_pairing(identity.peer_id, _code_attempt(method, provide))
+            )
+            await _wait_until(lambda: Activity.PAIRING in client.activities)
+            with (
+                patch.object(connection_module, "run_rehandshake_server", fail_onto_long_term),
+                pytest.raises(HandshakeAbortedError),
+            ):
+                await server.end_pairing(identity.peer_id)
+            with pytest.raises(PairingAbortError):
+                await attempt
+
+            await _wait_until(lambda: not server_client.is_connected)
         finally:
             await client.disconnect()

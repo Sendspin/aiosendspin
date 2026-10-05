@@ -1626,6 +1626,7 @@ class SendspinConnection:
         after leaving pairing, also keeping the connection; so does a Pairing PSK attempt whose
         ``client_id`` is not this connection's, before entering pairing.
         Any other failure propagates for the caller to disconnect.
+        Leaving pairing closes a connection that fails to return to its pairing record.
         """
         if self._pairing_attempt is not None:
             raise PairingError("connection is already in a pairing attempt")
@@ -1688,7 +1689,7 @@ class SendspinConnection:
         """End pairing without finalizing, restoring the connection's activities and roles.
 
         No-op if not in pairing. Aborts any in-progress attempt with ``user_cancelled``, keeping
-        the connection alive.
+        the connection alive. Raises if it fails to return to its pairing record, closing it.
         If an attempt has already been finalized by the client, it completes as a success instead.
         """
         if not self._in_pairing:
@@ -1726,9 +1727,13 @@ class SendspinConnection:
             accepted = await self._rehandshake_to(
                 QueuedEncryptedWebSocket(transport, queue), record.as_resolved()
             )
+        except HandshakeAbortedError:
+            await transport.close()
+            raise
         finally:
             self._pairing_message_queue = None
         if not accepted:
+            await transport.close()
             raise PairingError("client/hello rejected after returning to the pairing record")
         self._moved_off_record = False
         await self._activate()
