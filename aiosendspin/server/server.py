@@ -636,7 +636,7 @@ class SendspinServer:
         """End pairing on a connected client without finalizing.
 
         No-op if not in pairing. Aborts any in-progress attempt with ``user_cancelled``, keeping
-        the connection alive.
+        the connection alive. Raises if it fails to return to its pairing record, closing it.
         If an attempt has already been finalized by the client, it completes as a success instead.
         """
         await self._connection_for(client_id).end_pairing()
