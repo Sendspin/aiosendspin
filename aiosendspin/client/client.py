@@ -111,7 +111,7 @@ StreamEndCallback = Callable[[list[str] | None], None]
 StreamClearCallback = Callable[[list[str] | None], None]
 
 # Callback invoked with (server_timestamp_us, audio_data, format, send_ahead) when audio
-# chunks arrive.
+# chunks arrive. Audio data is the unchanged payload in the negotiated codec.
 AudioChunkCallback = Callable[[int, bytes, AudioFormat, int], None]
 
 # Callback invoked when the client disconnects from the server.
@@ -1326,11 +1326,15 @@ class SendspinClient:
 
         The callback receives:
         - server_timestamp_us: Server timestamp when this audio should play
-        - audio_data: Raw PCM audio bytes
-        - format: PCMFormat describing the audio format
+        - audio_data: Audio payload bytes in the negotiated codec, passed through unchanged
+        - format: AudioFormat describing the codec, PCM sample format, and optional codec header
         - send_ahead: Microseconds from the server's transmission of the chunk to
           server_timestamp_us. 0 and 4294967295 are saturated values and carry no
           delay sample. Never affects when the chunk plays.
+
+        For a PCM-only output, advertise only PCM in player_support.supported_formats,
+        or decode compressed payloads using format.codec and format.codec_header before
+        playback. format.pcm_format describes the PCM samples.
 
         To convert server timestamps to client play time (monotonic client clock),
         use the compute_play_time() and compute_server_time() methods provided
