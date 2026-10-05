@@ -975,15 +975,16 @@ def test_legacy_hello_client_gets_single_message_artwork() -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
 @pytest.mark.asyncio
-async def test_legacy_hello_client_gets_scheduled_artwork_at_most_20s_ahead() -> None:
-    """A single-message client gets a far-future image only 20 s ahead, unless replaced."""
+async def test_legacy_hello_client_gets_scheduled_artwork_once_due() -> None:
+    """A single-message client gets a scheduled image only at its timestamp, unless replaced."""
     client = _make_legacy_client_stub(_ALBUM)
     clock = client._server.clock  # noqa: SLF001
     role = ArtworkV1Role(client=client)
     role.on_connect()
     client.send_binary.reset_mock()
-    later_us = _NOW_US + MAX_ANNOUNCE_LEAD_US + 1_000
+    later_us = _NOW_US + 1_000
 
     role.send_artwork(channel=0, image_data=b"later", timestamp_us=later_us)
     await asyncio.sleep(0)
@@ -1005,6 +1006,29 @@ async def test_legacy_hello_client_gets_scheduled_artwork_at_most_20s_ahead() ->
     # The replaced image's deadline no longer keeps the transfer loop waiting.
     assert role._transfer_task is not None  # noqa: SLF001
     assert role._transfer_task.done()  # noqa: SLF001
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+@pytest.mark.asyncio
+async def test_legacy_hello_client_gets_due_image_when_next_one_is_scheduled() -> None:
+    """Scheduling an image sends a queued one already due before the transfer loop woke."""
+    client = _make_legacy_client_stub(_ALBUM)
+    clock = client._server.clock  # noqa: SLF001
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    client.send_binary.reset_mock()
+    role.send_artwork(channel=0, image_data=b"next", timestamp_us=_NOW_US + 1_000)
+    await asyncio.sleep(0)
+
+    clock.advance_us(1_000)
+    role.send_artwork(channel=0, image_data=b"later", timestamp_us=_NOW_US + 10_000_000)
+    await asyncio.sleep(0)
+
+    assert [call.args[0] for call in client.send_binary.call_args_list] == [
+        pack_binary_header_raw(8, _NOW_US + 1_000) + b"next"
+    ]
+    role.on_disconnect()
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>

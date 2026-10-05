@@ -478,6 +478,12 @@ class SendspinConnection:
         """
         return not self.is_encrypted or self._legacy_hello
 
+    # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+    @property
+    def supports_scheduled_updates(self) -> bool:
+        """Whether the client holds a server/state role object until its timestamp."""
+        return not self._legacy_hello
+
     # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
     @property
     def clears_state_fields_with_null(self) -> bool:
