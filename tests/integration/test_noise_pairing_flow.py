@@ -44,7 +44,6 @@ from aiosendspin.models.types import (
     Roles,
     ServerErrorReason,
     ServerMessage,
-    TrustLevel,
 )
 from aiosendspin.noise import pairing as pairing_module
 from aiosendspin.noise.constants import MSG_TYPE_JSON_BODY
@@ -807,7 +806,6 @@ async def test_live_pairing_updates_connection_security_trust() -> None:
             security = server_client.connection_security
             assert security is not None
             assert security.psk_category is PskCategory.LONG_TERM
-            assert security.trust_level is TrustLevel.USER
         finally:
             await client.disconnect()
 
@@ -3901,7 +3899,6 @@ async def test_connection_security_reports_sentinel_for_unpaired() -> None:
             security = server_client.connection_security
             assert security is not None
             assert security.psk_category is PskCategory.SENTINEL
-            assert security.trust_level is TrustLevel.NONE
         finally:
             await client.disconnect()
 

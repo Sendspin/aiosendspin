@@ -29,6 +29,7 @@ from aiosendspin.models.types import (
     PairAbortReason,
     PlaybackStateType,
     PlayerCommand,
+    RepeatMode,
     Roles,
 )
 from aiosendspin.noise.constants import (
@@ -53,6 +54,7 @@ from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
+from aiosendspin.server.roles.controller.group import ControllerGroupRole
 from aiosendspin.server.roles.metadata.group import MetadataGroupRole
 from aiosendspin.server.roles.metadata.state import Metadata
 from aiosendspin.server.roles.negotiation import negotiate_roles
@@ -1095,8 +1097,61 @@ class TestLegacyServerHello:
                 "year": None,
                 "track": None,
                 "progress": None,
+                "repeat": "off",
+                "shuffle": False,
             }
         }
+
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("encrypted", [False, True], ids=["legacy", "current"])
+    async def test_only_legacy_hello_gets_repeat_shuffle_in_metadata(
+        self, mock_server: _MockServer, *, encrypted: bool
+    ) -> None:
+        """Only a legacy connection gets repeat and shuffle in the metadata object."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        hello = _player_hello("client-1")
+        hello.supported_roles = [Roles.PLAYER.value, Roles.METADATA.value]
+        assert hello.player_support is not None
+        hello.player_support.supported_commands = None
+        hello_text = ClientHelloMessage(payload=hello).to_json()
+        if encrypted:
+            psk = generate_psk()
+            conn._client_id = "client-1"  # noqa: SLF001
+            conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+                psk_id=psk_id_for(psk), psk=psk, category=PskCategory.LONG_TERM
+            )
+            fake = _FakeTransport([WSMessage(WSMsgType.TEXT, hello_text, "")])
+        else:
+            fake = _FakeTransport()
+            conn._pending_first_text = hello_text  # noqa: SLF001
+        conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+        await conn._exchange_hellos()  # noqa: SLF001
+        client = conn._client  # noqa: SLF001
+        assert client is not None
+        controller = client.group.group_role("controller")
+        assert isinstance(controller, ControllerGroupRole)
+
+        writer = asyncio.create_task(conn._writer())  # noqa: SLF001
+        await conn._writer_idle.wait()  # noqa: SLF001
+        controller.set_repeat(RepeatMode.ALL)
+        controller.set_shuffle(True)
+        await conn._writer_idle.wait()  # noqa: SLF001
+        writer.cancel()
+        with suppress(asyncio.CancelledError):
+            await writer
+
+        metadata = [
+            p["payload"]["metadata"]
+            for p in fake.sent_payloads()
+            if p["type"] == "server/state" and "metadata" in p["payload"]
+        ]
+        assert metadata
+        if encrypted:
+            assert all("repeat" not in m and "shuffle" not in m for m in metadata)
+        else:
+            assert metadata[-1]["repeat"] == "all"
+            assert metadata[-1]["shuffle"] is True
 
 
 class _FakePairingTransport(_FakeTransport, EncryptedWebSocket):

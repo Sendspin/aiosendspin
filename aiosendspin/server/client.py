@@ -24,7 +24,6 @@ from aiosendspin.models.types import (
     GoodbyeReason,
     PlaybackStateType,
     Roles,
-    TrustLevel,
     has_role,
     has_role_family,
 )
@@ -85,13 +84,6 @@ class ConnectionSecurity:
 
     psk_category: PskCategory
     """Category of the PSK that admitted the connection; a server-verified fact."""
-
-    @property
-    def trust_level(self) -> TrustLevel:
-        """Trust this connection carries, derived from the PSK category that admitted it."""
-        if self.psk_category is PskCategory.LONG_TERM:
-            return TrustLevel.USER
-        return TrustLevel.NONE
 
 
 class SendspinClient:
