@@ -255,8 +255,8 @@ class SupportedPairMethods(SendspinModel):
     for the server to log. Not part of the wire schema (omitted when None)."""
     offered_both_pairing_code_methods: bool | None = None
     """Whether the client offered both pairing-code methods, recorded for the server to log.
-    The static one is dropped in favor of a usable dynamic one. Not part of the wire schema
-    (omitted when None)."""
+    The static one is dropped in favor of a dynamic one offering digits. Not part of the wire
+    schema (omitted when None)."""
 
     class Config(SendspinConfig):
         """Omit methods the client does not offer."""
@@ -265,7 +265,7 @@ class SupportedPairMethods(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Drop unrecognized methods and values, preferring dynamic over static pairing code."""
+        """Drop unrecognized methods and values, preferring dynamic code with digits over static."""
         normalized = {k: v for k, v in d.items() if k in _PAIR_METHOD_VALUE_FILTERS}
         ignored = sorted(set(d) - set(normalized) - _PAIR_METHOD_SIDECARS)
         for key, value_filters in _PAIR_METHOD_VALUE_FILTERS.items():
@@ -281,9 +281,13 @@ class SupportedPairMethods(SendspinModel):
         unusable = isinstance(dynamic, dict) and not (
             dynamic.get("formats") and dynamic.get("out_channels")
         )
+        # Every server can enter a digits code, but only some can scan a QR code.
+        offers_digits = isinstance(dynamic, dict) and PairingCodeFormat.DIGITS.value in (
+            dynamic.get("formats") or ()
+        )
         if unusable:
             del normalized[PairMethod.DYNAMIC_PAIRING_CODE.value]
-        elif both:
+        elif both and offers_digits:
             del normalized[PairMethod.STATIC_PAIRING_CODE.value]
         # Always overwrite so a client cannot spoof the records via the wire.
         normalized["ignored_methods"] = ignored or None
