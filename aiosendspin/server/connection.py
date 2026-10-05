@@ -130,6 +130,7 @@ from aiosendspin.noise.driver import (
     run_rehandshake_server,
 )
 from aiosendspin.noise.keys import b64url_encode, psk_id_for
+from aiosendspin.noise.models import PairAbortMessage, PairAbortPayload
 from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
     LocalPairingAbortError,
@@ -1791,6 +1792,18 @@ class SendspinConnection:
                     group = self._client.group
                     self.send_message(group._group_update_message())  # noqa: SLF001
             record = await self._run_pairing_protocol(method, transport, pairing_format)
+        except (PairingTimeoutError, InvalidPairingCodeError):
+            # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+            # Precede the leave activate with user_cancelled, since legacy-generation clients drop
+            # the connection on one mid-exchange.
+            if self._legacy_hello:
+                with suppress(Exception):
+                    await transport.send_str(
+                        PairAbortMessage(
+                            payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED)
+                        ).to_json()
+                    )
+            raise
         except asyncio.CancelledError:
             # A cancelled attempt ends like any local abort: the task never reports
             # cancelled(), so awaiting callers see the abort rather than the cancel.

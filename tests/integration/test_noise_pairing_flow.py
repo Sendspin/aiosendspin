@@ -1369,6 +1369,66 @@ async def test_live_pairing_invalid_operator_input_leaves_pairing() -> None:
             await client.disconnect()
 
 
+# DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+async def test_live_pairing_invalid_operator_input_aborts_for_a_legacy_generation_client() -> None:
+    """A client on the previous wire generation gets a pair/abort before the leave activate."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    build_client_hello = SdkConnection._build_client_hello  # noqa: SLF001
+    send_str = EncryptedWebSocket.send_str
+    sent: list[dict[str, Any]] = []
+
+    async def pre_spec_177_hello(self: SdkConnection) -> ClientHelloMessage:
+        hello = await build_client_hello(self)
+        assert hello.payload.player_support is not None
+        hello.payload.player_support.supported_commands = [PlayerCommand.VOLUME]
+        return hello
+
+    async def recording_send_str(self: EncryptedWebSocket, data: str) -> None:
+        sent.append(json.loads(data))
+        await send_str(self, data)
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        pass
+
+    async def typo() -> str:
+        return "12x456"
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=InMemoryClientPairingStore(),
+            client_name="c",
+            roles=[Roles.PLAYER],
+            player_support=_player_support(),
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            with (
+                patch.object(SdkConnection, "_build_client_hello", pre_spec_177_hello),
+                patch.object(EncryptedWebSocket, "send_str", recording_send_str),
+                _pre_spec_287_rehandshake(),
+            ):
+                await client.connect(url)
+                await _find_connection_by_client_id(server, client_identity.peer_id)
+                with pytest.raises(InvalidPairingCodeError):
+                    await server.initiate_pairing(
+                        client_identity.peer_id,
+                        PairingAttempt(
+                            method=PairMethod.DYNAMIC_PAIRING_CODE,
+                            pairing_code_provider=typo,
+                            pairing_format=PairingCodeFormat.DIGITS,
+                        ),
+                    )
+                await _await_left_pairing(client)
+        finally:
+            await client.disconnect()
+    ending = [m for m in sent if m.get("type") in ("pair/abort", "server/activate")][-2:]
+    assert ending[0] == {"type": "pair/abort", "payload": {"reason": "user_cancelled"}}
+    assert ending[1]["type"] == "server/activate"
+    assert "pairing" not in ending[1]["payload"]["activities"]
+
+
 async def _code_pairing_client(
     identity: Identity,
     store: InMemoryClientPairingStore,
