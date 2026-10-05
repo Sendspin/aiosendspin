@@ -1707,6 +1707,13 @@ class SendspinConnection:
             return
         self._pairing_message_queue = None
         self._in_pairing = False
+        # Finish leaving through a cancel, since a second leave finds pairing already left.
+        _, cancelled = await finish_despite_cancel(self._resume_service())
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _resume_service(self) -> None:
+        """Re-activate the connection after pairing, returning it to its record if it left it."""
         await self._activate()
         # End the attempt before re-keying, since some clients reject a re-handshake mid-exchange.
         await self._return_to_record()

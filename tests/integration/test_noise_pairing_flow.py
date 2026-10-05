@@ -4897,3 +4897,50 @@ async def test_a_failed_return_to_the_record_closes_the_connection() -> None:
             await _wait_until(lambda: not server_client.is_connected)
         finally:
             await client.disconnect()
+
+
+async def test_cancelling_end_pairing_mid_return_still_restores_the_session() -> None:
+    """A cancel while leaving pairing finishes the return to the record, then raises."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    never: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    looking_up = asyncio.Event()
+    real_lookup = server_store.record_by_client_id
+
+    async def provide() -> str:
+        return await never
+
+    async def slow_lookup(client_id: str) -> ServerPairingRecord | None:
+        looking_up.set()
+        await asyncio.sleep(0.05)
+        return await real_lookup(client_id)
+
+    method = PairMethod.DYNAMIC_PAIRING_CODE
+    client = await _code_pairing_client(identity, client_store, method, shown)
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            await _await_connected_client(server, identity.peer_id)
+            attempt = asyncio.create_task(
+                server.initiate_pairing(identity.peer_id, _code_attempt(method, provide))
+            )
+            await _wait_until(lambda: Activity.PAIRING in client.activities)
+            with patch.object(server_store, "record_by_client_id", slow_lookup):
+                ending = asyncio.create_task(server.end_pairing(identity.peer_id))
+                await looking_up.wait()
+                ending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await ending
+            with pytest.raises(PairingAbortError):
+                await attempt
+
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert _server_active_role_count(server, identity.peer_id) == 1
+            assert client.connected
+        finally:
+            await client.disconnect()
