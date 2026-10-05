@@ -1215,7 +1215,7 @@ class SendspinServer:
                 url,
             )
         self._mdns_client_urls[name] = url
-        self.connect_to_client(url)
+        self.connect_to_client(url, connection_reason=self.get_connection_reason(url))
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)
