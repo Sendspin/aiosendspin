@@ -4356,7 +4356,7 @@ def _client_aborts_pairing_psk() -> Any:
 
 
 async def test_an_aborted_attempt_off_a_long_term_session_admits_no_playback() -> None:
-    """A session re-keyed away from its record carries no playback until the pairing lands."""
+    """A session re-keyed away from its record carries no playback until it is back on it."""
     server_store = InMemoryServerPairingStore()
     server = _make_server(server_store)
     identity = Identity.generate()
@@ -4386,8 +4386,24 @@ async def test_an_aborted_attempt_off_a_long_term_session_admits_no_playback() -
             conn = await _find_connection_by_client_id(server, identity.peer_id)
             await server.trust_unpaired(identity.peer_id)
             assert _server_active_role_count(server, identity.peer_id) == 1
+            during: list[tuple[PskCategory | None, bool, int]] = []
 
-            with _client_aborts_pairing_psk(), pytest.raises(PairingAbortError):
+            async def observe_then_abort(ws: EncryptedWebSocket, **kwargs: object) -> None:
+                during.append(
+                    (
+                        conn.psk_category,
+                        conn._playback_capable,  # noqa: SLF001
+                        _server_active_role_count(server, identity.peer_id),
+                    )
+                )
+                await _abort_pairing_psk(ws, **kwargs)
+
+            with (
+                patch.object(
+                    client_connection_module, "run_pairing_psk_client", observe_then_abort
+                ),
+                pytest.raises(PairingAbortError),
+            ):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.PAIRING_PSK,
@@ -4396,11 +4412,9 @@ async def test_an_aborted_attempt_off_a_long_term_session_admits_no_playback() -
                     )
                 )
 
-            assert conn._noise_psk is not None  # noqa: SLF001
-            assert conn._noise_psk.category is PskCategory.PAIRING  # noqa: SLF001
-            assert conn._playback_capable is False  # noqa: SLF001
-            assert _server_active_role_count(server, identity.peer_id) == 0
-            await _wait_until(lambda: client.activities == [])
+            assert during == [(PskCategory.PAIRING, False, 0)]
+            assert conn.psk_category is PskCategory.LONG_TERM
+            assert _server_active_role_count(server, identity.peer_id) == 1
             assert client.connected
         finally:
             await client.disconnect()
@@ -4785,6 +4799,7 @@ async def test_rehandshake_reloads_trusted_unpaired_for_the_new_psk() -> None:
             conn = await _find_connection_by_client_id(server, identity.peer_id)
             # A long-term session never reads the grant.
             assert conn._trusted_unpaired is False  # noqa: SLF001
+            await server_store.remove_record(identity.peer_id)
 
             with _client_aborts_pairing_psk(), pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
@@ -4798,10 +4813,44 @@ async def test_rehandshake_reloads_trusted_unpaired_for_the_new_psk() -> None:
             assert conn._trusted_unpaired is True  # noqa: SLF001
 
             # Once the record is gone, the grant alone admits playback on the Pairing PSK.
-            await server_store.remove_record(identity.peer_id)
             conn.forget_credential_mismatch()
             await conn.refresh_trusted_unpaired()
             assert conn._playback_capable is True  # noqa: SLF001
             assert _server_active_role_count(server, identity.peer_id) == 1
+        finally:
+            await client.disconnect()
+
+
+async def test_cancelled_code_re_pairing_restores_the_long_term_session() -> None:
+    """A cancelled code re-pairing returns the session to its long-term PSK and roles."""
+    method = PairMethod.DYNAMIC_PAIRING_CODE
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    never: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def provide() -> str:
+        return await never
+
+    client = await _code_pairing_client(identity, client_store, method, shown)
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            await _await_connected_client(server, identity.peer_id)
+            attempt = asyncio.create_task(
+                server.initiate_pairing(identity.peer_id, _code_attempt(method, provide))
+            )
+            await _wait_until(lambda: Activity.PAIRING in client.activities)
+            await server.end_pairing(identity.peer_id)
+            with pytest.raises(PairingAbortError):
+                await attempt
+
+            await _wait_until(lambda: _server_active_role_count(server, identity.peer_id) == 1)
+            assert client.noise_psk is not None
+            assert client.noise_psk.category is PskCategory.LONG_TERM
+            assert client.connected
         finally:
             await client.disconnect()

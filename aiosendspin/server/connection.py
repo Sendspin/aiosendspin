@@ -1707,6 +1707,31 @@ class SendspinConnection:
         self._pairing_message_queue = None
         self._in_pairing = False
         await self._activate()
+        # End the attempt before re-keying, since some clients reject a re-handshake mid-exchange.
+        await self._return_to_record()
+
+    async def _return_to_record(self) -> None:
+        """Re-handshake a session that an unfinished pairing moved off its record back onto it."""
+        if not self._moved_off_record:
+            return
+        assert self._client_id is not None
+        record = await self._server.pairing_store.record_by_client_id(self._client_id)
+        if record is None:
+            return
+        transport = self._transport
+        assert isinstance(transport, EncryptedWebSocket)
+        queue: asyncio.Queue[WSMessage] = asyncio.Queue()
+        self._pairing_message_queue = queue
+        try:
+            accepted = await self._rehandshake_to(
+                QueuedEncryptedWebSocket(transport, queue), record.as_resolved()
+            )
+        finally:
+            self._pairing_message_queue = None
+        if not accepted:
+            raise PairingError("client/hello rejected after returning to the pairing record")
+        self._moved_off_record = False
+        await self._activate()
 
     @property
     def _pairing_quiesces(self) -> bool:
