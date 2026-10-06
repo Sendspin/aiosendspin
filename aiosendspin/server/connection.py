@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection
@@ -106,6 +107,7 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
     Activity,
+    AudioCodec,
     BinaryMessageType,
     ClientMessage,
     ConnectionReason,
@@ -188,6 +190,8 @@ _MAX_WARNED_UNKNOWN_TYPES = 16
 
 _CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
 
+_MAC_ADDRESS_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
+
 _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
         "client/pair-pending",
@@ -213,6 +217,11 @@ _PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
         "pair/abort",
     }
 )
+
+
+def _is_versioned_role_id(role_id: str) -> bool:
+    family, _, version = role_id.partition("@")
+    return bool(family and version)
 
 
 def _schedules_over_current(
@@ -865,8 +874,6 @@ class SendspinConnection:
         self._logger.debug("Connection disconnected")
 
     def _initial_state_timeout_callback(self) -> None:
-        if self._initial_state_received:
-            return
         self._initial_state_timeout_handle = None
         try:
             self._flag_noncompliance("did not send the required initial client/state in time")
@@ -875,7 +882,7 @@ class SendspinConnection:
             create_task(self.disconnect(retry_connection=False))
             return
         # Lenient: keep the connection and mark the client connected anyway.
-        if self._client is not None:
+        if self._client is not None and not self._initial_state_received:
             self._initial_state_received = True
             self._client.release_all_role_holds()
             self._cancel_activation_state_timeout()
@@ -897,13 +904,14 @@ class SendspinConnection:
     def _unimplemented_roles(supported_roles: list[str]) -> list[str]:
         """Client-offered roles/versions this server does not implement.
 
-        Excludes `_`-prefixed custom roles and versions. A non-empty result means the
-        client likely speaks a newer spec revision than this server.
+        Excludes `_`-prefixed custom roles and versions, and unversioned role IDs. A non-empty
+        result means the client likely speaks a newer spec revision than this server.
         """
         return [
             r
             for r in supported_roles
             if r not in ROLE_FACTORIES
+            and _is_versioned_role_id(r)
             and not r.startswith("_")
             and not r.partition("@")[2].startswith("_")
         ]
@@ -1103,7 +1111,6 @@ class SendspinConnection:
             if self._pairing_attempt is not None:
                 raise HandshakeAbortedError("pairing requires an encrypted connection")
             if self._server.allow_unencrypted:
-                self._logger.warning("Accepting unencrypted legacy connection (transition mode)")
                 self._pending_first_text = first_text
                 return raw
             peer = self._request.remote if self._request is not None else self._url
@@ -1226,16 +1233,25 @@ class SendspinConnection:
                     self._pairing_attempt = None
             await self._activate()
 
-        if self.requires_initial_state():
+        assert self._client is not None
+        # A strict server also waits on a client whose active roles define no state object.
+        awaits_state = bool(self._client.active_roles) and not self._client_state_received
+        if self.requires_initial_state() or (
+            awaits_state and not self._server.allow_noncompliant_clients
+        ):
             self._initial_state_timeout_handle = self._server.loop.call_later(
                 _CLIENT_STATE_TIMEOUT_S, self._initial_state_timeout_callback
             )
         else:
-            assert self._client is not None
             # Nothing to wait for: roles activated later are held until their own state.
             self._initial_state_received = True
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
+            if awaits_state:
+                # Lenient: the timeout only flags a missing initial client/state.
+                self._initial_state_timeout_handle = self._server.loop.call_later(
+                    _CLIENT_STATE_TIMEOUT_S, self._initial_state_timeout_callback
+                )
         return True
 
     async def _pair_on_connect(self, transport: EncryptedWebSocket) -> bool:
@@ -1324,6 +1340,8 @@ class SendspinConnection:
         # Recorded before the first deviation can be flagged below, while the connection
         # still has no attached client to name.
         self._hello_description = describe_client(client_info, self._client_id)
+        if not self.is_encrypted:
+            self._flag_noncompliance("connected unencrypted (transition mode)")
         # Encrypted clients omit version (it is in client/init); only a legacy
         # client carries it in the hello, so validate it only when present.
         if client_info.version is not None and client_info.version != 1:
@@ -1420,7 +1438,26 @@ class SendspinConnection:
             self._flag_noncompliance("client/hello artwork declared the removed 'bmp' format")
 
     def _note_client_hello_wire(self, client_info: ClientHelloPayload) -> None:
-        """Record what the hello reveals about the wire revision the client speaks."""
+        """Flag hello deviations and record what the hello reveals about the client's wire."""
+        if not all(_is_versioned_role_id(role_id) for role_id in client_info.supported_roles):
+            self._flag_noncompliance("client/hello listed roles not of the form role@version")
+        if self.is_encrypted and client_info.unpaired_access_incomplete:
+            self._flag_noncompliance("client/hello omitted the required unpaired_access.enabled")
+        device_info = client_info.device_info
+        if (
+            device_info is not None
+            and device_info.mac_address is not None
+            and not _MAC_ADDRESS_RE.fullmatch(device_info.mac_address)
+        ):
+            self._flag_noncompliance(
+                "client/hello sent a mac_address not in lowercase colon-separated form"
+            )
+        player_support = client_info.player_support
+        if player_support is not None and not any(
+            fmt.codec in (AudioCodec.FLAC, AudioCodec.PCM)
+            for fmt in player_support.supported_formats
+        ):
+            self._flag_noncompliance("client/hello player@v1_support listed neither flac nor pcm")
         if client_info.legacy_support_keys_used:
             self._flag_noncompliance(
                 "client/hello used unversioned support keys: "
@@ -1458,7 +1495,6 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
-        player_support = client_info.player_support
         player_commands = (
             player_support is not None and player_support.supported_commands is not None
         )
@@ -1470,6 +1506,7 @@ class SendspinConnection:
             self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
         if client_info.trust_level_used:
+            self._flag_noncompliance("client/hello sent the removed trust_level key")
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
@@ -1483,7 +1520,7 @@ class SendspinConnection:
         self._note_pair_method_wire(client_info)
 
     def _note_pair_method_wire(self, client_info: ClientHelloPayload) -> None:
-        """Flag the superseded pair-method shape, and log what the parse set aside."""
+        """Flag pair-method deviations, and log what the parse set aside."""
         # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
         if client_info.legacy_pair_methods_list_used:
             self._flag_noncompliance("client/hello sent supported_pair_methods as a list")
@@ -1494,7 +1531,20 @@ class SendspinConnection:
             self._flag_noncompliance("client/hello offered the pre-rename PIN pairing methods")
         methods = client_info.supported_pair_methods
         if methods is None:
+            if self.is_encrypted:
+                self._flag_noncompliance("client/hello omitted the required supported_pair_methods")
             return
+        if self.is_encrypted and methods.pairing_psk is None:
+            self._flag_noncompliance("client/hello did not offer the pairing_psk method")
+        if client_info.malformed_pair_method_descriptor:
+            self._flag_noncompliance("client/hello sent a malformed pair-method descriptor")
+        dynamic = methods.dynamic_pairing_code
+        if (
+            dynamic is not None
+            and PairingCodeFormat.QR_CODE.value in dynamic.formats
+            and "display" not in dynamic.out_channels
+        ):
+            self._flag_noncompliance("client/hello offered qr_code without a display out_channel")
         if methods.offered_both_pairing_code_methods:
             self._logger.info("client/hello offered both pairing-code methods")
         if methods.ignored_methods:
@@ -2688,12 +2738,12 @@ class SendspinConnection:
                 self._flag_noncompliance(f"client/state {reason}")
 
         released: list[Role] = []
+        if self._initial_state_timeout_handle is not None:
+            self._initial_state_timeout_handle.cancel()
+            self._initial_state_timeout_handle = None
         if is_initial:
             # The state is here: neither timeout may run during the awaits below.
             self._cancel_activation_state_timeout()
-            if self._initial_state_timeout_handle is not None:
-                self._initial_state_timeout_handle.cancel()
-                self._initial_state_timeout_handle = None
         else:
             released = self._apply_activation_state(payload)
             if released:

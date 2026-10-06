@@ -1261,6 +1261,21 @@ def test_nonpositive_rate_max_is_flagged_and_ignored() -> None:
     assert _last_stream_start(client).payload.visualizer.rate_max == 60
 
 
+def test_non_string_types_are_flagged_and_dropped() -> None:
+    """Non-string `types` entries are a deviation, unlike unknown identifiers."""
+    role = VisualizerV1Role(client=_make_client_stub())
+    payload = _state(types=["loudness", 7, "future_type"], rate_max=30)
+
+    assert payload.visualizer is not None
+    assert payload.visualizer.types == ["loudness"]
+    assert role.client_state_deviations(payload) == [
+        "visualizer types contained non-string entries"
+    ]
+    assert (
+        role.client_state_deviations(_state(types=["loudness", "future_type"], rate_max=30)) == []
+    )
+
+
 def test_state_without_visualizer_object_is_ignored() -> None:
     """A client/state without a visualizer object leaves the request unchanged."""
     client = _make_client_stub()

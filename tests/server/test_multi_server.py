@@ -72,6 +72,13 @@ if TYPE_CHECKING:
     from aiosendspin.noise.session import NoiseSession
 
 
+# Hello fields every encrypted client sends, so strict-server tests isolate their deviation.
+_PAIRING_HELLO_FIELDS = {
+    "supported_pair_methods": {"pairing_psk": {}},
+    "unpaired_access": {"enabled": False},
+}
+
+
 @dataclass
 class _MockServer:
     """Mock server for testing connection reason lookup."""
@@ -326,6 +333,7 @@ class TestEncryptedActivities:
                         "buffer_capacity": 100_000,
                         **support_extra,
                     },
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -426,6 +434,7 @@ class TestEncryptedActivities:
                     "name": "client-1",
                     "supported_roles": ["visualizer@v1"],
                     "visualizer@v1_support": {"buffer_capacity": 65_536, **support_extra},
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -492,6 +501,7 @@ class TestEncryptedActivities:
                         "types": ["loudness"],
                         "batch_max": 8,
                     },
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -654,7 +664,11 @@ class TestEncryptedActivities:
 
     @staticmethod
     def _artwork_hello(*, support: bool, player: bool = False) -> str:
-        payload: dict[str, object] = {"name": "client-1", "supported_roles": ["artwork@v1"]}
+        payload: dict[str, object] = {
+            "name": "client-1",
+            "supported_roles": ["artwork@v1"],
+            **_PAIRING_HELLO_FIELDS,
+        }
         if support:
             payload["artwork@v1_support"] = {
                 "channels": [{"source": "album", "format": "jpeg", "width": 300, "height": 300}]
@@ -1240,6 +1254,7 @@ class TestLegacyFragmentTolerance:
                     "name": "client-1",
                     "supported_roles": ["player@v1"],
                     "player@v1_support": support,
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -2126,6 +2141,7 @@ class TestCustomRoleSupportParsing:
             (["foobar@v1"], ["foobar@v1"]),  # unknown family
             (["controller@v1", "metadata@v1"], []),  # implemented
             (["_custom@v1", "player@_draft"], []),  # custom family / version excluded
+            (["player", "@v1", "metadata@"], []),  # unversioned, flagged separately
             (["player@v1", "controller@v2", "foobar@v3"], ["controller@v2", "foobar@v3"]),
         ],
     )

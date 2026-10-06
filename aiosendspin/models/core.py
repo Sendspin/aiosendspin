@@ -201,6 +201,18 @@ def _filter_descriptor_values(
     return filtered
 
 
+def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
+    """Whether a recognized method's descriptor has the wrong shape, before value filtering."""
+    locations = descriptor.get("locations")
+    if locations is not None and not isinstance(locations, list):
+        return True
+    if method != PairMethod.DYNAMIC_PAIRING_CODE.value:
+        return False
+    return descriptor.get("formats") == [] or not all(
+        isinstance(descriptor.get(key), list) for key in ("formats", "out_channels")
+    )
+
+
 @dataclass
 class PairMethodDescriptor(SendspinModel):
     """A secret-based pairing method a client offers in client/hello."""
@@ -366,6 +378,12 @@ class ClientHelloPayload(SendspinModel):
     legacy_pin_methods_used: bool | None = None
     """Whether supported_pair_methods named the pre-rename PIN methods, recorded for the
     server to pair over the PIN wire. Not part of the wire schema (omitted when None)."""
+    malformed_pair_method_descriptor: bool | None = None
+    """Whether a recognized pair method's descriptor had the wrong shape, recorded for the
+    server to flag. Not part of the wire schema (omitted when None)."""
+    unpaired_access_incomplete: bool | None = None
+    """Whether unpaired_access or its enabled field was omitted, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -405,6 +423,18 @@ class ClientHelloPayload(SendspinModel):
         normalized["trust_level_used"] = "trust_level" in normalized or None
         # Always overwrite so a client cannot spoof the record via the wire.
         normalized["legacy_support_keys_used"] = legacy_keys or None
+        normalized["malformed_pair_method_descriptor"] = (
+            isinstance(pair_methods, dict)
+            and any(
+                _is_malformed_descriptor(method, descriptor)
+                for method, descriptor in pair_methods.items()
+                if method in _PAIR_METHOD_VALUE_FILTERS and isinstance(descriptor, dict)
+            )
+        ) or None
+        unpaired_access = normalized.get("unpaired_access")
+        normalized["unpaired_access_incomplete"] = (
+            not isinstance(unpaired_access, dict) or "enabled" not in unpaired_access
+        ) or None
         return normalized
 
     def __post_init__(self) -> None:

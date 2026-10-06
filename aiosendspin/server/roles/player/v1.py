@@ -655,18 +655,24 @@ class PlayerV1Role(Role):
     # ---- Client message handling ----
 
     def initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:
-        """Report required player fields missing from the initial client/state."""
-        player = payload.player
-        if player is None:
+        """Report a missing player object in the initial client/state."""
+        if payload.player is None:
             return ["has an active player role but no player state"]
+        return []
+
+    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report player fields in a client/state that violate the spec."""
+        state = payload.player
+        if state is None:
+            return []
         reasons: list[str] = []
         if (
-            player.output_delay_ms is None
-            or player.required_lead_time_ms is None
-            or player.min_buffer_ms is None
+            state.output_delay_ms is None
+            or state.required_lead_time_ms is None
+            or state.min_buffer_ms is None
         ):
             reasons.append("omitted required player timing fields")
-        commands = player.supported_commands
+        commands = state.supported_commands
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         # A pre-#177 hello's commands count as declared; that client is already flagged.
         legacy_commands = self._legacy_hello_commands()
@@ -675,18 +681,10 @@ class PlayerV1Role(Role):
         elif commands is None:
             reasons.append("omitted required supported_commands")
             commands = []
-        if PlayerCommand.VOLUME in commands and player.volume is None:
+        if PlayerCommand.VOLUME in commands and state.volume is None:
             reasons.append("omitted volume despite declaring the volume command")
-        if PlayerCommand.MUTE in commands and player.muted is None:
+        if PlayerCommand.MUTE in commands and state.muted is None:
             reasons.append("omitted muted despite declaring the mute command")
-        return reasons
-
-    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
-        """Report player fields in a client/state that violate the spec."""
-        state = payload.player
-        if state is None:
-            return []
-        reasons: list[str] = []
         if state.state is not None:
             reasons.append("used legacy player.state instead of top-level available")
         if state.legacy_delay_key:
