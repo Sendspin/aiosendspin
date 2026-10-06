@@ -1009,11 +1009,12 @@ class SendspinConnection:
     @classmethod
     def _deserialize_client_message(cls, raw_message: str) -> ClientMessage:
         """Deserialize inbound client message with custom support-key normalization."""
-        parsed = ClientMessage.from_json(raw_message)
+        return cls._client_message_from_dict(orjson.loads(raw_message))
+
+    @classmethod
+    def _client_message_from_dict(cls, decoded: Any) -> ClientMessage:
+        parsed = ClientMessage.from_dict(decoded)
         if isinstance(parsed, ClientHelloMessage):
-            decoded = orjson.loads(raw_message)
-            if not isinstance(decoded, dict):
-                return parsed
             # Each pass records the selected versions that lack support; select again
             # until every family lands on a version that has one, or runs out.
             missing = parsed.payload.missing_support_roles
@@ -1270,7 +1271,12 @@ class SendspinConnection:
     async def _ingest_client_hello_checked(self, text: str) -> bool:
         """Body of the hello exchange; raises ClientComplianceError in strict mode."""
         try:
-            message = self._deserialize_client_message(text)
+            decoded = orjson.loads(text)
+            payload = decoded.get("payload") if isinstance(decoded, dict) else None
+            if self.is_encrypted and isinstance(payload, dict):
+                # Encrypted clients carry version in client/init, so ignore any copy here.
+                payload.pop("version", None)
+            message = self._client_message_from_dict(decoded)
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)
             await self.disconnect(retry_connection=False)
