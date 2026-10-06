@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -67,7 +68,7 @@ def _bare_connection(
     conn._source_starts_pending = starts  # noqa: SLF001
     conn._source_input_open = input_open  # noqa: SLF001
     conn._unhandled_binary_count = 0  # noqa: SLF001
-    conn._last_unhandled_binary_log_s = 0.0  # noqa: SLF001
+    conn._last_unhandled_binary_log_s = None  # noqa: SLF001
     return conn
 
 
@@ -110,7 +111,10 @@ def test_unhandled_binary_warns(caplog: Any) -> None:
     role = _RecordingRole(consume=False)
     conn = _bare_connection([role])
     chunk = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 1) + b"x"
-    with caplog.at_level(logging.DEBUG):
+    with (
+        caplog.at_level(logging.DEBUG),
+        patch("aiosendspin.server.connection.time.monotonic", return_value=5.0),
+    ):
         for _ in range(3):
             conn._route_inbound_binary(chunk)  # noqa: SLF001
         conn._last_unhandled_binary_log_s -= _WARN_INTERVAL_S  # noqa: SLF001
