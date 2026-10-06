@@ -217,7 +217,7 @@ class Role(ABC):
     _stream_start_time_us: int | None = None
     """Timestamp when stream started, for grace period calculation."""
 
-    _last_late_log_s: float = 0.0
+    _last_late_log_s: float | None = None
     """Monotonic time of last late-message log (for rate limiting logs)."""
 
     _late_skips_since_log: int = 0
@@ -342,7 +342,7 @@ class Role(ABC):
     def reset_binary_timing(self) -> None:
         """Reset timing/log state for binary handling at stream boundaries."""
         self._stream_start_time_us = None
-        self._last_late_log_s = 0.0
+        self._last_late_log_s = None
         self._late_skips_since_log = 0
 
     # --- Framework-provided send methods ---

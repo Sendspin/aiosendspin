@@ -335,7 +335,7 @@ class SendspinConnection:
         # Rate-limit state for already-late-at-enqueue and slow-send warnings
         self._late_at_enqueue_count: dict[str, int] = {}
         self._last_late_at_enqueue_log_s: dict[str, float] = {}
-        self._last_slow_send_log_s = 0.0
+        self._last_slow_send_log_s: float | None = None
         self._slow_send_count = 0
         # Global scheduler heaps for families
         self._ready_roles: list[tuple[int, int, str]] = []
@@ -675,7 +675,8 @@ class SendspinConnection:
         behind_by_us = now_us - (timestamp_us - cached[1].get_output_delay_us())
         self._late_at_enqueue_count[role] = self._late_at_enqueue_count.get(role, 0) + 1
         now_s = time.monotonic()
-        if now_s - self._last_late_at_enqueue_log_s.get(role, 0.0) < _WARN_INTERVAL_S:
+        last_log_s = self._last_late_at_enqueue_log_s.get(role)
+        if last_log_s is not None and now_s - last_log_s < _WARN_INTERVAL_S:
             return
         self._logger.warning(
             "Enqueued already-late binary type=%s role=%s: %s message(s); "
@@ -2830,7 +2831,8 @@ class SendspinConnection:
                 -late_by_us / 1000,
             )
             now_s = time.monotonic()
-            if now_s - role._last_late_log_s >= _WARN_INTERVAL_S:  # noqa: SLF001
+            last_log_s = role._last_late_log_s  # noqa: SLF001
+            if last_log_s is None or now_s - last_log_s >= _WARN_INTERVAL_S:
                 qsize, qmax = self.queue_status()
                 self._logger.warning(
                     "Late binary type=%s role=%s: skipping %s chunk(s); "
@@ -2926,7 +2928,10 @@ class SendspinConnection:
             if elapsed_ms >= 500.0:
                 self._slow_send_count += 1
             now_s = time.monotonic()
-            if elapsed_ms >= 500.0 and now_s - self._last_slow_send_log_s >= _WARN_INTERVAL_S:
+            if elapsed_ms >= 500.0 and (
+                self._last_slow_send_log_s is None
+                or now_s - self._last_slow_send_log_s >= _WARN_INTERVAL_S
+            ):
                 self._logger.warning(
                     "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s; "
                     "%s stall(s) over 500ms since last report",
