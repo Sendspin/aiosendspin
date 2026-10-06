@@ -241,11 +241,9 @@ def test_player_role_accepts_read_only_volume() -> None:
     """A volume reported without the volume command is applied and surfaced, not flagged."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
-    payload = ClientStatePayload(
-        available=True, player=PlayerStatePayload(volume=50, supported_commands=[])
-    )
+    payload = _complete_timing_state(volume=50, required_lead_time_ms=250, min_buffer_ms=1000)
 
-    assert not any("volume" in r for r in role.client_state_deviations(payload))
+    assert role.client_state_deviations(payload) == []
     role.on_client_state(payload)
 
     assert role.volume == 50
@@ -258,11 +256,9 @@ def test_player_role_accepts_read_only_muted() -> None:
     """A muted state reported without the mute command is applied and surfaced, not flagged."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
-    payload = ClientStatePayload(
-        available=True, player=PlayerStatePayload(muted=True, supported_commands=[])
-    )
+    payload = _complete_timing_state(muted=True, required_lead_time_ms=250, min_buffer_ms=1000)
 
-    assert not any("mute" in r for r in role.client_state_deviations(payload))
+    assert role.client_state_deviations(payload) == []
     role.on_client_state(payload)
 
     assert role.muted is True

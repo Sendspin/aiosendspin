@@ -557,6 +557,13 @@ async def test_lenient_server_flags_a_missing_initial_state_of_stateless_roles()
 
 
 @pytest.mark.asyncio
+async def test_lenient_server_stops_waiting_once_stateless_roles_send_state() -> None:
+    """A controller-only client/state cancels the timeout that would flag it as missing."""
+    conn, _fake = await _connect(_hello([Roles.CONTROLLER.value]))
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_strict_server_holds_stateless_roles_until_initial_state() -> None:
     """A strict server does not connect a controller-only client and drops it without state."""
     loop = asyncio.get_running_loop()

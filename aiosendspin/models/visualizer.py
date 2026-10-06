@@ -145,7 +145,7 @@ class VisualizerStatePayload(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, payload: dict[str, Any]) -> dict[str, Any]:
-        """Drop duplicate and unknown types, which a newer client may send, and non-strings."""
+        """Drop non-strings, plus the duplicate and unknown types a newer client may send."""
         payload = dict(payload)
         raw_types = payload.get("types")
         if "types" in payload:

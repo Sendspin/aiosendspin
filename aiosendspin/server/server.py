@@ -303,10 +303,7 @@ class SendspinServer:
 
     @property
     def allow_unencrypted(self) -> bool:
-        """Whether transition mode is enabled (accepts legacy unencrypted clients).
-
-        They are still rejected when ``allow_noncompliant_clients`` is False.
-        """
+        """Whether transition mode is enabled (accepts legacy unencrypted clients)."""
         return self._allow_unencrypted
 
     @property
