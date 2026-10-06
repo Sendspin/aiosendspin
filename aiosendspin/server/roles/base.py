@@ -359,7 +359,7 @@ class Role(ABC):
 
     # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
     def clears_state_with_null(self) -> bool:
-        """Whether the client clears this role's server/state object only on a null object."""
+        """Whether the client clears this deactivated role's server/state only on a null object."""
         connection = self._client.connection
         return connection is not None and connection.clears_role_state_with_null
 

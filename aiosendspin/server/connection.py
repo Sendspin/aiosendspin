@@ -472,7 +472,7 @@ class SendspinConnection:
     @property
     def clears_role_state_with_null(self) -> bool:
         """
-        Whether the client clears a role's server/state object only on a null role object.
+        Whether the client clears a deactivated role's server/state only on a null role object.
 
         Unencrypted clients never receive server/activate, and pre-spec-#177 clients predate
         the activation-driven discard.

@@ -819,7 +819,7 @@ def test_reset_progress_discards_scheduled_metadata() -> None:
 
 
 def test_clear_discards_scheduled_metadata() -> None:
-    """clear() sends null at once and the scheduled metadata never takes effect."""
+    """clear() sends only a timestamp at once and the scheduled metadata never takes effect."""
     group, clock = _make_scheduling_group()
     mgr = MetadataGroupRole(group)
     member = MagicMock()
