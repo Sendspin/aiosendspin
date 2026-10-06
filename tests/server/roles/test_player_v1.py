@@ -77,7 +77,15 @@ def test_player_client_state_deviations_accepts_compliant_state() -> None:
     """A compliant client/state carrying `available` reports no deviations."""
     role = PlayerV1Role(client=_make_client_stub())
     deviations = role.client_state_deviations(
-        ClientStatePayload(available=True, player=PlayerStatePayload())
+        ClientStatePayload(
+            available=True,
+            player=PlayerStatePayload(
+                output_delay_ms=0,
+                required_lead_time_ms=100,
+                min_buffer_ms=200,
+                supported_commands=[],
+            ),
+        )
     )
     assert deviations == []
 
@@ -112,11 +120,11 @@ def test_player_role_initial_state_deviations_flags_missing_player_object() -> N
     assert role.initial_state_deviations(ClientStatePayload(available=True)) != []
 
 
-def test_player_role_initial_state_deviations_flags_missing_timing() -> None:
+def test_player_client_state_deviations_flags_missing_timing() -> None:
     """A player object present but missing the required timing fields is reported incomplete."""
     role = PlayerV1Role(client=_make_client_stub())
     assert (
-        role.initial_state_deviations(
+        role.client_state_deviations(
             ClientStatePayload(available=True, player=PlayerStatePayload(volume=50))
         )
         != []
@@ -158,52 +166,52 @@ def _complete_timing_state(**overrides: object) -> ClientStatePayload:
     return ClientStatePayload(available=True, player=PlayerStatePayload(**fields))  # type: ignore[arg-type]
 
 
-def test_player_role_initial_state_deviations_flags_missing_supported_commands() -> None:
-    """An initial player state without supported_commands is reported incomplete."""
+def test_player_client_state_deviations_flags_missing_supported_commands() -> None:
+    """A player state without supported_commands is reported incomplete."""
     role = PlayerV1Role(client=_stub_with_player_support())
-    reasons = role.initial_state_deviations(_complete_timing_state(supported_commands=None))
+    reasons = role.client_state_deviations(_complete_timing_state(supported_commands=None))
     assert any("supported_commands" in r for r in reasons)
 
 
-def test_player_role_initial_state_deviations_flags_missing_volume() -> None:
-    """A player whose initial state declares the volume command but omits volume is flagged."""
+def test_player_client_state_deviations_flags_missing_volume() -> None:
+    """A player whose state declares the volume command but omits volume is flagged."""
     role = PlayerV1Role(client=_stub_with_player_support())
-    reasons = role.initial_state_deviations(
+    reasons = role.client_state_deviations(
         _complete_timing_state(supported_commands=[PlayerCommand.VOLUME])
     )
     assert any("volume" in r for r in reasons)
 
 
-def test_player_role_initial_state_deviations_flags_missing_muted() -> None:
-    """A player whose initial state declares the mute command but omits muted is flagged."""
+def test_player_client_state_deviations_flags_missing_muted() -> None:
+    """A player whose state declares the mute command but omits muted is flagged."""
     role = PlayerV1Role(client=_stub_with_player_support())
-    reasons = role.initial_state_deviations(
+    reasons = role.client_state_deviations(
         _complete_timing_state(supported_commands=[PlayerCommand.MUTE])
     )
     assert any("muted" in r for r in reasons)
 
 
-def test_player_role_initial_state_deviations_accepts_declared_commands_reported() -> None:
+def test_player_client_state_deviations_accepts_declared_commands_reported() -> None:
     """Declared volume/mute commands with their values present are accepted."""
     role = PlayerV1Role(client=_stub_with_player_support())
     payload = _complete_timing_state(
         volume=50, muted=False, supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE]
     )
-    assert role.initial_state_deviations(payload) == []
+    assert role.client_state_deviations(payload) == []
 
 
-def test_player_role_initial_state_deviations_reads_payload_commands() -> None:
-    """The initial state's own list is checked, not the role's previously stored one."""
+def test_player_client_state_deviations_reads_payload_commands() -> None:
+    """The state's own list is checked, not the role's previously stored one."""
     role = PlayerV1Role(client=_stub_with_player_support())
     role.state_supported_commands = [PlayerCommand.VOLUME]
-    assert role.initial_state_deviations(_complete_timing_state()) == []
+    assert role.client_state_deviations(_complete_timing_state()) == []
 
 
 # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
-def test_player_role_initial_state_deviations_legacy_hello_commands() -> None:
+def test_player_client_state_deviations_legacy_hello_commands() -> None:
     """A pre-#177 hello's commands stand in for an omitted state list, without a second flag."""
     role = PlayerV1Role(client=_stub_with_player_support([PlayerCommand.VOLUME]))
-    reasons = role.initial_state_deviations(_complete_timing_state(supported_commands=None))
+    reasons = role.client_state_deviations(_complete_timing_state(supported_commands=None))
     assert reasons == ["omitted volume despite declaring the volume command"]
 
 
@@ -237,7 +245,7 @@ def test_player_role_accepts_read_only_volume() -> None:
         available=True, player=PlayerStatePayload(volume=50, supported_commands=[])
     )
 
-    assert role.client_state_deviations(payload) == []
+    assert not any("volume" in r for r in role.client_state_deviations(payload))
     role.on_client_state(payload)
 
     assert role.volume == 50
@@ -254,7 +262,7 @@ def test_player_role_accepts_read_only_muted() -> None:
         available=True, player=PlayerStatePayload(muted=True, supported_commands=[])
     )
 
-    assert role.client_state_deviations(payload) == []
+    assert not any("mute" in r for r in role.client_state_deviations(payload))
     role.on_client_state(payload)
 
     assert role.muted is True

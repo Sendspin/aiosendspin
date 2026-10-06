@@ -21,8 +21,10 @@ from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStatePayload,
+    PairMethodDescriptor,
     ServerCommandMessage,
     ServerCommandPayload,
+    SupportedPairMethods,
     UnpairedAccess,
 )
 from aiosendspin.models.player import (
@@ -379,7 +381,7 @@ async def test_activation_state_deviations_are_flagged() -> None:
     with patch.object(conn, "_flag_noncompliance") as flag:
         await conn._handle_client_state(ClientStatePayload(player=partial))  # noqa: SLF001
 
-    flag.assert_any_call("client/state after server/activate omitted required player timing fields")
+    flag.assert_any_call("client/state omitted required player timing fields")
     assert not client.awaits_role_state("player")
 
 
@@ -534,6 +536,78 @@ async def test_initial_state_completes_after_its_roles_were_removed() -> None:
     await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
 
     assert client.is_connected
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_lenient_server_flags_a_missing_initial_state_of_stateless_roles() -> None:
+    """A controller-only client connects at once, and is flagged when no client/state follows."""
+    conn, _fake = await _connect(_hello([Roles.CONTROLLER.value]), send_state=False)
+    client = _client(conn)
+    assert client.is_connected
+    handle = conn._initial_state_timeout_handle  # noqa: SLF001
+    assert handle is not None
+    handle.cancel()
+
+    with patch.object(conn, "_flag_noncompliance") as flag:
+        conn._initial_state_timeout_callback()  # noqa: SLF001
+
+    flag.assert_called_once_with("did not send the required initial client/state in time")
+    assert client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_strict_server_holds_stateless_roles_until_initial_state() -> None:
+    """A strict server does not connect a controller-only client and drops it without state."""
+    loop = asyncio.get_running_loop()
+    server = _MockServer(loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False)
+    hello = dataclasses.replace(
+        _hello([Roles.CONTROLLER.value]),
+        supported_pair_methods=SupportedPairMethods(pairing_psk=PairMethodDescriptor()),
+    )
+    conn, _fake = await _connect(hello, send_state=False, server=server)
+    client = _client(conn)
+    assert not client.is_connected
+    handle = conn._initial_state_timeout_handle  # noqa: SLF001
+    assert handle is not None
+    handle.cancel()
+
+    with patch.object(conn, "disconnect", new_callable=AsyncMock) as disconnect:
+        conn._initial_state_timeout_callback()  # noqa: SLF001
+        await asyncio.sleep(0)
+
+    disconnect.assert_awaited_once_with(retry_connection=False)
+    assert not client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_strict_server_connects_stateless_roles_whose_state_came_while_pairing() -> None:
+    """A client/state sent during pairing on connect is the initial state of later roles."""
+    loop = asyncio.get_running_loop()
+    server = _MockServer(loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False)
+    await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+    hello = dataclasses.replace(
+        _hello([Roles.CONTROLLER.value]),
+        supported_pair_methods=SupportedPairMethods(pairing_psk=PairMethodDescriptor()),
+    )
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    psk = generate_psk()
+    conn._client_id = CLIENT_ID  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk), psk=psk, category=PskCategory.PAIRING
+    )
+    conn._transport = _FakePairingTransport(  # noqa: SLF001
+        [WSMessage(WSMsgType.TEXT, ClientHelloMessage(hello).to_json(), "")]
+    )
+
+    async def pair_with_state(_transport: object) -> bool:
+        await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
+        return True
+
+    conn._pair_on_connect = pair_with_state  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await conn._exchange_hellos()  # noqa: SLF001
+    assert _client(conn).is_connected
     assert conn._initial_state_timeout_handle is None  # noqa: SLF001
 
 

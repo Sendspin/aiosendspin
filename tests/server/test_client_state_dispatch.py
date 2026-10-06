@@ -571,7 +571,13 @@ async def test_unrecognized_player_command_is_flagged_and_state_still_applies() 
                 "type": "client/state",
                 "payload": {
                     "available": False,
-                    "player": {"volume": 40, "supported_commands": ["volume", "teleport"]},
+                    "player": {
+                        "volume": 40,
+                        "output_delay_ms": 0,
+                        "required_lead_time_ms": 100,
+                        "min_buffer_ms": 200,
+                        "supported_commands": ["volume", "teleport"],
+                    },
                 },
             }
         ).decode()

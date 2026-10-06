@@ -762,6 +762,8 @@ class VisualizerV1Role(Role):
             reasons.append("requested visualizer 'spectrum' without a spectrum configuration")
         if state.rate_max <= 0:
             reasons.append("sent a non-positive visualizer rate_max")
+        if state.non_string_types_used:
+            reasons.append("visualizer types contained non-string entries")
         return reasons
 
     def on_client_state(self, payload: ClientStatePayload) -> None:

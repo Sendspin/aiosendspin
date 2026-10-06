@@ -98,7 +98,17 @@ def _spy_format_changes(client: SendspinClient, monkeypatch: pytest.MonkeyPatch)
 
 
 def _state(fmt: SupportedAudioFormat | None) -> ClientStatePayload:
-    return ClientStatePayload(available=True, player=PlayerStatePayload(volume=50, format=fmt))
+    return ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload(
+            volume=50,
+            output_delay_ms=0,
+            required_lead_time_ms=100,
+            min_buffer_ms=200,
+            supported_commands=[],
+            format=fmt,
+        ),
+    )
 
 
 def _transformer(role: PlayerV1Role) -> object:

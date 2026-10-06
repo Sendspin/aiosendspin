@@ -179,19 +179,19 @@ class PlayerStatePayload(SendspinModel):
     muted: bool | None = None
     """Mute state, only included if 'mute' in supported_commands."""
     output_delay_ms: int | None = None
-    """Output delay in milliseconds (0-5000). Required on the initial state message;
-    omitted in incremental updates means unchanged."""
+    """Output delay in milliseconds (0-5000). Required in every player object.
+    DEPRECATED(spec-pr-175): omitted in incremental updates means unchanged."""
     required_lead_time_ms: int | None = None
-    """Minimum startup lead time in milliseconds (non-negative). Required on the initial state
-    message; omitted in incremental updates means unchanged.
+    """Minimum startup lead time in milliseconds (non-negative). Required in every player
+    object. DEPRECATED(spec-pr-175): omitted in incremental updates means unchanged.
 
     Measured from the server transmit time of the start/restart trigger (stream/start
     or stream/clear) to the timestamp of the first subsequent audio chunk. Covers codec
     init, decode warmup, audio backend buffering, and DAC latency. Excludes output_delay_ms.
     """
     min_buffer_ms: int | None = None
-    """Requested minimum ongoing buffer duration in milliseconds (non-negative). Required on
-    the initial state message; omitted in incremental updates means unchanged.
+    """Requested minimum ongoing buffer duration in milliseconds (non-negative). Required in
+    every player object. DEPRECATED(spec-pr-175): omitted in incremental updates means unchanged.
 
     Maintained during playback (primarily for live streams) to absorb network jitter and
     decode/playback timing variance. Excludes output_delay_ms.
@@ -199,8 +199,8 @@ class PlayerStatePayload(SendspinModel):
     supported_commands: list[PlayerCommand] | None = None
     """Commands the server may send, subset of: 'volume', 'mute', 'set_output_delay'.
 
-    Required on the initial state message and empty when the player accepts no
-    commands; omitted in incremental updates means unchanged.
+    Required in every player object and empty when the player accepts no commands.
+    DEPRECATED(spec-pr-175): omitted in incremental updates means unchanged.
     """
     legacy_delay_key: str | None = None
     """Pre-rename delay key the parser rewrote, recorded for the role to flag.
