@@ -27,6 +27,7 @@ from aiosendspin.models.types import (
     AudioCodec,
     ConnectionReason,
     PairAbortReason,
+    PairMethod,
     PlaybackStateType,
     PlayerCommand,
     RepeatMode,
@@ -40,7 +41,11 @@ from aiosendspin.noise.constants import (
     MSG_TYPE_JSON_BODY,
 )
 from aiosendspin.noise.keys import generate_psk, psk_id_for
-from aiosendspin.noise.pairing import PairingAbortError, RemotePairingAbortError
+from aiosendspin.noise.pairing import (
+    PairingAbortError,
+    PairingAttempt,
+    RemotePairingAbortError,
+)
 from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     PskCategory,
@@ -1203,6 +1208,33 @@ class TestInitialConnectPairingAbort:
 
         with pytest.raises(PairingAbortError):
             await conn._exchange_hellos()  # noqa: SLF001
+
+
+class TestMidConnectionPairingAbort:
+    """Pair aborts during a mid-connection pairing attempt."""
+
+    @pytest.mark.asyncio
+    async def test_closing_abort_closes_connection(self, mock_server: _MockServer) -> None:
+        """A closing abort reason closes the connection even if the client keeps it open."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        conn._client_id = "client-1"  # noqa: SLF001
+        transport = _FakePairingTransport()
+        raw = AsyncMock()
+        transport._ws = raw  # noqa: SLF001
+        transport._session = make_paired_sessions()[1]  # noqa: SLF001
+        conn._transport = transport  # noqa: SLF001
+        conn._pair = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+            side_effect=RemotePairingAbortError(PairAbortReason.CONCURRENT_ATTEMPT)
+        )
+
+        with pytest.raises(RemotePairingAbortError):
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id="client-1"
+                )
+            )
+
+        raw.close.assert_awaited_once()
 
 
 # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
