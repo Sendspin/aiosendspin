@@ -350,6 +350,22 @@ def test_both_offered_keeps_static_when_dynamic_is_unusable() -> None:
     assert methods.pairing_psk is not None
 
 
+def test_both_offered_keeps_static_when_dynamic_lacks_digits() -> None:
+    """A QR-only dynamic code leaves static usable on servers that cannot scan QR codes."""
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":{"pairing_psk":{},"static_pairing_code":{},'
+        '"dynamic_pairing_code":{"formats":["qr_code"],"out_channels":["display"]}}}'
+    )
+    methods = ClientHelloPayload.from_json(raw).supported_pair_methods
+    assert methods is not None
+    assert methods.offered_both_pairing_code_methods is True
+    assert methods.static_pairing_code == PairMethodDescriptor()
+    assert methods.dynamic_pairing_code == DynamicPairMethodDescriptor(
+        out_channels=["display"], formats=["qr_code"]
+    )
+
+
 def test_structured_descriptor_values_are_ignored_not_rejected() -> None:
     """A value that is not an identifier at all is ignored, like any unrecognized one.
 
