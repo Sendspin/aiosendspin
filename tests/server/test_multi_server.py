@@ -559,6 +559,7 @@ class TestEncryptedActivities:
         assert "client-1" not in strict_server._clients  # noqa: SLF001
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @staticmethod
     def _pre_rename_artwork_hello() -> str:
         return orjson.dumps(
@@ -596,6 +597,7 @@ class TestEncryptedActivities:
         conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_pre_rename_artwork_hello_admitted_and_logged(
         self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
@@ -610,6 +612,7 @@ class TestEncryptedActivities:
         assert "'bmp' format" in caplog.text
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_strict_server_rejects_pre_rename_artwork_hello(self) -> None:
         """Strict mode rejects the pre-rename artwork wire instead of tolerating it."""
@@ -1572,6 +1575,7 @@ class TestCustomRoleSupportParsing:
         assert msg.payload.activatable_roles == []
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     def test_deserialize_artwork_hello_accepts_pre_rename_dimensions(self) -> None:
         """media_width/media_height are rewritten to width/height and recorded."""
         raw = orjson.dumps(

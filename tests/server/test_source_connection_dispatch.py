@@ -153,6 +153,7 @@ async def test_client_stream_start_and_end_dispatched_to_roles() -> None:
     assert role.ends == 1
 
 
+# DEPRECATED(spec-pr-163): remove in aiosendspin <version>
 async def test_superseded_stream_message_names_are_dispatched_and_flagged() -> None:
     """A source on the pre-rename wire is still served, and the deviation recorded."""
     role = _RecordingRole()
@@ -185,6 +186,7 @@ async def test_current_stream_message_names_are_not_flagged() -> None:
     assert conn._client.noncompliance == []  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-163): remove in aiosendspin <version>
 async def test_superseded_stream_message_name_is_rejected_by_a_strict_server() -> None:
     """The flag is not cosmetic: a strict server drops a source on the old spelling."""
     conn = _bare_connection([_RecordingRole()], strict=True)

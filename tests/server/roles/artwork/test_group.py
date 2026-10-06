@@ -76,6 +76,7 @@ def test_encode_letterboxes_to_the_declared_dimensions() -> None:
         assert decoded.convert("RGB").getpixel((0, 0)) == (0, 0, 0)
 
 
+# DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def test_encode_still_supports_bmp() -> None:
     """A client declaring the removed 'bmp' format still gets a BMP image."""
     agr = ArtworkGroupRole(_make_group_stub())
