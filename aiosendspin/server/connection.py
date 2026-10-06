@@ -2748,6 +2748,8 @@ class SendspinConnection:
             if self._client is None:
                 return
             self._flag_superseded_message_type(message.type)
+            if message.payload_missing:
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
             self._source_input_open = False
             for role in self._client.active_roles:
                 role.on_client_stream_end()
