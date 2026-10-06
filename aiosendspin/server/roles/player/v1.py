@@ -126,7 +126,7 @@ class PlayerV1Role(Role):
         self._buffer_tracker = None
         # Initialize timing state for binary handling
         self._stream_start_time_us = None
-        self._last_late_log_s = 0.0
+        self._last_late_log_s = None
         self._late_skips_since_log = 0
         # Cached state reference (avoids repeated dict lookup + isinstance check)
         self._cached_state: PlayerPersistentState | None = None

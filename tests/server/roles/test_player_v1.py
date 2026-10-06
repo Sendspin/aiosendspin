@@ -433,7 +433,7 @@ def test_player_role_on_stream_start_resets_binary_timing() -> None:
 
     assert role._stream_start_time_us is None  # noqa: SLF001
     assert role._late_skips_since_log == 0  # noqa: SLF001
-    assert role._last_late_log_s == 0.0  # noqa: SLF001
+    assert role._last_late_log_s is None  # noqa: SLF001
     assert role._pending_stream_start is True  # noqa: SLF001
 
 
