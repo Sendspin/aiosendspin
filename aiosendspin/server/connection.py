@@ -1986,6 +1986,7 @@ class SendspinConnection:
         if method is PairMethod.PAIRING_PSK:
             # The attempt is absent when the client dialed in with a staged Pairing PSK.
             attempt = self._pairing_attempt
+            assert self._noise_psk is not None
             return await run_pairing_psk_server(
                 transport,
                 pairing_index=pairing_index,
@@ -1996,6 +1997,7 @@ class SendspinConnection:
                 on_legacy_finalize=(
                     None if self._sent_psk_pair_init else self._flag_legacy_psk_finalize
                 ),
+                pairing_psk=self._noise_psk.psk,
             )
         assert self._pairing_attempt is not None
         assert self._pairing_attempt.pairing_code_provider is not None

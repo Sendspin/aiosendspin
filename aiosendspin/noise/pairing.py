@@ -17,6 +17,7 @@ from aiosendspin.models.types import PairAbortReason, PairingCodeFormat, PairMet
 from aiosendspin.util import finish_despite_cancel
 
 from . import pairing_code as pairing_code_mod
+from .constants import SENTINEL_PSK
 from .keys import PSK_SIZE, b64url_decode, b64url_encode, psk_id_for
 from .models import (
     ClientPairAuthMessage,
@@ -220,10 +221,13 @@ async def run_pairing_psk_server(
     on_pair_init: Callable[[], None] | None = None,
     # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
     on_legacy_finalize: Callable[[], None] | None = None,
+    pairing_psk: bytes | None = None,
 ) -> ServerPairingRecord:
     """Run the server side of the Pairing PSK flow.
 
     ``on_pair_init`` is called for every ``client/pair-init`` received, whatever its index.
+    A ``client/pair-finalize`` delivering ``pairing_psk`` or the Sentinel PSK raises
+    ``PairingError``.
     ``client/pair-auth``, ``client/pair-confirm``, ``client/pair-finalize`` and
     ``client/pair-retry`` messages preceding the matching ``client/pair-init`` are discarded as
     leftovers, except that with ``on_legacy_finalize`` set, a finalize carrying only
@@ -277,6 +281,7 @@ async def run_pairing_psk_server(
             method=PairMethod.PAIRING_PSK,
             owner=owner,
             finalize=finalize,
+            pairing_psk=pairing_psk,
         )
 
 
@@ -677,6 +682,7 @@ async def _finalize_server(
     wrap_key: bytes | None = None,
     owner: str | None = None,
     finalize: ClientPairFinalizeMessage | None = None,
+    pairing_psk: bytes | None = None,
 ) -> ServerPairingRecord:
     """Consume ``client/pair-finalize`` and finalize the record it carries.
 
@@ -694,6 +700,7 @@ async def _finalize_server(
             method=method,
             wrap_key=wrap_key,
             owner=owner,
+            pairing_psk=pairing_psk,
         )
     )
     return record
@@ -708,12 +715,15 @@ async def _commit_finalize(
     method: PairMethod,
     wrap_key: bytes | None,
     owner: str | None,
+    pairing_psk: bytes | None,
 ) -> ServerPairingRecord:
     """Store the record ``finalize`` carries and acknowledge it."""
     # Bounded here, since the caller's timeout and cancels cannot interrupt this step.
     async with _server_timeout(_SERVER_FINALIZE_TIMEOUT_S, "completion of the pairing finalize"):
         existing = await store.record_by_client_id(client_id)
         psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
+        if psk in (SENTINEL_PSK, pairing_psk):
+            raise PairingError("client/pair-finalize reused the Sentinel or pairing PSK")
         if existing is None:
             record = ServerPairingRecord(
                 psk_id=psk_id_for(psk),
