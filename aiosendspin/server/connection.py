@@ -1997,6 +1997,7 @@ class SendspinConnection:
                     None if self._sent_psk_pair_init else self._flag_legacy_psk_finalize
                 ),
                 pairing_psk=self._noise_psk.psk,
+                on_noncompliance=self._flag_noncompliance,
             )
         assert self._pairing_attempt is not None
         assert self._pairing_attempt.pairing_code_provider is not None
@@ -2016,6 +2017,7 @@ class SendspinConnection:
                 on_pair_pending=self._pairing_attempt.on_pair_pending,
                 owner=self._pairing_attempt.owner,
                 legacy_rounds=legacy_rounds,
+                on_noncompliance=self._flag_noncompliance,
             )
         assert pairing_format is not None
         return await run_dynamic_pairing_code_server(
