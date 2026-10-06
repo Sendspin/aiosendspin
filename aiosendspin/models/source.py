@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .base import SendspinConfig, SendspinModel
@@ -124,8 +124,14 @@ class ClientStreamStartMessage(ClientMessage):
 
 # Client -> Server: client-stream/end
 @dataclass
+class ClientStreamEndPayload(SendspinModel):
+    """Empty ``client-stream/end`` payload."""
+
+
+@dataclass
 class ClientStreamEndMessage(ClientMessage):
     """Message sent by a source client to end the current input stream."""
 
+    payload: ClientStreamEndPayload = field(default_factory=ClientStreamEndPayload)
     # DEPRECATED(spec-pr-163): remove in aiosendspin <version>
     type: Literal["client-stream/end", "client_stream/end"] = "client-stream/end"
