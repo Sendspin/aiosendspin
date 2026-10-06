@@ -6,6 +6,7 @@ import asyncio
 import base64
 import logging
 import struct
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
@@ -123,6 +124,7 @@ from aiosendspin.noise.pairing import (
 from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
+from aiosendspin.util import WARN_INTERVAL_S
 
 from .models import AudioFormat, PCMFormat, ServerInfo
 from .time_sync import SendspinTimeFilter
@@ -355,6 +357,8 @@ class SendspinConnection:
         self._artwork_pending = {}
         self._artwork_shown = set()
         self._pending_state = {}
+        self._dropped_binary_counts: dict[str, int] = {}
+        self._last_dropped_binary_log_s: dict[str, float] = {}
 
     @property
     def connected(self) -> bool:
@@ -1518,7 +1522,7 @@ class SendspinConnection:
 
     def _handle_binary_message(self, payload: bytes) -> None:
         if len(payload) < 1:
-            logger.warning("Empty binary message")
+            self._warn_dropped_binary("Empty binary message")
             return
 
         raw_type = payload[0]
@@ -1528,7 +1532,7 @@ class SendspinConnection:
         try:
             message_type = BinaryMessageType(raw_type)
         except ValueError:
-            logger.warning("Unknown binary message type: %s", raw_type)
+            self._warn_dropped_binary("Unknown binary message type: %s", raw_type)
             return
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
@@ -1555,7 +1559,9 @@ class SendspinConnection:
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
             if len(payload) < PLAYER_AUDIO_HEADER_SIZE:
-                logger.warning("Dropping truncated audio chunk of %d bytes", len(payload))
+                self._warn_dropped_binary(
+                    "Dropping truncated audio chunk of %d bytes", len(payload)
+                )
                 return
             header = unpack_player_audio_header(payload)
             self._handle_audio_chunk(
@@ -1569,6 +1575,21 @@ class SendspinConnection:
             self._handle_visualization_frame(message_type, payload[1:])
         else:
             logger.debug("Ignoring unsupported binary message type: %s", message_type)
+
+    def _warn_dropped_binary(self, msg: str, *args: object) -> None:
+        """Warn on the first ``msg``, then report repeats at debug level with a count."""
+        count = self._dropped_binary_counts.get(msg, 0) + 1
+        now_s = time.monotonic()
+        last_log_s = self._last_dropped_binary_log_s.get(msg)
+        if last_log_s is None:
+            logger.warning(msg, *args)
+        elif now_s - last_log_s < WARN_INTERVAL_S:
+            self._dropped_binary_counts[msg] = count
+            return
+        else:
+            logger.debug("%s: %s message(s) since last report", msg % args, count)
+        self._dropped_binary_counts[msg] = 0
+        self._last_dropped_binary_log_s[msg] = now_s
 
     async def _handle_handshake(self, data: str) -> None:
         """Run a server-initiated re-handshake, ending any pairing attempt still in progress."""
