@@ -1372,6 +1372,7 @@ def test_set_output_delay_noop_without_support() -> None:
     client.send_message.assert_not_called()
 
 
+# DEPRECATED(spec-pr-164): remove in aiosendspin <version>
 def test_set_output_delay_addresses_client_using_pre_rename_command() -> None:
     """A client that only declared set_static_delay still gets a delay command it understands."""
     client = _make_client_stub()
@@ -1387,6 +1388,7 @@ def test_set_output_delay_addresses_client_using_pre_rename_command() -> None:
     assert sent.payload.player.to_dict() == {"command": "set_static_delay", "static_delay_ms": 500}
 
 
+# DEPRECATED(spec-pr-164): remove in aiosendspin <version>
 def test_set_output_delay_prefers_current_command_when_both_declared() -> None:
     """A client declaring both spellings is addressed with the current one."""
     client = _make_client_stub()
@@ -1399,6 +1401,7 @@ def test_set_output_delay_prefers_current_command_when_both_declared() -> None:
     assert sent.payload.player.command == PlayerCommand.SET_OUTPUT_DELAY
 
 
+# DEPRECATED(spec-pr-164): remove in aiosendspin <version>
 def test_player_client_state_deviations_flags_pre_rename_delay_key() -> None:
     """A client/state using static_delay_ms is a deviation."""
     role = PlayerV1Role(client=_make_client_stub())
@@ -1410,6 +1413,7 @@ def test_player_client_state_deviations_flags_pre_rename_delay_key() -> None:
     assert any("static_delay_ms" in r for r in reasons)
 
 
+# DEPRECATED(spec-pr-164): remove in aiosendspin <version>
 def test_player_client_state_deviations_flags_pre_rename_command_name() -> None:
     """Declaring set_static_delay in supported_commands is a deviation."""
     role = PlayerV1Role(client=_make_client_stub())

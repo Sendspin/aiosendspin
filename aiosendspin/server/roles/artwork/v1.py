@@ -126,6 +126,7 @@ class ArtworkV1Role(Role):
             return ["has an active artwork role but no artwork state"]
         return []
 
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
         """Report artwork channels in a client/state phrased on a superseded wire."""
         if payload.artwork is None:
@@ -303,6 +304,7 @@ class ArtworkV1Role(Role):
         self._apply_channels(channels)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     def _flag_legacy_artwork_wire(self, request: StreamRequestFormatArtwork) -> None:
         """Flag a request phrased on the wire the spec superseded."""
         if request.legacy_dimension_keys:

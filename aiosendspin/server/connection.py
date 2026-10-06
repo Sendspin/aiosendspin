@@ -1425,6 +1425,7 @@ class SendspinConnection:
             self._flag_noncompliance(f"client sent {message_type}, superseded by {current}")
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     def _flag_legacy_artwork_wire(self, support: ClientHelloArtworkSupport) -> None:
         """Flag artwork channels declared on the wire the spec superseded."""
         legacy_keys = sorted(
@@ -2731,6 +2732,7 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
             # A client/state without `available` leaves the availability unchanged.
             self._flag_noncompliance("client/state omitted the required 'available' field")
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         if payload.legacy_state_used:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
         for role in self._client.active_roles:
