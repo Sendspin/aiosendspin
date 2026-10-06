@@ -839,6 +839,16 @@ class TestEncryptedActivities:
         assert "omitted required version" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_encrypted_hello_ignores_version(self, mock_server: _MockServer) -> None:
+        """An encrypted hello carrying an unknown version field is still admitted."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        hello = orjson.loads(_client_hello_frame("client-1").data)
+        hello["payload"]["version"] = 2
+        self._prime_encrypted_hello(conn, orjson.dumps(hello).decode())
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+
+    @pytest.mark.asyncio
     async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:
         """A connection dialed for playback declares the playback activity up front."""
         url = "ws://192.168.1.100:8927/sendspin"

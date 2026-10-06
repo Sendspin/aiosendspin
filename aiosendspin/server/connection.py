@@ -1288,8 +1288,8 @@ class SendspinConnection:
         # still has no attached client to name.
         self._hello_description = describe_client(client_info, self._client_id)
         # Encrypted clients omit version (it is in client/init); only a legacy
-        # client carries it in the hello, so validate it only when present.
-        if client_info.version is not None and client_info.version != 1:
+        # client carries it in the hello, so validate it only there.
+        if not self.is_encrypted and client_info.version not in (None, 1):
             self._logger.error(
                 "Incompatible protocol version %s (only '1' is supported)",
                 client_info.version,
