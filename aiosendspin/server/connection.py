@@ -74,6 +74,7 @@ from aiosendspin.models.core import (
     StreamClearMessage,
     StreamEndMessage,
     StreamRequestFormatMessage,
+    StreamRequestFormatPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.management import (
@@ -2647,29 +2648,7 @@ class SendspinConnection:
             return
 
         if isinstance(message, StreamRequestFormatMessage):
-            if self._client is None:
-                return
-            fmt = message.payload
-            if fmt.player is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format player object, "
-                    "superseded by the client/state player format"
-                )
-            if fmt.artwork is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format artwork object, "
-                    "superseded by the client/state artwork object"
-                )
-            if fmt.visualizer is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format visualizer object, "
-                    "superseded by the client/state visualizer object"
-                )
-            for role in self._client.active_roles:
-                role.on_stream_request_format(fmt)
+            self._handle_stream_request_format(message.payload)
             return
 
         if isinstance(message, ClientCommandMessage):
@@ -2711,6 +2690,30 @@ class SendspinConnection:
         if isinstance(message, ClientGoodbyeMessage):
             await self._handle_goodbye(message.payload)
             return
+
+    def _handle_stream_request_format(self, fmt: StreamRequestFormatPayload) -> None:
+        if self._client is None:
+            return
+        if fmt.player is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format player object, "
+                "superseded by the client/state player format"
+            )
+        if fmt.artwork is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format artwork object, "
+                "superseded by the client/state artwork object"
+            )
+        if fmt.visualizer is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format visualizer object, "
+                "superseded by the client/state visualizer object"
+            )
+        for role in self._client.active_roles:
+            role.on_stream_request_format(fmt)
 
     async def _handle_goodbye(self, payload: ClientGoodbyePayload) -> None:
         if payload.unrecognized_reason is not None:
