@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 from typing import Any
 
 import pytest
@@ -276,6 +277,59 @@ def test_decoder_build_failure_discards_the_stream(monkeypatch: pytest.MonkeyPat
     assert not role.stream_active
     assert client.events == []
     assert client.noncompliance == []
+
+
+class _FailingDecoder:
+    def decode(self, _data: bytes) -> bytes:
+        raise ValueError("bad frame")
+
+    def flush(self) -> bytes:
+        return b""
+
+
+def test_repeated_decode_failures_are_throttled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A decoder failing on every chunk logs one traceback, then a periodic count."""
+    now_s = [5.0]
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _FailingDecoder()
+    )
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.time.monotonic", lambda: now_s[0])
+    role, _client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00")
+        now_s[0] += 30.0
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00")
+
+    assert [(r.levelno, r.args[0], bool(r.exc_info)) for r in caplog.records] == [
+        (logging.WARNING, 1, True),
+        (logging.WARNING, 5, False),
+    ]
+
+
+def test_next_stream_reports_its_first_decode_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A new stream's first decode failure logs its traceback, even right after the last report."""
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _FailingDecoder()
+    )
+    role, _client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+    for _ in range(2):
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00")
+    role.on_client_stream_end()
+    role.on_client_stream_start(_pcm_start_payload())
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00")
+
+    assert [(r.args[0], bool(r.exc_info)) for r in caplog.records] == [(1, True)]
 
 
 def test_start_request_does_not_survive_disconnect() -> None:

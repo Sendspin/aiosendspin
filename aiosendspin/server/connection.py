@@ -145,7 +145,12 @@ from aiosendspin.noise.pairing import (
 )
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import create_task, finish_despite_cancel, warn_deprecated
+from aiosendspin.util import (
+    WARN_INTERVAL_S,
+    create_task,
+    finish_despite_cancel,
+    warn_deprecated,
+)
 
 from .client import SendspinClient
 from .compliance import ClientComplianceError, describe_client, noncompliance_subject
@@ -171,11 +176,6 @@ Transport = EncryptedWebSocket | web.WebSocketResponse | ClientWebSocketResponse
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
-
-# Quiet period between repeats of a throttled warning. Each warning reports how
-# many occurrences it stands for, so a sustained fault keeps its magnitude visible
-# at default level without emitting one line per event.
-_WARN_INTERVAL_S = 30.0
 
 # Bound the wait for the writer to drain when quiescing.
 QUIESCE_TIMEOUT_S: float = 30.0
@@ -676,7 +676,7 @@ class SendspinConnection:
         self._late_at_enqueue_count[role] = self._late_at_enqueue_count.get(role, 0) + 1
         now_s = time.monotonic()
         last_log_s = self._last_late_at_enqueue_log_s.get(role)
-        if last_log_s is not None and now_s - last_log_s < _WARN_INTERVAL_S:
+        if last_log_s is not None and now_s - last_log_s < WARN_INTERVAL_S:
             return
         self._logger.warning(
             "Enqueued already-late binary type=%s role=%s: %s message(s); "
@@ -2536,7 +2536,7 @@ class SendspinConnection:
             self._logger.warning(
                 "Ignoring unhandled binary message type %s from client", header.message_type
             )
-        elif now_s - self._last_unhandled_binary_log_s < _WARN_INTERVAL_S:
+        elif now_s - self._last_unhandled_binary_log_s < WARN_INTERVAL_S:
             return
         else:
             self._logger.debug(
@@ -2832,7 +2832,7 @@ class SendspinConnection:
             )
             now_s = time.monotonic()
             last_log_s = role._last_late_log_s  # noqa: SLF001
-            if last_log_s is None or now_s - last_log_s >= _WARN_INTERVAL_S:
+            if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
                 qsize, qmax = self.queue_status()
                 self._logger.warning(
                     "Late binary type=%s role=%s: skipping %s chunk(s); "
@@ -2930,7 +2930,7 @@ class SendspinConnection:
             now_s = time.monotonic()
             if elapsed_ms >= 500.0 and (
                 self._last_slow_send_log_s is None
-                or now_s - self._last_slow_send_log_s >= _WARN_INTERVAL_S
+                or now_s - self._last_slow_send_log_s >= WARN_INTERVAL_S
             ):
                 self._logger.warning(
                     "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s; "
