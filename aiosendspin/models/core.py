@@ -657,9 +657,15 @@ class ClientGoodbyeMessage(ClientMessage):
 
 # Client -> Server: client/leave
 @dataclass
+class ClientLeavePayload(SendspinModel):
+    """Empty ``client/leave`` payload."""
+
+
+@dataclass
 class ClientLeaveMessage(ClientMessage):
     """Message sent by the client to leave its current group."""
 
+    payload: ClientLeavePayload = field(default_factory=ClientLeavePayload)
     type: Literal["client/leave"] = "client/leave"
 
 
