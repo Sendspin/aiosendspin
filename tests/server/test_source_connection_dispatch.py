@@ -17,7 +17,8 @@ from aiosendspin.models.source import (
 )
 from aiosendspin.models.types import AudioCodec, BinaryMessageType, ClientMessage
 from aiosendspin.server.compliance import ClientComplianceError
-from aiosendspin.server.connection import _WARN_INTERVAL_S, SendspinConnection
+from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.util import WARN_INTERVAL_S
 
 
 class _RecordingRole:
@@ -117,7 +118,7 @@ def test_unhandled_binary_warns(caplog: Any) -> None:
     ):
         for _ in range(3):
             conn._route_inbound_binary(chunk)  # noqa: SLF001
-        conn._last_unhandled_binary_log_s -= _WARN_INTERVAL_S  # noqa: SLF001
+        conn._last_unhandled_binary_log_s -= WARN_INTERVAL_S  # noqa: SLF001
         conn._route_inbound_binary(chunk)  # noqa: SLF001
     reports = [r for r in caplog.records if "unhandled binary" in r.getMessage().lower()]
     assert [r.levelno for r in reports] == [logging.WARNING, logging.DEBUG]
