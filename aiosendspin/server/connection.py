@@ -2712,12 +2712,7 @@ class SendspinConnection:
     @staticmethod
     def _role_state_objects(payload: ClientStatePayload) -> dict[str, object]:
         """Map each role family that has a client/state object to that object."""
-        return {
-            "player": payload.player,
-            "source": payload.source,
-            "artwork": payload.artwork,
-            "visualizer": payload.visualizer,
-        }
+        return {family: getattr(payload, family) for family in _CLIENT_STATE_ROLE_FAMILIES}
 
     def _apply_activation_state(self, payload: ClientStatePayload) -> list[Role]:
         """Apply a client/state to the held roles whose object it carries, and return them."""
