@@ -123,10 +123,7 @@ async def run_handshake_server(
         client_id, suite, client_static_pub = _parse_client_init(client_init_text)
     except InitRejectedError as exc:
         if exc.reason is not None:
-            error = ServerErrorMessage(payload=ServerErrorPayload(reason=exc.reason))
-            # A peer that already dropped must not mask the rejection.
-            with suppress(ConnectionError):
-                await ws.send_str(error.to_json())
+            await _send_server_error(ws, exc.reason)
         raise
     if expected_client_id is not None and client_id != expected_client_id:
         raise HandshakeAbortedError(
@@ -520,6 +517,13 @@ def _parse_server_init(text: str) -> ServerInitMessage:
     if version != PROTOCOL_VERSION:
         raise HandshakeAbortedError(f"unsupported protocol version {version}")
     return msg
+
+
+async def _send_server_error(ws: HandshakeWebSocket, reason: ServerErrorReason) -> None:
+    error = ServerErrorMessage(payload=ServerErrorPayload(reason=reason))
+    # A peer that already dropped must not mask the rejection.
+    with suppress(ConnectionError):
+        await ws.send_str(error.to_json())
 
 
 def _server_error_rejection(payload: object) -> InitRejectedError:
