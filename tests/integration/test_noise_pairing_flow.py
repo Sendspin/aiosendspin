@@ -171,8 +171,8 @@ def _count_hellos() -> Iterator[Counter[str]]:
         counts["server/hello"] += 1
         return server_hello(self)
 
-    def counting_deserialize(_cls: type[SendspinConnection], raw: str) -> ClientMessage:
-        message = deserialize(raw)
+    def counting_deserialize(_cls: type[SendspinConnection], raw: str, *args: Any) -> ClientMessage:
+        message = deserialize(raw, *args)
         if isinstance(message, ClientHelloMessage):
             counts["client/hello"] += 1
         return message

@@ -186,6 +186,8 @@ _CLIENT_STATE_TIMEOUT_S = 5.0
 # Distinct unknown message types warned about per connection; later ones log at debug.
 _MAX_WARNED_UNKNOWN_TYPES = 16
 
+_CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
+
 _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
         "client/pair-pending",
@@ -1007,9 +1009,19 @@ class SendspinConnection:
             setattr(hello, f"{family}_support", spec.parse_support(raw_support))
 
     @classmethod
-    def _deserialize_client_message(cls, raw_message: str) -> ClientMessage:
-        """Deserialize inbound client message with custom support-key normalization."""
-        parsed = ClientMessage.from_json(raw_message)
+    def _deserialize_client_message(
+        cls, raw_message: str, active_families: Collection[str] | None = None
+    ) -> ClientMessage:
+        """Deserialize inbound client message with custom support-key normalization.
+
+        With ``active_families``, client/state objects of other roles are dropped unparsed.
+        """
+        if active_families is None:
+            parsed = ClientMessage.from_json(raw_message)
+        else:
+            parsed = ClientMessage.from_dict(
+                cls._drop_inactive_role_objects(orjson.loads(raw_message), active_families)
+            )
         if isinstance(parsed, ClientHelloMessage):
             decoded = orjson.loads(raw_message)
             if not isinstance(decoded, dict):
@@ -1024,6 +1036,23 @@ class SendspinConnection:
                     return parsed
                 missing = parsed.payload.missing_support_roles
         return parsed
+
+    @staticmethod
+    def _drop_inactive_role_objects(message: Any, active_families: Collection[str]) -> Any:
+        if not isinstance(message, dict) or message.get("type") != "client/state":
+            return message
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            return message
+        inactive = {
+            family
+            for family in _CLIENT_STATE_ROLE_FAMILIES
+            if family in payload and family not in active_families
+        }
+        if not inactive:
+            return message
+        kept = {key: value for key, value in payload.items() if key not in inactive}
+        return message | {"payload": kept}
 
     async def _setup_connection(self) -> None:
         """Prepare the socket and run the Noise handshake."""
@@ -2396,8 +2425,13 @@ class SendspinConnection:
                     continue
 
                 text = cast("str", msg.data)
+                active_families = (
+                    {role.role_family for role in self._client.active_roles}
+                    if self._client is not None
+                    else ()
+                )
                 try:
-                    message = self._deserialize_client_message(text)
+                    message = self._deserialize_client_message(text, active_families)
                 except Exception as exc:
                     if self._skip_undecodable_message(text, exc):
                         continue
@@ -2440,6 +2474,10 @@ class SendspinConnection:
             return True
         if message_type == "client/command":
             self._logger.warning("Ignoring client/command that failed to parse: %s", exc)
+            return True
+        if message_type == "client/state":
+            self._logger.debug("Ignoring client/state that failed to parse: %s", exc)
+            self._flag_noncompliance("sent a malformed client/state")
             return True
         if not isinstance(message_type, str) or not (
             isinstance(exc, SuitableVariantNotFoundError) and exc.variants_type is ClientMessage

@@ -725,46 +725,6 @@ class TestEncryptedActivities:
         assert "client-1" not in strict_server._clients  # noqa: SLF001
 
     @pytest.mark.asyncio
-    async def test_oversized_artwork_state_ends_message_loop(
-        self, mock_server: _MockServer
-    ) -> None:
-        """A client/state artwork object with more than 4 channels closes the connection."""
-
-        class _AsyncIterTransport:
-            close_code = 1000
-
-            def __init__(self, msgs: list[WSMessage]) -> None:
-                self._msgs = msgs
-
-            def __aiter__(self) -> _AsyncIterTransport:
-                return self
-
-            async def __anext__(self) -> WSMessage:
-                if not self._msgs:
-                    raise StopAsyncIteration
-                return self._msgs.pop(0)
-
-        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
-        state = orjson.dumps(
-            {
-                "type": "client/state",
-                "payload": {"available": True, "artwork": {"channels": [{"source": "none"}] * 5}},
-            }
-        ).decode()
-        time = orjson.dumps({"type": "client/time", "payload": {"client_transmitted": 1}}).decode()
-        conn._transport = _AsyncIterTransport(  # type: ignore[assignment]  # noqa: SLF001
-            [WSMessage(WSMsgType.TEXT, state, ""), WSMessage(WSMsgType.TEXT, time, "")]
-        )
-        conn._handle_message = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
-        conn.disconnect = AsyncMock()  # type: ignore[method-assign]
-
-        await conn._run_message_loop()  # noqa: SLF001
-
-        conn._handle_message.assert_not_awaited()  # noqa: SLF001
-        await conn._cleanup_connection()  # noqa: SLF001
-        conn.disconnect.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_message_loop_hard_rejects_on_compliance_error(
         self, mock_server: _MockServer
     ) -> None:
