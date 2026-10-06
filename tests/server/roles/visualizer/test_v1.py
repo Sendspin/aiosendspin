@@ -1251,7 +1251,7 @@ def test_nonpositive_rate_max_is_flagged_and_ignored() -> None:
     client = _make_client_stub()
     role = VisualizerV1Role(client=client)
     bad = _state(types=["loudness"], rate_max=0)
-    assert role.client_state_deviations(bad) == ["sent a non-positive visualizer rate_max: 0"]
+    assert role.client_state_deviations(bad) == ["sent a non-positive visualizer rate_max"]
 
     _connect(role)
     role.on_stream_start()

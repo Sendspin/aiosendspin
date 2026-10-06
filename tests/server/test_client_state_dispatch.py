@@ -580,7 +580,7 @@ async def test_unrecognized_player_command_is_flagged_and_state_still_applies() 
     await conn._handle_message(message, timestamp_us=0)  # noqa: SLF001
 
     flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
-    assert flagged == ["client/state declared unrecognized supported_commands: teleport"]
+    assert flagged == ["client/state declared unrecognized supported_commands"]
     client.handle_availability_change.assert_awaited_once_with(available=False)
     (applied,) = role.on_client_state.call_args.args
     assert applied.player.volume == 40

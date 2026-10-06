@@ -166,14 +166,13 @@ class SourceV1Role(Role):
             return
         if source.codec is not AudioCodec.OPUS and not 1 <= source.bit_depth <= 32:
             self._client.flag_noncompliance(
-                f"client-stream/start announced unsupported bit_depth {source.bit_depth}"
+                "client-stream/start announced an unsupported bit_depth"
             )
             return
         if source.codec is AudioCodec.PCM and source.bit_depth % 8:
             # The PCM wire convention only packs whole-byte samples.
             self._client.flag_noncompliance(
-                f"client-stream/start announced pcm bit_depth {source.bit_depth}, "
-                "which is not a whole number of bytes"
+                "client-stream/start announced a pcm bit_depth that is not a whole number of bytes"
             )
             return
         audio_format = AudioFormat(
