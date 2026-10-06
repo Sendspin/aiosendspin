@@ -114,11 +114,12 @@ def test_reason_names_the_nested_field_by_its_wire_key() -> None:
     [
         ({"type": "client/pair-retry", "payload": None}, ["omitted the required payload object"]),
         ({"type": "client/pair-retry"}, ["omitted the required payload object"]),
+        ({"type": "client/pair-retry", "payload": []}, ["sent a payload that is not an object"]),
         ({"type": "client/pair-retry", "payload": {}}, []),
     ],
 )
 def test_pair_retry_without_payload_is_recorded(message: object, reasons: list[str]) -> None:
-    """A client/pair-retry whose payload is null or missing still parses, and is recorded."""
+    """A client/pair-retry whose payload is not an object still parses, and is recorded."""
     _, recorded = _parse(PairingMessage, message)
 
     assert recorded == reasons

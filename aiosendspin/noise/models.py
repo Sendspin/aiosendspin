@@ -307,9 +307,12 @@ class ClientPairRetryMessage(PairingMessage):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Record a missing or null payload, which the wire requires as ``{}``."""
-        if d.get("payload") is None:
+        """Record a payload other than an object, which the wire requires as ``{}``."""
+        payload = d.get("payload")
+        if payload is None:
             note_wire_deviation("omitted the required payload object")
+        elif not isinstance(payload, dict):
+            note_wire_deviation("sent a payload that is not an object")
         return d
 
 
