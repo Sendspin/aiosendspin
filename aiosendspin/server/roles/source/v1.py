@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from aiosendspin.audio.codecs import create_decoder, decoded_bit_depth, opus_available
@@ -13,6 +14,7 @@ from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
 from aiosendspin.models.source import SourceCommandServerPayload
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
 from aiosendspin.server.roles.base import Role
+from aiosendspin.util import WARN_INTERVAL_S
 
 from .events import (
     SourceSignalChangedEvent,
@@ -51,6 +53,8 @@ class SourceV1Role(Role):
         # Stamp decoder output produced during flush.
         self._last_timestamp_us = 0
         self._signal: SignalState | None = None
+        self._decode_error_count = 0
+        self._last_decode_error_log_s: float | None = None
 
     @property
     def role_id(self) -> str:
@@ -236,8 +240,19 @@ class SourceV1Role(Role):
             return
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
-        except Exception:
-            logger.exception("Failed to decode source audio chunk")
+        except Exception as err:
+            self._decode_error_count += 1
+            now_s = time.monotonic()
+            last_log_s = self._last_decode_error_log_s
+            if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
+                logger.warning(
+                    "Failed to decode %s source audio chunk(s) since last report: %s",
+                    self._decode_error_count,
+                    err,
+                    exc_info=self._decode_error_count == 1,
+                )
+                self._decode_error_count = 0
+                self._last_decode_error_log_s = now_s
             return
         # Keep the flush-tail stamp monotonic even if a chunk arrives out of order.
         self._last_timestamp_us = max(self._last_timestamp_us, timestamp_us)
@@ -262,6 +277,8 @@ class SourceV1Role(Role):
         self._decoder = None
         self._stream_active = False
         self._last_timestamp_us = 0
+        self._decode_error_count = 0
+        self._last_decode_error_log_s = None
         if was_active:
             self._client._signal_event(SourceStreamEndedEvent())  # noqa: SLF001
 
