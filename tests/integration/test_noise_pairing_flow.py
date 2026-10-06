@@ -165,14 +165,14 @@ def _count_hellos() -> Iterator[Counter[str]]:
     """Count every server/hello the server sends and every client/hello it receives."""
     counts: Counter[str] = Counter()
     server_hello = SendspinConnection._server_hello  # noqa: SLF001
-    deserialize = SendspinConnection._deserialize_client_message  # noqa: SLF001
+    from_dict = SendspinConnection._client_message_from_dict  # noqa: SLF001
 
     def counting_server_hello(self: SendspinConnection) -> Any:
         counts["server/hello"] += 1
         return server_hello(self)
 
-    def counting_deserialize(_cls: type[SendspinConnection], raw: str, *args: Any) -> ClientMessage:
-        message = deserialize(raw, *args)
+    def counting_from_dict(_cls: type[SendspinConnection], decoded: Any) -> ClientMessage:
+        message = from_dict(decoded)
         if isinstance(message, ClientHelloMessage):
             counts["client/hello"] += 1
         return message
@@ -180,7 +180,7 @@ def _count_hellos() -> Iterator[Counter[str]]:
     with (
         patch.object(SendspinConnection, "_server_hello", counting_server_hello),
         patch.object(
-            SendspinConnection, "_deserialize_client_message", classmethod(counting_deserialize)
+            SendspinConnection, "_client_message_from_dict", classmethod(counting_from_dict)
         ),
     ):
         yield counts

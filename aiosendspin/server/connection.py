@@ -474,7 +474,7 @@ class SendspinConnection:
     @property
     def clears_role_state_with_null(self) -> bool:
         """
-        Whether the client clears a role's server/state object only on a null role object.
+        Whether the client clears a deactivated role's server/state only on a null role object.
 
         Unencrypted clients never receive server/activate, and pre-spec-#177 clients predate
         the activation-driven discard.
@@ -1016,16 +1016,15 @@ class SendspinConnection:
 
         With ``active_families``, client/state objects of other roles are dropped unparsed.
         """
-        if active_families is None:
-            parsed = ClientMessage.from_json(raw_message)
-        else:
-            parsed = ClientMessage.from_dict(
-                cls._drop_inactive_role_objects(orjson.loads(raw_message), active_families)
-            )
+        decoded = orjson.loads(raw_message)
+        if active_families is not None:
+            decoded = cls._drop_inactive_role_objects(decoded, active_families)
+        return cls._client_message_from_dict(decoded)
+
+    @classmethod
+    def _client_message_from_dict(cls, decoded: Any) -> ClientMessage:
+        parsed = ClientMessage.from_dict(decoded)
         if isinstance(parsed, ClientHelloMessage):
-            decoded = orjson.loads(raw_message)
-            if not isinstance(decoded, dict):
-                return parsed
             # Each pass records the selected versions that lack support; select again
             # until every family lands on a version that has one, or runs out.
             missing = parsed.payload.missing_support_roles
@@ -1299,7 +1298,12 @@ class SendspinConnection:
     async def _ingest_client_hello_checked(self, text: str) -> bool:
         """Body of the hello exchange; raises ClientComplianceError in strict mode."""
         try:
-            message = self._deserialize_client_message(text)
+            decoded = orjson.loads(text)
+            payload = decoded.get("payload") if isinstance(decoded, dict) else None
+            if self.is_encrypted and isinstance(payload, dict):
+                # Encrypted clients carry version in client/init, so ignore any copy here.
+                payload.pop("version", None)
+            message = self._client_message_from_dict(decoded)
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)
             await self.disconnect(retry_connection=False)
