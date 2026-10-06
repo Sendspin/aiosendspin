@@ -606,14 +606,7 @@ class PlayerV1Role(Role):
             bit_depth=audio_format.bit_depth,
             channels=audio_format.channels,
         )
-        is_client_supported = any(
-            fmt.codec == codec
-            and fmt.sample_rate == audio_format.sample_rate
-            and fmt.bit_depth == audio_format.bit_depth
-            and fmt.channels == audio_format.channels
-            for fmt in support.supported_formats
-        )
-        if not is_client_supported:
+        if not any(client_format.matches(fmt) for fmt in support.supported_formats):
             return False
 
         # Check if server can encode this format
@@ -989,17 +982,13 @@ class PlayerV1Role(Role):
         persistent_format = state.preferred_format_override
         persistent_codec = state.preferred_codec_override
         if persistent_format is not None and persistent_codec is not None:
-            matched_persistent = next(
-                (
-                    fmt
-                    for fmt in compatible
-                    if fmt.codec == persistent_codec
-                    and fmt.sample_rate == persistent_format.sample_rate
-                    and fmt.bit_depth == persistent_format.bit_depth
-                    and fmt.channels == persistent_format.channels
-                ),
-                None,
+            persistent = SupportedAudioFormat(
+                codec=persistent_codec,
+                sample_rate=persistent_format.sample_rate,
+                bit_depth=persistent_format.bit_depth,
+                channels=persistent_format.channels,
             )
+            matched_persistent = next((fmt for fmt in compatible if persistent.matches(fmt)), None)
             if matched_persistent is not None:
                 preferred_supported = matched_persistent
             else:
@@ -1036,13 +1025,15 @@ class PlayerV1Role(Role):
         frame_duration_us = 25_000
         channel_id = group.get_channel_for_player(self._client.client_id)
         channel_id_int = channel_id.int
+        # Opus ignores the declared bit_depth and encodes from 16-bit PCM.
+        bit_depth = 16 if audio_codec == AudioCodec.OPUS else audio_format.bit_depth
         transformer: FlacEncoder | OpusEncoder | PcmPassthrough
         if audio_codec == AudioCodec.FLAC:
             transformer = group.transformer_pool.get_or_create(
                 FlacEncoder,
                 channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
-                bit_depth=audio_format.bit_depth,
+                bit_depth=bit_depth,
                 channels=audio_format.channels,
                 frame_duration_us=frame_duration_us,
             )
@@ -1051,7 +1042,7 @@ class PlayerV1Role(Role):
                 OpusEncoder,
                 channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
-                bit_depth=audio_format.bit_depth,
+                bit_depth=bit_depth,
                 channels=audio_format.channels,
                 frame_duration_us=frame_duration_us,
             )
@@ -1060,14 +1051,14 @@ class PlayerV1Role(Role):
                 PcmPassthrough,
                 channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
-                bit_depth=audio_format.bit_depth,
+                bit_depth=bit_depth,
                 channels=audio_format.channels,
                 frame_duration_us=frame_duration_us,
             )
 
         self._audio_requirements = AudioRequirements(
             sample_rate=audio_format.sample_rate,
-            bit_depth=audio_format.bit_depth,
+            bit_depth=bit_depth,
             channels=audio_format.channels,
             transformer=transformer,
             channel_id=channel_id,

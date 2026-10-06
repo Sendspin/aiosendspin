@@ -473,7 +473,7 @@ class SendspinConnection:
     @property
     def clears_role_state_with_null(self) -> bool:
         """
-        Whether the client clears a role's server/state object only on a null role object.
+        Whether the client clears a deactivated role's server/state only on a null role object.
 
         Unencrypted clients never receive server/activate, and pre-spec-#177 clients predate
         the activation-driven discard.
@@ -1010,11 +1010,12 @@ class SendspinConnection:
     @classmethod
     def _deserialize_client_message(cls, raw_message: str) -> ClientMessage:
         """Deserialize inbound client message with custom support-key normalization."""
-        parsed = ClientMessage.from_json(raw_message)
+        return cls._client_message_from_dict(orjson.loads(raw_message))
+
+    @classmethod
+    def _client_message_from_dict(cls, decoded: Any) -> ClientMessage:
+        parsed = ClientMessage.from_dict(decoded)
         if isinstance(parsed, ClientHelloMessage):
-            decoded = orjson.loads(raw_message)
-            if not isinstance(decoded, dict):
-                return parsed
             # Each pass records the selected versions that lack support; select again
             # until every family lands on a version that has one, or runs out.
             missing = parsed.payload.missing_support_roles
@@ -1271,8 +1272,13 @@ class SendspinConnection:
     async def _ingest_client_hello_checked(self, text: str) -> bool:
         """Body of the hello exchange; raises ClientComplianceError in strict mode."""
         try:
+            decoded = orjson.loads(text)
+            payload = decoded.get("payload") if isinstance(decoded, dict) else None
+            if self.is_encrypted and isinstance(payload, dict):
+                # Encrypted clients carry version in client/init, so ignore any copy here.
+                payload.pop("version", None)
             message, deviations = parse_noting_wire_deviations(
-                self._deserialize_client_message, text
+                self._client_message_from_dict, decoded
             )
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)
@@ -1626,8 +1632,8 @@ class SendspinConnection:
         An unpaired connection keeps its playback, roles and group during the attempt; a
         long-term paired one leaves playback and its roles first.
 
-        A pair abort raises after leaving pairing, keeping the connection unless its reason
-        closes it.
+        A pair abort raises after leaving pairing, or after closing the connection when its
+        reason closes it.
         A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
         after leaving pairing, also keeping the connection; so does a Pairing PSK attempt whose
         ``client_id`` is not this connection's, before entering pairing.
@@ -1673,8 +1679,12 @@ class SendspinConnection:
                 isinstance(exc, LocalPairingAbortError)
                 and exc.reason is PairAbortReason.USER_CANCELLED
             )
+            if exc.reason in CLOSING_ABORT_REASONS:
+                # Ends the message loop even if the client keeps the connection open.
+                with suppress(Exception):
+                    await transport.close()
             # A cancelled attempt is left by end_pairing or ended by the disconnect.
-            if not cancelled and exc.reason not in CLOSING_ABORT_REASONS:
+            elif not cancelled:
                 with suppress(Exception):
                     await self._leave_pairing()
             raise
