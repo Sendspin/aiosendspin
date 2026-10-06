@@ -269,7 +269,7 @@ class ArtworkV1Role(Role):
 
         if artwork_request.channel >= len(self._channels):
             self._client.flag_noncompliance(
-                f"stream/request-format targeted unknown artwork channel {artwork_request.channel}"
+                "stream/request-format targeted an unknown artwork channel"
             )
             return
 

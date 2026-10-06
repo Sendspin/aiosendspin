@@ -660,10 +660,10 @@ async def test_8_bit_pcm_is_streamed_as_16_bit() -> None:
 @pytest.mark.parametrize(
     ("codec", "bit_depth", "reason"),
     [
-        (AudioCodec.PCM, 12, "pcm bit_depth 12, which is not a whole number of bytes"),
-        (AudioCodec.PCM, 0, "unsupported bit_depth 0"),
-        (AudioCodec.PCM, 40, "unsupported bit_depth 40"),
-        (AudioCodec.FLAC, 33, "unsupported bit_depth 33"),
+        (AudioCodec.PCM, 12, "a pcm bit_depth that is not a whole number of bytes"),
+        (AudioCodec.PCM, 0, "an unsupported bit_depth"),
+        (AudioCodec.PCM, 40, "an unsupported bit_depth"),
+        (AudioCodec.FLAC, 33, "an unsupported bit_depth"),
     ],
 )
 def test_bit_depth_the_codec_cannot_carry_is_flagged(
