@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -34,6 +35,7 @@ class _FakeClient:
         self._strict = strict
         self.handle_leave = AsyncMock()
         self.noncompliance: list[str] = []
+        self.active_roles: tuple[SimpleNamespace, ...] = ()
 
     def flag_noncompliance(self, reason: str) -> None:
         self.noncompliance.append(reason)
@@ -162,3 +164,39 @@ async def test_unrecognized_goodbye_reason_disconnects_without_retry() -> None:
     client.handle_leave.assert_awaited_once_with()
     assert conn.goodbye_reason is None
     assert client.noncompliance == []
+
+
+_BAD_PLAYER_STATE = orjson.dumps(
+    {"type": "client/state", "payload": {"available": True, "player": {"volume": 150}}}
+).decode()
+
+
+async def test_malformed_inactive_role_object_is_ignored() -> None:
+    """A client/state object for an inactive role is dropped unparsed and the rest applied."""
+    conn, client = _connection([_BAD_PLAYER_STATE, _LEAVE], strict=True)
+    conn._handle_client_state = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+    await conn._run_message_loop()  # noqa: SLF001
+
+    payload = conn._handle_client_state.await_args.args[0]  # noqa: SLF001
+    assert payload.available is True
+    assert payload.player is None
+    client.handle_leave.assert_awaited_once_with()
+    assert client.noncompliance == []
+
+
+@pytest.mark.parametrize("strict", [False, True])
+async def test_malformed_active_role_object_is_flagged(
+    strict: bool,  # noqa: FBT001
+) -> None:
+    """A malformed active-role object is flagged and skipped, or rejected when strict."""
+    conn, client = _connection([_BAD_PLAYER_STATE, _LEAVE], strict=strict)
+    client.active_roles = (SimpleNamespace(role_family="player"),)
+    conn._handle_client_state = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+    await conn._run_message_loop()  # noqa: SLF001
+
+    conn._handle_client_state.assert_not_awaited()  # noqa: SLF001
+    assert client.noncompliance == ["sent a malformed client/state"]
+    assert conn._closing is strict  # noqa: SLF001
+    assert client.handle_leave.await_count == (0 if strict else 1)
