@@ -1192,11 +1192,18 @@ async def test_message_1_without_a_category_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    "category",
-    ["zz", [], {}, 1, None],
-    ids=["unknown-code", "list", "object", "number", "null"],
+    ("category", "reason"),
+    [
+        pytest.param("zz", ": unknown psk_category", id="unknown-code"),
+        pytest.param([], "", id="list"),
+        pytest.param({}, "", id="object"),
+        pytest.param(1, ": unknown psk_category", id="number"),
+        pytest.param(None, "", id="null"),
+    ],
 )
-async def test_message_1_with_an_unknown_category_is_rejected(category: object) -> None:
+async def test_message_1_with_an_unknown_category_is_rejected(
+    category: object, reason: str
+) -> None:
     """An undefined category is malformed input, not a miss the Sentinel could answer."""
     server_id = Identity.generate()
     client_id = Identity.generate()
@@ -1231,9 +1238,7 @@ async def test_message_1_with_an_unknown_category_is_rejected(category: object) 
         )
 
     server_task = asyncio.create_task(server_with_an_unknown_category())
-    with pytest.raises(
-        HandshakeAbortedError, match="malformed Noise message 1 payload: unknown psk_category"
-    ):
+    with pytest.raises(HandshakeAbortedError, match=f"malformed Noise message 1 payload{reason}"):
         await run_handshake_client(
             client_ws,
             local_identity=client_id,

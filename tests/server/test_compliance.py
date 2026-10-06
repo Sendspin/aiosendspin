@@ -349,3 +349,50 @@ async def test_unimplemented_roles_notice_names_the_device(
         "Client Kitchen ERROR forged (Acme, software 1.2.3) offered roles/versions "
         "this server does not implement: ['player@v99']"
     ) in caplog.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strict", [False, True])
+async def test_hello_wire_type_deviation_is_flagged_before_attach(
+    strict: bool,  # noqa: FBT001
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tolerated wire type in client/hello is flagged, and a strict server never attaches it."""
+    server = _make_server(allow_noncompliant_clients=not strict)
+    raw = orjson.dumps(
+        {
+            "type": "client/hello",
+            "payload": {
+                "name": "Kitchen",
+                "supported_roles": [],
+                "unpaired_access": {"enabled": "false"},
+            },
+        }
+    ).decode()
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    psk = generate_psk()
+    conn._client_id = "dev"  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk),
+        psk=psk,
+        category=PskCategory.LONG_TERM,
+        counterparty_id="dev",
+    )
+    reason = "client/hello sent a string for 'unpaired_access.enabled' instead of a boolean"
+
+    with caplog.at_level(logging.WARNING):
+        if strict:
+            with pytest.raises(ClientComplianceError):
+                await conn._ingest_client_hello_checked(raw)  # noqa: SLF001
+        else:
+            assert await conn._ingest_client_hello_checked(raw) is True  # noqa: SLF001
+    client = server.get_client("dev")
+    await server.close()
+
+    if strict:
+        assert client is None
+        assert f"rejecting non-compliant client Kitchen: {reason}" in caplog.messages
+    else:
+        assert client is not None
+        assert client.info.unpaired_access.enabled is False
+        assert f"non-compliant client Kitchen: {reason}" in caplog.messages

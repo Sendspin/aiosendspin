@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from mashumaro.types import Discriminator
 
-from aiosendspin.models.base import SendspinConfig, SendspinModel
+from aiosendspin.models.base import SendspinConfig, SendspinModel, note_wire_deviation
 from aiosendspin.models.types import PairAbortReason, ServerErrorReason, ServerMessage
 
 
@@ -304,6 +304,13 @@ class ClientPairRetryMessage(PairingMessage):
 
     payload: ClientPairRetryPayload = field(default_factory=ClientPairRetryPayload)
     type: Literal["client/pair-retry"] = "client/pair-retry"
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Record a missing or null payload, which the wire requires as ``{}``."""
+        if d.get("payload") is None:
+            note_wire_deviation("omitted the required payload object")
+        return d
 
 
 @dataclass

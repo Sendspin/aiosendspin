@@ -46,6 +46,7 @@ from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from mashumaro.exceptions import SuitableVariantNotFoundError
 
 from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw, unpack_binary_header
+from aiosendspin.models.base import parse_noting_wire_deviations
 from aiosendspin.models.core import (
     ActivatePairing,
     ClientCommandMessage,
@@ -130,7 +131,7 @@ from aiosendspin.noise.driver import (
     run_rehandshake_server,
 )
 from aiosendspin.noise.keys import b64url_encode, psk_id_for
-from aiosendspin.noise.models import PairAbortMessage, PairAbortPayload
+from aiosendspin.noise.models import PairAbortMessage, PairAbortPayload, PairingMessage
 from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
     LocalPairingAbortError,
@@ -1270,7 +1271,9 @@ class SendspinConnection:
     async def _ingest_client_hello_checked(self, text: str) -> bool:
         """Body of the hello exchange; raises ClientComplianceError in strict mode."""
         try:
-            message = self._deserialize_client_message(text)
+            message, deviations = parse_noting_wire_deviations(
+                self._deserialize_client_message, text
+            )
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)
             await self.disconnect(retry_connection=False)
@@ -1287,6 +1290,8 @@ class SendspinConnection:
         # Recorded before the first deviation can be flagged below, while the connection
         # still has no attached client to name.
         self._hello_description = describe_client(client_info, self._client_id)
+        for reason in deviations:
+            self._flag_noncompliance(f"{message.type} {reason}")
         # Encrypted clients omit version (it is in client/init); only a legacy
         # client carries it in the hello, so validate it only when present.
         if client_info.version is not None and client_info.version != 1:
@@ -2365,8 +2370,19 @@ class SendspinConnection:
         # Only a pre-#287 client's repeated hello belongs to the attempt; any other is flagged.
         if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
+        if message_type in _PAIRING_MESSAGE_TYPES:
+            self._flag_pairing_frame_deviations(cast("str", msg.data), message_type)
         self._pairing_message_queue.put_nowait(msg)
         return True
+
+    def _flag_pairing_frame_deviations(self, text: str, message_type: str) -> None:
+        """Flag the tolerated deviations in a pairing frame before the pairing task parses it."""
+        try:
+            _, deviations = parse_noting_wire_deviations(PairingMessage.from_json, text)
+        except (LookupError, ValueError):
+            return  # The pairing task reports the malformed frame.
+        for reason in deviations:
+            self._flag_noncompliance(f"{message_type} {reason}")
 
     async def _run_message_loop(self) -> None:
         transport = self._transport
@@ -2393,11 +2409,15 @@ class SendspinConnection:
 
                 text = cast("str", msg.data)
                 try:
-                    message = self._deserialize_client_message(text)
+                    message, deviations = parse_noting_wire_deviations(
+                        self._deserialize_client_message, text
+                    )
                 except Exception as exc:
                     if self._skip_undecodable_message(text, exc):
                         continue
                     raise
+                for reason in deviations:
+                    self._flag_noncompliance(f"{self._peek_message_type(text)} {reason}")
                 await self._handle_message(message, timestamp_us)
             else:
                 # Loop exited normally (iterator exhausted) - connection closed

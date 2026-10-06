@@ -10,7 +10,7 @@ from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import ClientSession, WSMsgType, web
@@ -1778,6 +1778,62 @@ async def test_pair_retry_in_flight_does_not_fail_the_next_attempt() -> None:
             assert client.noise_psk.category is PskCategory.LONG_TERM
         finally:
             await client.disconnect()
+
+
+async def test_strict_server_rejects_a_pair_retry_without_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A strict server rejects a pairing frame's tolerated deviation before the attempt reads it."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store, allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async def provide() -> str:
+        return "123456"
+
+    run_client = client_connection_module.run_dynamic_pairing_code_client
+
+    async def client_with_bare_retry(ws: EncryptedWebSocket, **kwargs: Any) -> str | None:
+        await ws.send_str('{"type": "client/pair-retry", "payload": null}')
+        return await run_client(ws, **kwargs)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=AsyncMock()),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with (
+                patch.object(
+                    client_connection_module,
+                    "run_dynamic_pairing_code_client",
+                    client_with_bare_retry,
+                ),
+                suppress(Exception),
+            ):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=provide,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+            async with asyncio.timeout(5):
+                await conn._connection_done.wait()  # noqa: SLF001
+            assert conn._closing  # noqa: SLF001
+            assert await server_store.record_by_client_id(client_identity.peer_id) is None
+        finally:
+            await client.disconnect()
+    assert (
+        "rejecting non-compliant client c: client/pair-retry omitted the required payload object"
+        in caplog.messages
+    )
 
 
 _LEFTOVER_AUTH = ClientPairAuthMessage(
