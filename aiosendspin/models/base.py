@@ -230,7 +230,7 @@ def int_from_wire(value: Any) -> int:
         _note_type_mismatch(value, "an integer")
         return int(value)
     if isinstance(value, float) and math.isfinite(value):
-        parsed = round(value)
+        parsed = int(value)
         tolerated = not value.is_integer()
     elif isinstance(value, str) and _DECIMAL_INTEGER.fullmatch(value):
         parsed = int(value)

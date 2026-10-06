@@ -29,7 +29,7 @@ def _parse(model: type[SendspinModel], data: object) -> tuple[Any, list[str]]:
 @pytest.mark.parametrize(
     ("key", "value", "expected", "reason"),
     [
-        ("number", 50.7, 51, "sent a number for 'number' instead of an integer"),
+        ("number", 50.7, 50, "sent a number for 'number' instead of an integer"),
         ("number", True, 1, "sent a boolean for 'number' instead of an integer"),
         ("number", "42", 42, "sent a string for 'number' instead of an integer"),
         ("flag", "false", False, "sent a string for 'flag' instead of a boolean"),

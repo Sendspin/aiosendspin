@@ -184,5 +184,5 @@ async def test_wire_type_deviation_is_flagged_before_dispatch(
         assert conn._closing is True  # noqa: SLF001
     else:
         reply = conn.send_priority_message.call_args.args[0]
-        assert reply.payload.client_transmitted == 6
+        assert reply.payload.client_transmitted == 5
         client.handle_leave.assert_awaited_once_with()
