@@ -406,6 +406,8 @@ class SendspinConnection:
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._warned_unknown_types: set[str] = set()
+        self._unhandled_binary_count = 0
+        self._last_unhandled_binary_log_s: float | None = None
         self._epoch_by_role: defaultdict[str, int] = defaultdict(int)
 
         # Timing tracking for binary frame logging (per role)
@@ -2491,9 +2493,23 @@ class SendspinConnection:
                 return
         if is_source_audio:
             return  # In flight from before the source role was removed.
-        self._logger.warning(
-            "Received unhandled binary message type %s from client", header.message_type
-        )
+        self._unhandled_binary_count += 1
+        now_s = time.monotonic()
+        if self._last_unhandled_binary_log_s is None:
+            self._logger.warning(
+                "Ignoring unhandled binary message type %s from client", header.message_type
+            )
+        elif now_s - self._last_unhandled_binary_log_s < _WARN_INTERVAL_S:
+            return
+        else:
+            self._logger.debug(
+                "Ignoring unhandled binary message type %s from client: "
+                "%s message(s) since last report",
+                header.message_type,
+                self._unhandled_binary_count,
+            )
+        self._unhandled_binary_count = 0
+        self._last_unhandled_binary_log_s = now_s
 
     def _accept_source_stream_start(self) -> bool:
         """Return whether a client-stream/start is authorized, opening the input stream if so."""
