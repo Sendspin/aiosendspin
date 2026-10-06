@@ -1272,6 +1272,10 @@ class SendspinConnection:
         """Body of the hello exchange; raises ClientComplianceError in strict mode."""
         try:
             decoded = orjson.loads(text)
+            payload = decoded.get("payload") if isinstance(decoded, dict) else None
+            if self.is_encrypted and isinstance(payload, dict):
+                # Encrypted clients carry version in client/init, so ignore any copy here.
+                payload.pop("version", None)
             message = self._client_message_from_dict(decoded)
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)
@@ -1290,8 +1294,8 @@ class SendspinConnection:
         # still has no attached client to name.
         self._hello_description = describe_client(client_info, self._client_id)
         # Encrypted clients omit version (it is in client/init); only a legacy
-        # client carries it in the hello, so validate it only there.
-        if not self.is_encrypted and client_info.version not in (None, 1):
+        # client carries it in the hello, so validate it only when present.
+        if client_info.version is not None and client_info.version != 1:
             self._logger.error(
                 "Incompatible protocol version %s (only '1' is supported)",
                 client_info.version,

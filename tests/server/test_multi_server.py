@@ -840,10 +840,10 @@ class TestEncryptedActivities:
 
     @pytest.mark.asyncio
     async def test_encrypted_hello_ignores_version(self, mock_server: _MockServer) -> None:
-        """An encrypted hello carrying an unknown version field is still admitted."""
+        """An encrypted hello carrying a non-integer version field is still admitted."""
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
         hello = orjson.loads(_client_hello_frame("client-1").data)
-        hello["payload"]["version"] = 2
+        hello["payload"]["version"] = "x"
         self._prime_encrypted_hello(conn, orjson.dumps(hello).decode())
 
         assert await conn._exchange_hellos() is True  # noqa: SLF001
