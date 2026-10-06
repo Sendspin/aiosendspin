@@ -107,13 +107,25 @@ class ControllerGroupRole(GroupRole):
 
     def set_repeat(self, mode: RepeatMode) -> None:
         """Set group repeat mode and push state to members if changed."""
+        changed = mode != self._repeat
         self._repeat = mode
         self._push_state_to_members()
+        if changed:
+            self._restate_legacy_metadata()
 
     def set_shuffle(self, shuffle: bool) -> None:  # noqa: FBT001
         """Set group shuffle state and push state to members if changed."""
+        changed = shuffle != self._shuffle
         self._shuffle = shuffle
         self._push_state_to_members()
+        if changed:
+            self._restate_legacy_metadata()
+
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    def _restate_legacy_metadata(self) -> None:
+        metadata_group_role = self._group.group_role("metadata")
+        if isinstance(metadata_group_role, MetadataGroupRole):
+            metadata_group_role._restate_to_legacy_members()  # noqa: SLF001
 
     def set_supported_commands(self, commands: list[MediaCommand]) -> None:
         """Set the commands supported by the application.

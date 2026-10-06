@@ -363,6 +363,12 @@ class Role(ABC):
         connection = self._client.connection
         return connection is not None and connection.clears_role_state_with_null
 
+    # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+    def supports_scheduled_updates(self) -> bool:
+        """Whether the client holds this role's server/state object until its timestamp."""
+        connection = self._client.connection
+        return connection is None or connection.supports_scheduled_updates
+
     def emit_client_event(self, event: ClientRoleEvent) -> None:
         """Emit a role event on the owning client's event stream."""
         self._client._signal_event(event)  # noqa: SLF001

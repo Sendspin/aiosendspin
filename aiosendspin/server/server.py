@@ -629,7 +629,7 @@ class SendspinServer:
         """End pairing on a connected client without finalizing.
 
         No-op if not in pairing. Aborts any in-progress attempt with ``user_cancelled``, keeping
-        the connection alive.
+        the connection alive. Raises if it fails to return to its pairing record, closing it.
         If an attempt has already been finalized by the client, it completes as a success instead.
         """
         await self._connection_for(client_id).end_pairing()
@@ -1188,7 +1188,7 @@ class SendspinServer:
                 url,
             )
         self._mdns_client_urls[name] = url
-        self.connect_to_client(url)
+        self.connect_to_client(url, connection_reason=self.get_connection_reason(url))
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)

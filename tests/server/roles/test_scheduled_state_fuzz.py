@@ -6,6 +6,7 @@ import asyncio
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -51,9 +52,11 @@ class _Loop:
         self._clock = clock
         self.timers: list[_Timer] = []
 
-    def call_later(self, delay_s: float, callback: Callable[[], None]) -> _Timer:
+    def call_later(self, delay_s: float, callback: Callable[..., None], *args: Any) -> _Timer:
         timer = _Timer(
-            self._clock.now_us() + round(delay_s * 1_000_000), len(self.timers), callback
+            self._clock.now_us() + round(delay_s * 1_000_000),
+            len(self.timers),
+            partial(callback, *args),
         )
         self.timers.append(timer)
         return timer
@@ -100,6 +103,9 @@ class _Member:
 
     def send_message(self, message: ServerMessage) -> None:
         self.outbox.append(message)
+
+    def supports_scheduled_updates(self) -> bool:
+        return True
 
 
 class _Harness:

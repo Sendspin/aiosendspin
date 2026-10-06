@@ -283,6 +283,30 @@ def test_color_beyond_lead_limit_is_sent_20s_ahead() -> None:
     assert _sent_colors(member) == [{"timestamp": 26_000_000, "primary": [4, 5, 6]}]
 
 
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+def test_color_reaches_member_applying_on_receipt_once_due() -> None:
+    """A member that applies a palette on receipt gets a scheduled one only once it is due."""
+    group, clock = _make_scheduling_group()
+    cgr = ColorGroupRole(group)
+    member = MagicMock()
+    member.supports_scheduled_updates.return_value = False
+    cgr._members = [member]  # noqa: SLF001
+
+    cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)
+    joiner = MagicMock()
+    joiner.supports_scheduled_updates.return_value = False
+    cgr.subscribe(joiner)
+
+    member.send_message.assert_not_called()
+    assert _sent_colors(joiner) == [{"timestamp": 1_000_000}]
+    (delay_s, send_due, *args), _kwargs = group._server.loop.call_later.call_args  # noqa: SLF001
+    assert delay_s == 0.5
+    clock.advance_us(500_000)
+    send_due(*args)
+    assert _sent_colors(member) == [{"timestamp": 1_500_000, "primary": [4, 5, 6]}]
+    assert _sent_colors(joiner)[1:] == [{"timestamp": 1_500_000, "primary": [4, 5, 6]}]
+
+
 def test_cancel_before_deferred_send_sends_nothing() -> None:
     """Cancelling a palette not yet sent stops its send and sends nothing else."""
     group, _clock = _make_scheduling_group()

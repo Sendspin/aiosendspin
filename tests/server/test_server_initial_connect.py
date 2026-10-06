@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import ClientConnectionError, ClientWebSocketResponse
 
-from aiosendspin.models.types import GoodbyeReason, PairMethod
+from aiosendspin.models.types import ConnectionReason, GoodbyeReason, PairMethod
 from aiosendspin.noise.keys import Identity, generate_psk
 from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
@@ -713,9 +713,39 @@ async def test_mdns_update_reconnect_decision(
 
     assert server._mdns_client_urls[service_name] == expected_url  # noqa: SLF001
     if expect_reconnect:
-        server.connect_to_client.assert_called_once_with(expected_url)
+        server.connect_to_client.assert_called_once_with(
+            expected_url, connection_reason=ConnectionReason.DISCOVERY
+        )
     else:
         server.connect_to_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mdns_reannounce_keeps_pending_playback_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An mDNS re-announce before the reclaim dial activates keeps its playback reason."""
+    server = _make_server(_PersistentSuccessfulSession())
+    service_name = "service._sendspin._tcp.local."
+    url = "ws://10.0.0.2:9999/sendspin"
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+
+    connection_task = asyncio.create_task(asyncio.sleep(3600))
+    server._connection_tasks[url] = connection_task  # noqa: SLF001
+    server.register_client_url("speaker", url)
+
+    try:
+        assert server.reclaim_client_for_playback("speaker", timeout_s=0)
+        await server._handle_service_added(MagicMock(), "_sendspin._tcp.local.", service_name)  # noqa: SLF001
+        assert server.get_connection_reason(url) is ConnectionReason.PLAYBACK
+    finally:
+        connection_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await connection_task
 
 
 @pytest.mark.asyncio

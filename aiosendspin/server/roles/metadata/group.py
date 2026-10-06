@@ -172,6 +172,14 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         """Clear all metadata, and any scheduled metadata, at once."""
         self.set_metadata(None)
 
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    def _restate_to_legacy_members(self) -> None:
+        """Restate metadata to members that read repeat and shuffle from it."""
+        for role in self._members:
+            connection = role._client.connection  # noqa: SLF001
+            if connection is not None and connection.reads_repeat_shuffle_from_metadata:
+                self.on_member_join(role)
+
     def _apply_metadata(
         self, metadata: Metadata | None, *, timestamp_us: int | None = None, force: bool
     ) -> None:

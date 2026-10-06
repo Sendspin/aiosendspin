@@ -857,6 +857,48 @@ def test_metadata_beyond_lead_limit_is_sent_20s_ahead() -> None:
     assert sent[0]["timestamp"] == 31_000_000
 
 
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+def test_metadata_reaches_member_applying_on_receipt_once_due() -> None:
+    """A member that applies metadata on receipt gets scheduled metadata only once it is due."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    member.supports_scheduled_updates.return_value = False
+    mgr._members = [member]  # noqa: SLF001
+
+    mgr.set_metadata(_track("Next", 0), timestamp_us=1_500_000)
+    joiner = MagicMock()
+    joiner.supports_scheduled_updates.return_value = False
+    mgr.subscribe(joiner)
+
+    member.send_message.assert_not_called()
+    assert _all_sent_metadata(joiner) == [{"timestamp": 1_000_000}]
+    (delay_s, send_due, *args), _kwargs = group._server.loop.call_later.call_args  # noqa: SLF001
+    assert delay_s == 0.5
+    clock.advance_us(500_000)
+    send_due(*args)
+    for sent in (_all_sent_metadata(member), _all_sent_metadata(joiner)[1:]):
+        assert len(sent) == 1
+        assert sent[0] is not None
+        assert sent[0]["timestamp"] == 1_500_000
+
+
+# DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+def test_rescheduling_sends_metadata_in_effect_to_member_applying_on_receipt() -> None:
+    """Scheduling new metadata sends the metadata already in effect if its due send has not run."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    member.supports_scheduled_updates.return_value = False
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(_track("Next", 0), timestamp_us=1_500_000)
+    clock.advance_us(500_000)
+
+    mgr.set_metadata(_track("Later", 0), timestamp_us=200_000_000)
+
+    assert [sent and sent["title"] for sent in _all_sent_metadata(member)] == ["Next"]
+
+
 def test_sent_metadata_replaced_by_deferred_one_is_cancelled() -> None:
     """Replacing sent metadata with metadata sent only later restates the current metadata now."""
     group, _clock = _make_scheduling_group()

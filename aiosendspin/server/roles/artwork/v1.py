@@ -186,9 +186,14 @@ class ArtworkV1Role(Role):
         now_us = self._client._server.clock.now_us()  # noqa: SLF001
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self.uses_single_message_framing():
+            # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+            # The server clock can make a queued image due before the transfer loop sends it.
+            if timestamp_us > now_us:
+                for due_image, due_us in self._current_queued(channel, now_us):
+                    self._send_single_message(channel, due_image, due_us)
             self._queued.pop(channel, None)
             self._queue_changed.set()
-            if timestamp_us - MAX_ANNOUNCE_LEAD_US <= now_us:
+            if timestamp_us - self._announce_lead_us() <= now_us:
                 self._send_single_message(channel, image_data, timestamp_us)
             else:
                 self._queued[channel] = [(image_data, timestamp_us)]
@@ -244,6 +249,13 @@ class ArtworkV1Role(Role):
     def uses_single_message_framing(self) -> bool:
         """Whether the client predates transfers, having declared its channels in the hello."""
         return self._client.info.artwork_support is not None
+
+    def _announce_lead_us(self) -> int:
+        # DEPRECATED(spec-pr-135): remove in aiosendspin <version>
+        # Every client that predates scheduled images uses single-message framing.
+        if self.uses_single_message_framing():
+            return 0
+        return MAX_ANNOUNCE_LEAD_US
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
     def on_stream_request_format(
@@ -464,7 +476,7 @@ class ArtworkV1Role(Role):
             self._queue_changed.clear()
             now_us = clock.now_us()
             due = [
-                (queued[0][1] - MAX_ANNOUNCE_LEAD_US, channel)
+                (queued[0][1] - self._announce_lead_us(), channel)
                 for channel, queued in self._queued.items()
             ]
             channel = next((channel for announce_us, channel in due if announce_us <= now_us), None)
