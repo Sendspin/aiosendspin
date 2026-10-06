@@ -1621,8 +1621,8 @@ class SendspinConnection:
         An unpaired connection keeps its playback, roles and group during the attempt; a
         long-term paired one leaves playback and its roles first.
 
-        A pair abort raises after leaving pairing, keeping the connection unless its reason
-        closes it.
+        A pair abort raises after leaving pairing, or after closing the connection when its
+        reason closes it.
         A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
         after leaving pairing, also keeping the connection; so does a Pairing PSK attempt whose
         ``client_id`` is not this connection's, before entering pairing.
@@ -1668,8 +1668,12 @@ class SendspinConnection:
                 isinstance(exc, LocalPairingAbortError)
                 and exc.reason is PairAbortReason.USER_CANCELLED
             )
+            if exc.reason in CLOSING_ABORT_REASONS:
+                # Ends the message loop even if the client keeps the connection open.
+                with suppress(Exception):
+                    await transport.close()
             # A cancelled attempt is left by end_pairing or ended by the disconnect.
-            if not cancelled and exc.reason not in CLOSING_ABORT_REASONS:
+            elif not cancelled:
                 with suppress(Exception):
                     await self._leave_pairing()
             raise

@@ -620,8 +620,8 @@ class SendspinServer:
         paired one leaves playback and its roles first.
 
         A pair abort, a server-side timeout or ``InvalidPairingCodeError`` raises with pairing
-        already left, keeping the connection unless the abort reason closes it; other failures
-        disconnect.
+        already left, or with the connection closed when the abort reason closes it; other
+        failures disconnect.
         """
         connection = self._connection_for(client_id)
         try:
