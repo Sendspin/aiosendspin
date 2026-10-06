@@ -2622,6 +2622,10 @@ class SendspinConnection:
         for role in self._client.active_roles:
             for reason in role.client_state_deviations(payload):
                 self._flag_noncompliance(f"client/state {reason}")
+        if payload.available is False and self._source_input_open:
+            self._flag_noncompliance(
+                "client/state reported available: false before client-stream/end"
+            )
 
         released: list[Role] = []
         if is_initial:

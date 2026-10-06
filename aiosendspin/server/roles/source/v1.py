@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from aiosendspin.audio.codecs import create_decoder, decoded_bit_depth, opus_available
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_DECODE_WARN_INTERVAL_S = 30.0
+
 
 class SourceV1Role(Role):
     """Per-connection role that decodes audio streamed up by a source client."""
@@ -40,6 +43,10 @@ class SourceV1Role(Role):
         self._client = client
         self._group_role = None
         self._decoder: object | None = None
+        self._pcm_frame_bytes: int | None = None
+        self._pcm_max_chunk_bytes = 0
+        self._decode_failures = 0
+        self._decode_failure_logged_s: float | None = None
         self._stream: SourceStream | None = None
         self._stream_active = False
         # The source object of the client/state this activation requires.
@@ -154,9 +161,6 @@ class SourceV1Role(Role):
         source = payload.source
         if self._stream_active:
             self._end_stream()
-        if not self._stream_wanted:
-            # A response to a start that crossed a stop, unavailability or removal: discard it.
-            return
 
         if source.codec not in self.accepted_codecs():
             self._client.flag_noncompliance(
@@ -176,6 +180,12 @@ class SourceV1Role(Role):
                 "which is not a whole number of bytes"
             )
             return
+        if source.sample_rate <= 0:
+            self._client.flag_noncompliance("client-stream/start announced unsupported sample_rate")
+            return
+        if source.channels <= 0:
+            self._client.flag_noncompliance("client-stream/start announced unsupported channels")
+            return
         audio_format = AudioFormat(
             sample_rate=source.sample_rate,
             bit_depth=decoded_bit_depth(source.codec.value, source.bit_depth),
@@ -183,6 +193,10 @@ class SourceV1Role(Role):
         )
         header = None
         if source.codec_header is not None:
+            if source.codec is not AudioCodec.FLAC:
+                self._client.flag_noncompliance(
+                    f"client-stream/start sent a codec_header for {source.codec.value}"
+                )
             try:
                 header = base64.b64decode(source.codec_header, validate=True)
             except (binascii.Error, ValueError):
@@ -201,11 +215,11 @@ class SourceV1Role(Role):
                 "client-stream/start FLAC codec_header must contain STREAMINFO"
             )
             return
+        if not self._stream_wanted:
+            # A response to a start that crossed a stop, unavailability or removal: discard it.
+            return
         try:
             # Validate formats before exposing a stream handle.
-            if source.sample_rate <= 0:
-                msg = f"Unsupported sample rate: {source.sample_rate}"
-                raise ValueError(msg)  # noqa: TRY301
             audio_format.resolve_av_format()
             self._decoder = create_decoder(
                 source.codec.value,
@@ -219,6 +233,12 @@ class SourceV1Role(Role):
             self._decoder = None
             return
 
+        if source.codec is AudioCodec.PCM:
+            self._pcm_frame_bytes = source.bit_depth // 8 * source.channels
+            # The longest chunk allowed is 150 ms of frames.
+            self._pcm_max_chunk_bytes = source.sample_rate * 3 // 20 * self._pcm_frame_bytes
+        else:
+            self._pcm_frame_bytes = None
         self._stream = SourceStream(audio_format)
         self._stream_active = True
         self._client._signal_event(  # noqa: SLF001
@@ -234,10 +254,31 @@ class SourceV1Role(Role):
             or self._decoder is None
         ):
             return
+        if self._pcm_frame_bytes is not None:
+            if len(data) % self._pcm_frame_bytes:
+                self._client.flag_noncompliance(
+                    "sent a pcm source audio chunk that is not a whole number of frames"
+                )
+                return
+            if len(data) > self._pcm_max_chunk_bytes:
+                self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
         except Exception:
-            logger.exception("Failed to decode source audio chunk")
+            self._decode_failures += 1
+            now_s = time.monotonic()
+            last_s = self._decode_failure_logged_s
+            if last_s is not None and now_s - last_s < _DECODE_WARN_INTERVAL_S:
+                return
+            if last_s is None:
+                logger.warning("Failed to decode source audio chunk", exc_info=True)
+            else:
+                logger.warning(
+                    "Failed to decode %d source audio chunks since the last warning",
+                    self._decode_failures,
+                )
+            self._decode_failures = 0
+            self._decode_failure_logged_s = now_s
             return
         # Keep the flush-tail stamp monotonic even if a chunk arrives out of order.
         self._last_timestamp_us = max(self._last_timestamp_us, timestamp_us)
@@ -264,6 +305,16 @@ class SourceV1Role(Role):
         self._last_timestamp_us = 0
         if was_active:
             self._client._signal_event(SourceStreamEndedEvent())  # noqa: SLF001
+
+    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report a line_sense signal from a source that did not advertise line_sense."""
+        if (
+            payload.source is not None
+            and payload.source.signal is not None
+            and not self._line_sense_supported()
+        ):
+            return ["source signal sent without line_sense support"]
+        return []
 
     def on_client_state(self, payload: ClientStatePayload) -> None:
         """Send a queued start the state allows, and surface a line_sense signal change."""

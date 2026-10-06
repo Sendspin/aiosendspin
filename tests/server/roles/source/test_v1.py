@@ -143,15 +143,20 @@ def test_binary_chunk_dropped_when_inactive() -> None:
 
 
 @pytest.mark.parametrize(
-    "bad_format",
+    ("bad_format", "reason"),
     [
-        {"bit_depth": 17},
-        {"channels": 0},
-        {"sample_rate": 0},
+        (
+            {"bit_depth": 17},
+            "client-stream/start announced pcm bit_depth 17, which is not a whole number of bytes",
+        ),
+        ({"channels": 0}, "client-stream/start announced unsupported channels"),
+        ({"sample_rate": 0}, "client-stream/start announced unsupported sample_rate"),
     ],
 )
-def test_impossible_declared_format_opens_no_stream(bad_format: dict[str, int]) -> None:
-    """An unusable declared format is rejected at start, not inside the consumer."""
+def test_impossible_declared_format_opens_no_stream(
+    bad_format: dict[str, int], reason: str
+) -> None:
+    """An unusable declared format is flagged at start, not failed inside the consumer."""
     role, client = _make_role()
     fields = {"codec": AudioCodec.PCM, "channels": 2, "sample_rate": 48000, "bit_depth": 16}
     fields.update(bad_format)
@@ -160,6 +165,64 @@ def test_impossible_declared_format_opens_no_stream(bad_format: dict[str, int]) 
     )
     assert not role.stream_active
     assert [e for e in client.events if isinstance(e, SourceStreamStartedEvent)] == []
+    assert client.noncompliance == [reason]
+
+
+@pytest.mark.parametrize("codec", [AudioCodec.PCM, AudioCodec.OPUS])
+def test_codec_header_for_headerless_codec_is_flagged_and_passed_on(
+    monkeypatch: pytest.MonkeyPatch, codec: AudioCodec
+) -> None:
+    """A codec_header the codec does not take is flagged, yet still reaches the decoder."""
+    headers: list[bytes | None] = []
+
+    def _decoder(*_args: object, codec_header: bytes | None, **_kwargs: object) -> object:
+        headers.append(codec_header)
+        return object()
+
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.opus_available", lambda: True)
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.create_decoder", _decoder)
+    role, client = _make_role()
+    role.on_client_stream_start(
+        ClientStreamStartPayload(
+            source=ClientStreamStartSource(
+                codec=codec,
+                channels=2,
+                sample_rate=48000,
+                bit_depth=16,
+                codec_header=base64.b64encode(b"head").decode(),
+            )
+        )
+    )
+
+    assert role.stream_active
+    assert headers == [b"head"]
+    assert client.noncompliance == [f"client-stream/start sent a codec_header for {codec.value}"]
+
+
+async def test_pcm_chunk_with_a_partial_frame_is_flagged_and_dropped() -> None:
+    """A pcm chunk cut mid-frame would shift every later sample, so it never reaches the stream."""
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+    handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(3))
+    role.on_client_stream_end()
+
+    assert client.noncompliance == [
+        "sent a pcm source audio chunk that is not a whole number of frames"
+    ]
+    assert [chunk async for chunk, _ in handle] == []
+
+
+def test_pcm_chunk_longer_than_150_ms_is_flagged() -> None:
+    """Exactly 150 ms of pcm frames is allowed, one frame more is flagged."""
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7200 * 4))
+    assert client.noncompliance == []
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7201 * 4))
+    assert client.noncompliance == ["sent a source audio chunk longer than 150 ms"]
 
 
 def test_opus_start_ignores_declared_bit_depth() -> None:
@@ -237,6 +300,21 @@ def test_stream_start_after_stop_is_discarded_quietly() -> None:
     assert not role.stream_active
     assert client.events == []
     assert client.noncompliance == []
+
+
+def test_invalid_stream_start_after_stop_is_flagged() -> None:
+    """A start crossing a stop is still checked against the spec before it is discarded."""
+    role, client = _make_role()
+    role.request_stop()
+    role.on_client_stream_start(
+        ClientStreamStartPayload(
+            source=ClientStreamStartSource(
+                codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=40
+            )
+        )
+    )
+
+    assert client.noncompliance == ["client-stream/start announced unsupported bit_depth 40"]
 
 
 def test_start_sent_records_an_authorization_on_the_connection() -> None:
@@ -349,10 +427,14 @@ def test_client_state_surfaces_signal_only_when_advertised() -> None:
     event = next(e for e in advertised.events if isinstance(e, SourceSignalChangedEvent))
     assert event.signal is SignalState.PRESENT
 
+    state = ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT))
+    assert role.client_state_deviations(state) == []
+
     unadvertised = _FakeClient(line_sense=False)
     role = SourceV1Role(client=unadvertised)  # type: ignore[arg-type]
     role.on_connect()
-    role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT)))
+    assert role.client_state_deviations(state) == ["source signal sent without line_sense support"]
+    role.on_client_state(state)
     assert not any(isinstance(e, SourceSignalChangedEvent) for e in unadvertised.events)
 
 
