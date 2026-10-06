@@ -1274,7 +1274,8 @@ class SendspinConnection:
             decoded = orjson.loads(text)
             payload = decoded.get("payload") if isinstance(decoded, dict) else None
             if self.is_encrypted and isinstance(payload, dict):
-                # Encrypted clients carry version in client/init, so ignore any copy here.
+                # Encrypted clients send client_id and version in client/init, so drop any copies.
+                payload.pop("client_id", None)
                 payload.pop("version", None)
             message = self._client_message_from_dict(decoded)
         except (LookupError, TypeError, ValueError) as exc:
