@@ -216,21 +216,45 @@ async def test_request_format_without_role_object_is_flagged() -> None:
     assert client.noncompliance == ["sent a stream/request-format without a role object"]
 
 
+_NOT_AN_ENVELOPE = "sent a message that is not a valid message envelope"
+
+
 @pytest.mark.parametrize(
-    "text",
+    ("text", "reason", "strict"),
     [
-        orjson.dumps({"type": "client/goodbye", "payload": {}}).decode(),
-        orjson.dumps({"payload": {}}).decode(),
-        "not json",
+        (
+            orjson.dumps({"type": "client/goodbye", "payload": {}}).decode(),
+            "sent a malformed client/goodbye",
+            False,
+        ),
+        (orjson.dumps({"type": "client/time"}).decode(), _NO_PAYLOAD_OBJECT, False),
+        (
+            orjson.dumps({"type": "client/hello", "payload": {}}).decode(),
+            "sent a second client/hello after the hello exchange",
+            False,
+        ),
+        (orjson.dumps({"payload": {}}).decode(), _NOT_AN_ENVELOPE, False),
+        ("[]", _NOT_AN_ENVELOPE, False),
+        ("not json", _NOT_AN_ENVELOPE, False),
+        ("not json", _NOT_AN_ENVELOPE, True),
     ],
 )
-async def test_malformed_message_ends_the_loop(text: str) -> None:
-    """A malformed known type, a missing type, or non-JSON still ends the message loop."""
-    conn, client = _connection([text, _LEAVE])
+async def test_undecodable_message_is_flagged_and_ends_the_loop(
+    text: str,
+    reason: str,
+    strict: bool,  # noqa: FBT001
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A text message that fails to parse is flagged and ends the loop, rejecting when strict."""
+    conn, client = _connection([text, _LEAVE], strict=strict)
 
-    await conn._run_message_loop()  # noqa: SLF001
+    with caplog.at_level(logging.ERROR):
+        await conn._run_message_loop()  # noqa: SLF001
 
+    assert client.noncompliance == [reason]
+    assert conn._closing is strict  # noqa: SLF001
     client.handle_leave.assert_not_awaited()
+    assert not caplog.records
 
 
 @pytest.mark.parametrize(
