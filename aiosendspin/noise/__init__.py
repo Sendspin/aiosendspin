@@ -15,6 +15,7 @@ from .constants import (
 from .driver import (
     DEFAULT_HANDSHAKE_TIMEOUT_S,
     HandshakeAbortedError,
+    HandshakeNoncomplianceError,
     HandshakeResult,
     HandshakeWebSocket,
     InitRejectedError,
@@ -108,6 +109,7 @@ __all__ = [
     "FileClientPairingStore",
     "FileServerPairingStore",
     "HandshakeAbortedError",
+    "HandshakeNoncomplianceError",
     "HandshakeResult",
     "HandshakeWebSocket",
     "Identity",

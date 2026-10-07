@@ -127,6 +127,7 @@ from aiosendspin.models.types import (
 from aiosendspin.noise.constants import SENTINEL_PSK
 from aiosendspin.noise.driver import (
     HandshakeAbortedError,
+    HandshakeNoncomplianceError,
     receive_text_frame,
     run_handshake_server,
     run_rehandshake_server,
@@ -1115,18 +1116,25 @@ class SendspinConnection:
                 return raw
             peer = self._request.remote if self._request is not None else self._url
             self._server._warn_unencrypted_refused(peer or "unknown")  # noqa: SLF001
-        result = await run_handshake_server(
-            raw,
-            local_identity=self._server.identity,
-            psk_provider=self._psk_provider,
-            client_init_text=first_text,
-            expected_client_id=self._expected_client_id,
-        )
+        try:
+            result = await run_handshake_server(
+                raw,
+                local_identity=self._server.identity,
+                psk_provider=self._psk_provider,
+                client_init_text=first_text,
+                expected_client_id=self._expected_client_id,
+                strict=not self._server.allow_noncompliant_clients,
+            )
+        except HandshakeNoncomplianceError as exc:
+            self._flag_noncompliance(str(exc))
+            raise
         self._client_id = result.peer_id
         self._noise_psk = result.psk
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         self._logger = logger.getChild(result.peer_id)
+        for reason in result.noncompliance:
+            self._flag_noncompliance(reason)
         if result.credential_mismatch and self._pairing_attempt is not None:
             # Close so the reconnect, which carries no attempt, can use a record this server holds.
             self._logger.warning("Client lacks the attempt's Pairing PSK, reconnecting without it")
@@ -2104,7 +2112,10 @@ class SendspinConnection:
             suite=transport.session.suite,
             prologue=self._handshake_hash,
             psk=psk,
+            strict=not self._server.allow_noncompliant_clients,
         )
+        for reason in result.noncompliance:
+            self._flag_noncompliance(reason)
         if self._is_long_term_paired and result.psk.category is not PskCategory.LONG_TERM:
             self._moved_off_record = True
         self._noise_psk = result.psk

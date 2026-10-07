@@ -93,6 +93,7 @@ from aiosendspin.server.server import (
     SendspinServer,
 )
 from tests.conftest import make_sdk_client
+from tests.noise.conftest import non_canonical_peer_id
 
 if TYPE_CHECKING:
     from aiosendspin.noise.models import PairingMessage
@@ -297,6 +298,35 @@ async def test_default_server_answers_non_init_first_frame_with_server_error(
         assert ServerErrorMessage.from_json(msg.data).payload.reason is ServerErrorReason.MALFORMED
         msg = await asyncio.wait_for(ws.receive(), timeout=5)
         assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+
+
+async def test_strict_server_answers_non_canonical_client_id_with_server_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A strict server answers a client_id with non-zero unused bits with server/error."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_init = {
+        "type": "client/init",
+        "payload": {
+            "client_id": non_canonical_peer_id(Identity.generate().peer_id),
+            "version": 1,
+            "suite": "25519_ChaChaPoly_SHA256",
+        },
+    }
+    async with (
+        _serve(server) as url,
+        ClientSession() as session,
+        session.ws_connect(url) as ws,
+    ):
+        await ws.send_str(json.dumps(client_init))
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type is WSMsgType.TEXT
+        assert ServerErrorMessage.from_json(msg.data).payload.reason is ServerErrorReason.MALFORMED
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+    assert (
+        "rejecting non-compliant client: client/init client_id is not canonical base64url"
+    ) in caplog.messages
 
 
 async def test_default_server_warns_once_per_peer_about_unencrypted_client(

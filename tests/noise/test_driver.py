@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -46,7 +47,7 @@ from aiosendspin.noise.models import (
 )
 from aiosendspin.noise.session import NoiseCipherSuite, NoiseSession
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
-from tests.noise.conftest import FakeWebSocket, make_ws_pair
+from tests.noise.conftest import FakeWebSocket, make_ws_pair, non_canonical_peer_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -286,6 +287,10 @@ async def test_psk_lookup_miss_completes_under_the_sentinel() -> None:
 
 _CLIENT_ID = Identity.generate().peer_id
 _SUITE = NoiseCipherSuite.CHACHAPOLY.value
+
+
+def _padded_b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii")
 
 
 def _client_init(**payload: object) -> str:
@@ -1070,22 +1075,28 @@ async def test_server_rejects_bad_base64_msg2() -> None:
     await client_task
 
 
-async def test_server_rejects_msg2_with_malformed_payload() -> None:
-    """A structurally valid Noise message 2 whose plaintext isn't ``{}`` aborts the server.
-
-    The client here runs a real responder session (so message 2 decrypts), but
-    writes a non-empty-object payload — exercising the msg2 payload validation.
-    """
+async def _run_server_against_handcrafted_client(
+    *,
+    strict: bool,
+    non_canonical_client_id: bool = False,
+    msg2_payload: bytes = b"{}",
+    encode_msg2: Callable[[bytes], str] = b64url_encode,
+) -> HandshakeResult:
+    """Run the server against a real responder session that writes its own wire frames."""
     server_id = Identity.generate()
     client_id = Identity.generate()
     psk = generate_psk()
     resolved = ResolvedPsk(psk_id=psk_id_for(psk), psk=psk, category=PskCategory.SENTINEL)
     server_ws, client_ws = make_ws_pair()
 
-    async def bogus_client() -> None:
+    async def handcrafted_client() -> None:
         client_init = ClientInitMessage(
             payload=ClientInitPayload(
-                client_id=client_id.peer_id,
+                client_id=(
+                    non_canonical_peer_id(client_id.peer_id)
+                    if non_canonical_client_id
+                    else client_id.peer_id
+                ),
                 version=PROTOCOL_VERSION,
                 suite=NoiseCipherSuite.CHACHAPOLY.value,
             ),
@@ -1102,20 +1113,72 @@ async def test_server_rejects_msg2_with_malformed_payload() -> None:
         hs1 = NoiseHandshakeMessage.from_json((await client_ws.receive()).data)
         session.read_message(b64url_decode(hs1.payload.data))
         session.mix_psk(psk)
-        bad = session.write_message(b"not json")  # valid Noise, invalid payload
+        msg2 = session.write_message(msg2_payload)
         await client_ws.send_str(
-            NoiseHandshakeMessage(payload=NoiseHandshakePayload(data=b64url_encode(bad))).to_json(),
+            NoiseHandshakeMessage(payload=NoiseHandshakePayload(data=encode_msg2(msg2))).to_json(),
         )
 
-    client_task = asyncio.create_task(bogus_client())
-    with pytest.raises(HandshakeAbortedError, match="malformed Noise message 2 payload"):
-        await run_handshake_server(
+    client_task = asyncio.create_task(handcrafted_client())
+    try:
+        return await run_handshake_server(
             server_ws,
             local_identity=server_id,
             psk_provider=_provider(resolved),
             timeout_s=1.0,
+            strict=strict,
         )
-    await client_task
+    finally:
+        await client_task
+
+
+@pytest.mark.parametrize(
+    ("strict", "payload", "encode", "error"),
+    [
+        pytest.param(
+            False, b"not json", b64url_encode, "malformed Noise message 2 payload", id="not-json"
+        ),
+        pytest.param(
+            True,
+            b"{}\n",
+            b64url_encode,
+            "Noise message 2 payload is not the literal bytes",
+            id="strict-trailing-newline",
+        ),
+        pytest.param(
+            True,
+            b"{}",
+            _padded_b64url,
+            "Noise message 2 data is not canonical base64url",
+            id="strict-padded-data",
+        ),
+    ],
+)
+async def test_server_rejects_msg2_with_malformed_payload(
+    strict: bool,  # noqa: FBT001
+    payload: bytes,
+    encode: Callable[[bytes], str],
+    error: str,
+) -> None:
+    """A Noise message 2 that decrypts but is malformed aborts the server."""
+    with pytest.raises(HandshakeAbortedError, match=error):
+        await _run_server_against_handcrafted_client(
+            strict=strict, msg2_payload=payload, encode_msg2=encode
+        )
+
+
+async def test_server_reports_tolerated_handshake_input_without_strict() -> None:
+    """Without ``strict``, non-canonical handshake input is admitted and reported."""
+    result = await _run_server_against_handcrafted_client(
+        strict=False,
+        non_canonical_client_id=True,
+        msg2_payload=b'{"a":1}',
+        encode_msg2=_padded_b64url,
+    )
+    assert result.noncompliance == (
+        "client/init client_id is not canonical base64url",
+        "Noise message 2 data is not canonical base64url",
+        "Noise message 2 payload is not the literal bytes {}",
+    )
 
 
 async def test_psk_held_under_another_category_falls_back_to_the_sentinel() -> None:
