@@ -103,6 +103,7 @@ from aiosendspin.models.player import (
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
+    ClientStreamStartPayload,
     ServerHelloSourceSupport,
 )
 from aiosendspin.models.types import (
@@ -2684,17 +2685,18 @@ class SendspinConnection:
         self._unhandled_binary_count = 0
         self._last_unhandled_binary_log_s = now_s
 
-    def _accept_source_stream_start(self) -> bool:
+    def _accept_source_stream_start(self, payload: ClientStreamStartPayload) -> bool:
         """Return whether a client-stream/start is authorized, opening the input stream if so."""
-        if self._source_input_open:
-            return True  # Replaces the open stream's format, which needs no start.
-        if not self._source_starts_pending:
+        # Replacing the open stream's format needs no start.
+        if not self._source_input_open and not self._source_starts_pending:
             self._flag_noncompliance(
                 "client-stream/start sent without a preceding source start command"
             )
             return False
-        self._source_starts_pending -= 1
-        self._source_input_open = True
+        SourceV1Role.check_client_stream_start(payload, on_noncompliance=self._flag_noncompliance)
+        if not self._source_input_open:
+            self._source_starts_pending -= 1
+            self._source_input_open = True
         return True
 
     async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:
@@ -2739,7 +2741,7 @@ class SendspinConnection:
             if self._client is None:
                 return
             self._flag_superseded_message_type(message.type)
-            if self._accept_source_stream_start():
+            if self._accept_source_stream_start(message.payload):
                 for role in self._client.active_roles:
                     role.on_client_stream_start(message.payload)
             return

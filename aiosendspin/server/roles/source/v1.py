@@ -24,6 +24,8 @@ from .events import (
 from .stream import SourceStream
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from aiosendspin.models.core import ClientStatePayload
     from aiosendspin.models.source import ClientStreamStartPayload
     from aiosendspin.models.types import SignalState
@@ -155,39 +157,33 @@ class SourceV1Role(Role):
             )
         )
 
-    def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:
-        """Build a decoder and a fresh stream handle, then announce it, if a stream is wanted."""
+    @staticmethod
+    def check_client_stream_start(
+        payload: ClientStreamStartPayload, *, on_noncompliance: Callable[[str], None]
+    ) -> tuple[AudioFormat, bytes | None] | None:
+        """Flag spec violations and return the format and codec header, or None to discard."""
         source = payload.source
-        if self._stream_active:
-            self._end_stream()
-
-        if source.codec not in self.accepted_codecs():
-            self._client.flag_noncompliance(
+        if source.codec not in SourceV1Role.accepted_codecs():
+            on_noncompliance(
                 f"client-stream/start announced codec {source.codec.value!r}, "
                 "which server/hello did not list"
             )
-            return
+            return None
         if source.codec is not AudioCodec.OPUS and not 1 <= source.bit_depth <= 32:
-            self._client.flag_noncompliance(
-                "client-stream/start announced an unsupported bit_depth"
-            )
-            return
+            on_noncompliance("client-stream/start announced an unsupported bit_depth")
+            return None
         if source.codec is AudioCodec.PCM and source.bit_depth % 8:
             # The PCM wire convention only packs whole-byte samples.
-            self._client.flag_noncompliance(
+            on_noncompliance(
                 "client-stream/start announced a pcm bit_depth that is not a whole number of bytes"
             )
-            return
+            return None
         if source.sample_rate <= 0:
-            self._client.flag_noncompliance(
-                "client-stream/start announced an unsupported sample_rate"
-            )
-            return
+            on_noncompliance("client-stream/start announced an unsupported sample_rate")
+            return None
         if source.channels <= 0:
-            self._client.flag_noncompliance(
-                "client-stream/start announced an unsupported channels count"
-            )
-            return
+            on_noncompliance("client-stream/start announced an unsupported channels count")
+            return None
         audio_format = AudioFormat(
             sample_rate=source.sample_rate,
             bit_depth=decoded_bit_depth(source.codec.value, source.bit_depth),
@@ -196,16 +192,14 @@ class SourceV1Role(Role):
         header = None
         if source.codec_header is not None:
             if source.codec is not AudioCodec.FLAC:
-                self._client.flag_noncompliance(
+                on_noncompliance(
                     f"client-stream/start sent a codec_header for {source.codec.value}"
                 )
             try:
                 header = base64.b64decode(source.codec_header, validate=True)
             except (binascii.Error, ValueError):
-                self._client.flag_noncompliance(
-                    "client-stream/start codec_header is not valid Base64"
-                )
-                return
+                on_noncompliance("client-stream/start codec_header is not valid Base64")
+                return None
         if source.codec is AudioCodec.FLAC and (
             header is None
             or len(header) < 42
@@ -213,10 +207,22 @@ class SourceV1Role(Role):
             or header[4] & 0x7F
             or int.from_bytes(header[5:8], "big") != 34
         ):
-            self._client.flag_noncompliance(
-                "client-stream/start FLAC codec_header must contain STREAMINFO"
-            )
+            on_noncompliance("client-stream/start FLAC codec_header must contain STREAMINFO")
+            return None
+        return audio_format, header
+
+    def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:
+        """Build a decoder and a fresh stream handle, then announce it, if a stream is wanted."""
+        source = payload.source
+        if self._stream_active:
+            self._end_stream()
+
+        checked = self.check_client_stream_start(
+            payload, on_noncompliance=self._client.flag_noncompliance
+        )
+        if checked is None:
             return
+        audio_format, header = checked
         if not self._stream_wanted:
             # A response to a start that crossed a stop, unavailability or removal: discard it.
             return
