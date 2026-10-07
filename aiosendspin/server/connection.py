@@ -158,6 +158,7 @@ from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairin
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 from aiosendspin.util import (
     WARN_INTERVAL_S,
+    _peek_message_type,
     create_task,
     finish_despite_cancel,
     warn_deprecated,
@@ -1146,7 +1147,7 @@ class SendspinConnection:
         pairing dial the client lacks the Pairing PSK for, raise ``HandshakeAbortedError``.
         """
         first_text = await receive_text_frame(raw, what="first frame")
-        if self._peek_message_type(first_text) == "client/hello":
+        if _peek_message_type(first_text) == "client/hello":
             if self._pairing_attempt is not None:
                 raise HandshakeAbortedError("pairing requires an encrypted connection")
             if self._server.allow_unencrypted:
@@ -1186,15 +1187,6 @@ class SendspinConnection:
                 "Sentinel PSK; it needs re-pairing before it can play again"
             )
         return result.encrypted_ws
-
-    @staticmethod
-    def _peek_message_type(text: str) -> str | None:
-        try:
-            decoded = orjson.loads(text)
-        except orjson.JSONDecodeError:
-            return None
-        message_type = decoded.get("type") if isinstance(decoded, dict) else None
-        return message_type if isinstance(message_type, str) else None
 
     async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
         """Pick the PSK to admit ``client_id`` with, or ``None`` to refuse it."""
@@ -2503,7 +2495,7 @@ class SendspinConnection:
         """Forward a pairing or re-handshake message to the pairing task; return whether routed."""
         if self._pairing_message_queue is None or msg.type is not WSMsgType.TEXT:
             return False
-        message_type = self._peek_message_type(cast("str", msg.data))
+        message_type = _peek_message_type(cast("str", msg.data))
         self._note_pairing_frame(message_type)
         if message_type not in _PAIR_TRANSITION_TYPES:
             return False
@@ -2587,7 +2579,7 @@ class SendspinConnection:
 
     def _skip_undecodable_message(self, text: str, exc: Exception) -> bool:
         """Return whether a text message that failed to parse is skipped rather than fatal."""
-        message_type = self._peek_message_type(text)
+        message_type = _peek_message_type(text)
         self._note_pairing_frame(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
             self._flag_pairing_frame_before_activate(message_type)
