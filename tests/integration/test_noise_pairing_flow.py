@@ -2105,6 +2105,66 @@ async def test_stray_pairing_frame_outside_pairing_is_discarded() -> None:
             await client.disconnect()
 
 
+async def test_strict_server_rejects_a_pairing_frame_before_any_pairing_activate() -> None:
+    """A strict server closes a connection sending a pairing frame before any pairing activate."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=InMemoryClientPairingStore(),
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert client._admitted_connection is not None  # noqa: SLF001
+            await client._admitted_connection.send_pair_abort(  # noqa: SLF001
+                PairAbortReason.USER_CANCELLED
+            )
+            await _wait_until(lambda: not client.connected)
+        finally:
+            await client.disconnect()
+
+
+async def test_strict_server_discards_a_pairing_frame_after_a_pairing() -> None:
+    """A pairing frame after a pairing re-keyed the session keeps a strict server's connection."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.PAIRING_PSK,
+                    pairing_psk=pairing,
+                    client_id=client_identity.peer_id,
+                )
+            )
+            await _await_paired_session(client)
+            assert client._admitted_connection is not None  # noqa: SLF001
+            await client._admitted_connection.send_pair_abort(  # noqa: SLF001
+                PairAbortReason.CONCURRENT_ATTEMPT
+            )
+            await asyncio.sleep(0.1)  # a fatal frame would have torn the connection down
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
 async def test_end_pairing_during_attempt_leaves_pairing() -> None:
     """end_pairing aborts a stalled attempt with user_cancelled, stays connected, re-pairs."""
     server_store = InMemoryServerPairingStore()

@@ -309,9 +309,9 @@ class SendspinConnection:
         self._pairing_task: asyncio.Task[bool] | None = None
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_index = 0
+        self._activated_pairing_method: PairMethod | None = None
         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
         self._sent_psk_pair_init = False
-        self._activated_pairing_method: PairMethod | None = None
         self._connection_done = asyncio.Event()
         self._transport: Transport | None = None
         self._pending_first_text: str | None = None  # legacy first frame held for the loop
@@ -1896,7 +1896,6 @@ class SendspinConnection:
                     and self._server.languages is not None
                 ):
                     languages = list(self._server.languages)
-            # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
             self._activated_pairing_method = method
             assert self._client_info is not None
             # No gate on the hello-advertised methods: the advertisement may lag the client's
@@ -2539,6 +2538,8 @@ class SendspinConnection:
         message_type = self._peek_message_type(text)
         self._note_pairing_frame(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
+            if self._activated_pairing_method is None:
+                self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
             # In flight from before the client observed the leave activate.
             self._logger.debug("Discarding pairing message: not in pairing")
             return True
