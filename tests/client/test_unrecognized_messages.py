@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+import logging
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import WSMessage, WSMsgType
@@ -17,6 +19,7 @@ from aiosendspin.models.player import (
 from aiosendspin.models.types import Activity, AudioCodec, Roles
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket
+from aiosendspin.util import WARN_INTERVAL_S
 from tests.conftest import make_sdk_client
 from tests.noise.conftest import FakeWebSocket, make_paired_sessions
 
@@ -75,6 +78,23 @@ async def test_unimplemented_binary_id_is_ignored(message_id: int) -> None:
 
     conn.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
     assert conn._protocol_error_task is None  # noqa: SLF001
+
+
+async def test_repeated_unknown_binary_id_warns_once(caplog: Any) -> None:
+    """Repeated unknown binary IDs warn once, then report at debug level with a count."""
+    conn, _ = await _activated_connection()
+    with (
+        caplog.at_level(logging.DEBUG),
+        patch(
+            "aiosendspin.client.connection.time.monotonic",
+            side_effect=[5.0, 6.0, 7.0, 5.0 + WARN_INTERVAL_S],
+        ),
+    ):
+        for _ in range(4):
+            conn._handle_binary_message(bytes([100]))  # noqa: SLF001
+    reports = [r for r in caplog.records if "unknown binary" in r.getMessage().lower()]
+    assert [r.levelno for r in reports] == [logging.WARNING, logging.DEBUG]
+    assert "3 message(s)" in reports[1].getMessage()
 
 
 async def test_implemented_binary_id_with_inactive_stream_is_dropped() -> None:
