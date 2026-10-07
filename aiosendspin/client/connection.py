@@ -1218,6 +1218,10 @@ class SendspinConnection:
             position_ms=position_ms,
             offset_ms=offset_ms,
         )
+        if controller_payload.position_ms is not None and controller_payload.position_ms < 0:
+            raise ValueError(
+                f"position_ms must be non-negative, got {controller_payload.position_ms}"
+            )
         if (
             controller_payload.position_ms is not None
             and controller.seek_max_ms is not None

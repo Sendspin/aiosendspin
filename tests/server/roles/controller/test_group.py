@@ -611,7 +611,8 @@ def test_handle_seek_command_emits_event_when_in_range() -> None:
     assert event.position_ms == 120_000
 
 
-def test_handle_seek_command_ignored_when_out_of_range() -> None:
+@pytest.mark.parametrize("position_ms", [-1, 400_000])
+def test_handle_seek_command_ignored_when_out_of_range(position_ms: int) -> None:
     """An out-of-range 'seek' is ignored (no event)."""
     group = _make_group_stub()
     cgr = ControllerGroupRole(group)
@@ -619,7 +620,7 @@ def test_handle_seek_command_ignored_when_out_of_range() -> None:
     cgr.set_seek_max_ms(300_000)
     group._signal_event.reset_mock()  # noqa: SLF001
 
-    cgr.handle_command(ControllerCommandPayload(command=MediaCommand.SEEK, position_ms=400_000))
+    cgr.handle_command(ControllerCommandPayload(command=MediaCommand.SEEK, position_ms=position_ms))
 
     group._signal_event.assert_not_called()  # noqa: SLF001
 

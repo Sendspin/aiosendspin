@@ -51,6 +51,7 @@ from .types import (
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
+    MediaCommand,
     PairingCodeFormat,
     PairMethod,
     PlaybackStateType,
@@ -594,11 +595,22 @@ class ClientCommandPayload(SendspinModel):
     """Controller commands - only if client has controller role."""
     application_objects: dict[str, Any] = field(default_factory=dict)
     """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+    unrecognized_command_used: bool | None = None
+    """Whether the controller object named an unrecognized command, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Nest application-specific role objects under `application_objects`."""
-        return collect_application_objects(d)
+        """Drop a controller object with an unrecognized command, and nest application objects."""
+        controller = d.get("controller")
+        unrecognized = isinstance(controller, dict) and is_unknown_enum_value(
+            controller.get("command"), MediaCommand
+        )
+        normalized = {k: v for k, v in d.items() if k != "controller"} if unrecognized else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return collect_application_objects(
+            normalized | {"unrecognized_command_used": unrecognized or None}
+        )
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -667,6 +679,22 @@ class ClientLeaveMessage(ClientMessage):
 
     payload: ClientLeavePayload = field(default_factory=ClientLeavePayload)
     type: Literal["client/leave"] = "client/leave"
+    payload_missing: bool | None = None
+    """Set when the message carried no payload object, recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a payload that is not an object, recording that it was missing."""
+        payload_missing = not isinstance(d.get("payload"), dict)
+        normalized = {k: v for k, v in d.items() if k != "payload"} if payload_missing else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return normalized | {"payload_missing": payload_missing or None}
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 # Server -> Client: server/hello
