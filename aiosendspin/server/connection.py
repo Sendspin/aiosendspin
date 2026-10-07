@@ -224,7 +224,7 @@ _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
 def _message_tags(base: type) -> set[str]:
     """Return the ``type`` values of every subclass of ``base``."""
     tags: set[str] = set()
-    pending = base.__subclasses__()
+    pending: list[type] = base.__subclasses__()
     while pending:
         variant = pending.pop()
         pending.extend(variant.__subclasses__())
