@@ -42,7 +42,7 @@ from .models import (
 )
 from .pairing_token import decode_pairing_code_token, encode_pairing_code_token
 from .session import NoiseCipherSuite
-from .trust_store import ServerPairingRecord
+from .trust_store import PAIRING_ROUND_LIMIT, ServerPairingRecord
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -375,10 +375,12 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     legacy_rounds: bool = False,
     # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
     legacy_pin: bool = False,
+    on_noncompliance: Callable[[str], None] | None = None,
 ) -> ServerPairingRecord:
     """Run the server side of the dynamic-pairing-code flow.
 
     Returns the persisted record.
+    ``on_noncompliance`` is called for each retry past the round limit.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds: one round under the ``sid`` without a round number. ``legacy_pin``
     serves a dynamic PIN client predating the pairing-code rename, which reveals ``nonce_B``
@@ -419,6 +421,8 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
             if isinstance(reply, ClientPairConfirmMessage):
                 confirm = reply
                 break
+            if round_number >= PAIRING_ROUND_LIMIT and on_noncompliance is not None:
+                on_noncompliance("sent client/pair-retry past the pairing round limit")
             round_number += 1
             init_payload = ServerPairInitPayload()
 

@@ -1296,6 +1296,54 @@ async def test_live_pairing_dynamic_pairing_code_wrong_then_retry() -> None:
             await client.disconnect()
 
 
+async def test_strict_server_rejects_a_retry_past_the_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client retrying past the round limit is rejected by a strict server."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async def never_reached() -> bool:
+        return False
+
+    monkeypatch.setattr(client_store, "is_pairing_round_limit_reached", never_reached)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        if pairing_code is not None:
+            shown.put_nowait(pairing_code)
+
+    rounds = 0
+
+    async def provide_wrong() -> str:
+        nonlocal rounds
+        rounds += 1
+        if rounds > PAIRING_ROUND_LIMIT + 1:
+            pytest.fail("the retry past the round limit was not rejected")
+        pairing_code = await shown.get()
+        return ("2" if pairing_code[0] == "1" else "1") + pairing_code[1:]
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            with pytest.raises(ClientComplianceError):
+                await server.initiate_pairing(
+                    client_identity.peer_id,
+                    _code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide_wrong),
+                )
+        finally:
+            await client.disconnect()
+
+
 async def test_live_pairing_round_limit_holds_back_until_pairing_window() -> None:
     """Exhausting the rounds aborts the attempt; the next one waits for the operator action."""
     server_store = InMemoryServerPairingStore()

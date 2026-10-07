@@ -2029,6 +2029,7 @@ class SendspinConnection:
             legacy_rounds=legacy_rounds,
             # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
             legacy_pin=bool(self._client_info.legacy_pin_methods_used),
+            on_noncompliance=self._flag_noncompliance,
         )
 
     # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
