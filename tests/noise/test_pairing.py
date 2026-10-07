@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from aiosendspin.models.core import ServerActivateMessage, ServerActivatePayload
 from aiosendspin.models.types import Activity, PairAbortReason, PairingCodeFormat, PairMethod
 from aiosendspin.noise import pairing_code as pairing_code_mod
+from aiosendspin.noise.constants import SENTINEL_PSK
 from aiosendspin.noise.keys import b64url_decode, b64url_encode, generate_psk
 from aiosendspin.noise.models import (
     ClientPairAuthMessage,
@@ -873,6 +874,31 @@ async def test_pairing_psk_finalize_with_both_psk_fields_is_protocol_error() -> 
     with pytest.raises(PairingError, match="both long_term_psk and wrapped_psk") as excinfo:
         await run_pairing_psk_server(
             server_ews, pairing_index=1, client_id="client-A", store=server_store
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
+    assert server_raw.sent == []
+
+
+@pytest.mark.parametrize("reused", ["sentinel", "pairing"])
+async def test_pairing_psk_finalize_reusing_a_known_psk_is_protocol_error(reused: str) -> None:
+    """A finalize delivering the Sentinel or pairing PSK as the long-term PSK persists nothing."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    pairing_psk = generate_psk()
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    await client_ews.send_str(_psk_finalize(SENTINEL_PSK if reused == "sentinel" else pairing_psk))
+    with pytest.raises(PairingError, match="reused the Sentinel or pairing PSK") as excinfo:
+        await run_pairing_psk_server(
+            server_ews,
+            pairing_index=1,
+            client_id="client-A",
+            store=server_store,
+            pairing_psk=pairing_psk,
         )
 
     assert not isinstance(excinfo.value, PairingAbortError)

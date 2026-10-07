@@ -1903,6 +1903,55 @@ async def test_cancelled_code_attempt_message_in_flight_does_not_fail_the_next_a
             await client.disconnect()
 
 
+async def test_pairing_psk_finalize_echoing_the_pairing_psk_stores_nothing() -> None:
+    """A client delivering its pairing PSK as the long-term PSK stores nothing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async def echo_pairing_psk(ws: EncryptedWebSocket, *, pairing_index: int, **_: Any) -> None:
+        await ws.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(pairing_index=pairing_index)
+            ).to_json()
+        )
+        await ws.send_str(
+            ClientPairFinalizeMessage(
+                payload=ClientPairFinalizePayload(long_term_psk=b64url_encode(pairing))
+            ).to_json()
+        )
+        await asyncio.Event().wait()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            with (
+                patch.object(client_connection_module, "run_pairing_psk_client", echo_pairing_psk),
+                pytest.raises(PairingError, match="reused the Sentinel or pairing PSK"),
+            ):
+                await server.initiate_pairing(
+                    client_identity.peer_id,
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=client_identity.peer_id,
+                    ),
+                )
+            assert await server_store.record_by_client_id(client_identity.peer_id) is None
+        finally:
+            await client.disconnect()
+
+
 # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
 async def _send_list_form_hello(self: SdkConnection) -> None:
     """Send client/hello with supported_pair_methods in the superseded list form."""
