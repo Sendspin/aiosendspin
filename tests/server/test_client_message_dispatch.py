@@ -234,6 +234,7 @@ _NOT_AN_ENVELOPE = "sent a message that is not a valid message envelope"
             False,
         ),
         (orjson.dumps({"payload": {}}).decode(), _NOT_AN_ENVELOPE, False),
+        (orjson.dumps({"type": [], "payload": {}}).decode(), _NOT_AN_ENVELOPE, False),
         ("[]", _NOT_AN_ENVELOPE, False),
         ("not json", _NOT_AN_ENVELOPE, False),
         ("not json", _NOT_AN_ENVELOPE, True),

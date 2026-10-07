@@ -1193,7 +1193,8 @@ class SendspinConnection:
             decoded = orjson.loads(text)
         except orjson.JSONDecodeError:
             return None
-        return decoded.get("type") if isinstance(decoded, dict) else None
+        message_type = decoded.get("type") if isinstance(decoded, dict) else None
+        return message_type if isinstance(message_type, str) else None
 
     async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
         """Pick the PSK to admit ``client_id`` with, or ``None`` to refuse it."""
