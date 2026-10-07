@@ -194,8 +194,8 @@ def test_codec_header_for_headerless_codec_is_flagged_and_passed_on(
     assert client.noncompliance == [f"client-stream/start sent a codec_header for {codec.value}"]
 
 
-async def test_pcm_chunk_with_a_partial_frame_is_flagged_and_dropped() -> None:
-    """A pcm chunk cut mid-frame would shift every later sample, so it never reaches the stream."""
+async def test_pcm_chunk_with_a_partial_frame_is_flagged_and_passed_on() -> None:
+    """A pcm chunk cut mid-frame is flagged, yet still reaches the stream."""
     role, client = _make_role()
     role.on_client_stream_start(_pcm_start_payload())
     handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
@@ -206,7 +206,7 @@ async def test_pcm_chunk_with_a_partial_frame_is_flagged_and_dropped() -> None:
     assert client.noncompliance == [
         "sent a pcm source audio chunk that is not a whole number of frames"
     ]
-    assert [chunk async for chunk, _ in handle] == []
+    assert [chunk async for chunk, _ in handle] == [bytes(3)]
 
 
 def test_pcm_chunk_longer_than_150_ms_is_flagged() -> None:

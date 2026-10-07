@@ -263,7 +263,6 @@ class SourceV1Role(Role):
                 self._client.flag_noncompliance(
                     "sent a pcm source audio chunk that is not a whole number of frames"
                 )
-                return
             if len(data) > self._pcm_max_chunk_bytes:
                 self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
         try:
