@@ -1193,7 +1193,8 @@ class SendspinConnection:
             decoded = orjson.loads(text)
         except orjson.JSONDecodeError:
             return None
-        return decoded.get("type") if isinstance(decoded, dict) else None
+        message_type = decoded.get("type") if isinstance(decoded, dict) else None
+        return message_type if isinstance(message_type, str) else None
 
     async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
         """Pick the PSK to admit ``client_id`` with, or ``None`` to refuse it."""
@@ -2549,10 +2550,13 @@ class SendspinConnection:
                 )
                 try:
                     message = self._deserialize_client_message(text, active_families)
-                except Exception as exc:
+                except (LookupError, TypeError, ValueError) as exc:
                     if self._skip_undecodable_message(text, exc):
                         continue
-                    raise
+                    self._logger.warning(
+                        "Ending connection on a message that failed to parse: %s", exc
+                    )
+                    break
                 await self._handle_message(message, timestamp_us)
             else:
                 # Loop exited normally (iterator exhausted) - connection closed
@@ -2604,6 +2608,14 @@ class SendspinConnection:
         if not isinstance(message_type, str) or not (
             isinstance(exc, SuitableVariantNotFoundError) and exc.variants_type is ClientMessage
         ):
+            if not isinstance(message_type, str):
+                self._flag_noncompliance("sent a message that is not a valid message envelope")
+            elif message_type == "client/hello":
+                self._flag_noncompliance("sent a second client/hello after the hello exchange")
+            elif not self._has_payload_object(text):
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+            else:
+                self._flag_noncompliance(f"sent a malformed {message_type}")
             return False
         if message_type in _server_message_types():
             self._flag_noncompliance("sent a server-to-client message")
