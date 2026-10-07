@@ -39,7 +39,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, cast
 
 import orjson
@@ -74,6 +74,7 @@ from aiosendspin.models.core import (
     StreamClearMessage,
     StreamEndMessage,
     StreamRequestFormatMessage,
+    StreamRequestFormatPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.management import (
@@ -124,7 +125,13 @@ from aiosendspin.models.types import (
     replacement_for,
     role_family,
 )
-from aiosendspin.noise.constants import SENTINEL_PSK
+from aiosendspin.noise.constants import (
+    ERROR_TYPE_SERVER,
+    HANDSHAKE_TYPE,
+    INIT_TYPE_CLIENT,
+    INIT_TYPE_SERVER,
+    SENTINEL_PSK,
+)
 from aiosendspin.noise.driver import (
     HandshakeAbortedError,
     HandshakeNoncomplianceError,
@@ -133,7 +140,7 @@ from aiosendspin.noise.driver import (
     run_rehandshake_server,
 )
 from aiosendspin.noise.keys import b64url_encode, psk_id_for
-from aiosendspin.noise.models import PairAbortMessage, PairAbortPayload
+from aiosendspin.noise.models import PairAbortMessage, PairAbortPayload, PairingMessage
 from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
     LocalPairingAbortError,
@@ -193,6 +200,14 @@ _CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
 
 _MAC_ADDRESS_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
 
+_NO_PAYLOAD_OBJECT = "sent a message without a payload object"
+
+_SERVER_BINARY_TYPES: frozenset[int] = frozenset(
+    message_type.value
+    for message_type in BinaryMessageType
+    if message_type is not BinaryMessageType.SOURCE_AUDIO_CHUNK
+)
+
 _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
         "client/pair-pending",
@@ -204,6 +219,28 @@ _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
         "pair/abort",
     }
 )
+
+
+def _message_tags(base: type) -> set[str]:
+    """Return the ``type`` values of every subclass of ``base``."""
+    tags: set[str] = set()
+    pending = base.__subclasses__()
+    while pending:
+        variant = pending.pop()
+        pending.extend(variant.__subclasses__())
+        if isinstance(tag := variant.__dict__.get("type"), str):
+            tags.add(tag)
+    return tags
+
+
+@cache
+def _server_message_types() -> frozenset[str]:
+    """Return the message types only a server sends."""
+    sent = _message_tags(ServerMessage) | _message_tags(PairingMessage)
+    sent |= {INIT_TYPE_SERVER, ERROR_TYPE_SERVER}
+    client_sent = _message_tags(ClientMessage) | _PAIRING_MESSAGE_TYPES
+    return frozenset(sent - client_sent - {INIT_TYPE_CLIENT, HANDSHAKE_TYPE})
+
 
 _PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
     {
@@ -2553,7 +2590,11 @@ class SendspinConnection:
             self._logger.debug("Discarding pairing message: not in pairing")
             return True
         if message_type == "client/command":
-            self._logger.warning("Ignoring client/command that failed to parse: %s", exc)
+            if not self._has_payload_object(text):
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+            elif self._client is not None and self._client.roles_by_family("controller"):
+                self._flag_noncompliance("sent a malformed client/command controller object")
+            self._logger.debug("Ignoring client/command that failed to parse: %s", exc)
             return True
         if message_type == "client/state":
             self._logger.debug("Ignoring client/state that failed to parse: %s", exc)
@@ -2563,8 +2604,21 @@ class SendspinConnection:
             isinstance(exc, SuitableVariantNotFoundError) and exc.variants_type is ClientMessage
         ):
             return False
-        self._log_unknown_message_type(message_type)
+        if message_type in _server_message_types():
+            self._flag_noncompliance("sent a server-to-client message")
+        elif message_type == INIT_TYPE_CLIENT:
+            self._flag_noncompliance("sent client/init after the connection was established")
+        elif message_type == HANDSHAKE_TYPE:
+            self._flag_noncompliance("sent noise/handshake outside a re-handshake")
+        elif not self._has_payload_object(text):
+            self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+        else:
+            self._log_unknown_message_type(message_type)
         return True
+
+    @staticmethod
+    def _has_payload_object(text: str) -> bool:
+        return isinstance(orjson.loads(text).get("payload"), dict)
 
     def _log_unknown_message_type(self, message_type: str) -> None:
         """Log an ignored message type, warning once per distinct type."""
@@ -2581,10 +2635,13 @@ class SendspinConnection:
 
     def _route_inbound_binary(self, data: bytes) -> None:
         """Route an inbound binary chunk to the role that declares its message type."""
-        if self._client is None:
+        if self._client is None or not data:
             return
         if len(data) < BINARY_HEADER_SIZE:
-            self._logger.warning("Inbound binary message shorter than header, dropping")
+            if data[0] == BinaryMessageType.SOURCE_AUDIO_CHUNK.value:
+                self._flag_noncompliance("sent a source audio chunk shorter than its header")
+            else:
+                self._drop_unrouted_binary(data[0])
             return
         header = unpack_binary_header(data)
         payload = data[BINARY_HEADER_SIZE:]
@@ -2602,11 +2659,18 @@ class SendspinConnection:
                 return
         if is_source_audio:
             return  # In flight from before the source role was removed.
+        self._drop_unrouted_binary(header.message_type)
+
+    def _drop_unrouted_binary(self, message_type: int) -> None:
+        """Flag a server-to-client binary type, or log an unhandled one with a rate limit."""
+        if message_type in _SERVER_BINARY_TYPES:
+            self._flag_noncompliance("sent a server-to-client binary message type")
+            return
         self._unhandled_binary_count += 1
         now_s = time.monotonic()
         if self._last_unhandled_binary_log_s is None:
             self._logger.warning(
-                "Ignoring unhandled binary message type %s from client", header.message_type
+                "Ignoring unhandled binary message type %s from client", message_type
             )
         elif now_s - self._last_unhandled_binary_log_s < WARN_INTERVAL_S:
             return
@@ -2614,7 +2678,7 @@ class SendspinConnection:
             self._logger.debug(
                 "Ignoring unhandled binary message type %s from client: "
                 "%s message(s) since last report",
-                header.message_type,
+                message_type,
                 self._unhandled_binary_count,
             )
         self._unhandled_binary_count = 0
@@ -2657,34 +2721,16 @@ class SendspinConnection:
             return
 
         if isinstance(message, StreamRequestFormatMessage):
-            if self._client is None:
-                return
-            fmt = message.payload
-            if fmt.player is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format player object, "
-                    "superseded by the client/state player format"
-                )
-            if fmt.artwork is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format artwork object, "
-                    "superseded by the client/state artwork object"
-                )
-            if fmt.visualizer is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format visualizer object, "
-                    "superseded by the client/state visualizer object"
-                )
-            for role in self._client.active_roles:
-                role.on_stream_request_format(fmt)
+            self._handle_stream_request_format(message.payload)
             return
 
         if isinstance(message, ClientCommandMessage):
             if self._client is None:
                 return
+            if message.payload.unrecognized_command_used and self._client.roles_by_family(
+                "controller"
+            ):
+                self._flag_noncompliance("sent a controller command the server did not offer")
             for role in self._client.active_roles:
                 role.on_command(message.payload)
             return
@@ -2710,6 +2756,8 @@ class SendspinConnection:
         if isinstance(message, ClientLeaveMessage):
             if self._client is None:
                 return
+            if message.payload_missing:
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
             await self._client.handle_leave()
             return
 
@@ -2722,7 +2770,35 @@ class SendspinConnection:
             await self._handle_goodbye(message.payload)
             return
 
+    def _handle_stream_request_format(self, fmt: StreamRequestFormatPayload) -> None:
+        if self._client is None:
+            return
+        if fmt.player is None and fmt.artwork is None and fmt.visualizer is None:
+            self._flag_noncompliance("sent a stream/request-format without a role object")
+        if fmt.player is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format player object, "
+                "superseded by the client/state player format"
+            )
+        if fmt.artwork is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format artwork object, "
+                "superseded by the client/state artwork object"
+            )
+        if fmt.visualizer is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format visualizer object, "
+                "superseded by the client/state visualizer object"
+            )
+        for role in self._client.active_roles:
+            role.on_stream_request_format(fmt)
+
     async def _handle_goodbye(self, payload: ClientGoodbyePayload) -> None:
+        if payload.reason is None and payload.unrecognized_reason is None:
+            self._flag_noncompliance("sent client/goodbye with a null reason")
         if payload.unrecognized_reason is not None:
             self._logger.info(
                 "Received client/goodbye with unrecognized reason %r; not reconnecting",

@@ -111,7 +111,7 @@ def test_unhandled_binary_warns(caplog: Any) -> None:
     """A binary type no role claims warns once, then reports at debug, rather than crashing."""
     role = _RecordingRole(consume=False)
     conn = _bare_connection([role])
-    chunk = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 1) + b"x"
+    chunk = pack_binary_header_raw(200, 1) + b"x"
     with (
         caplog.at_level(logging.DEBUG),
         patch("aiosendspin.server.connection.time.monotonic", return_value=5.0),
@@ -125,7 +125,18 @@ def test_unhandled_binary_warns(caplog: Any) -> None:
     assert "3 message(s)" in reports[1].getMessage()
 
 
-@pytest.mark.parametrize("message_type", [24, 100, 191, 200])
+def test_server_to_client_binary_type_is_flagged() -> None:
+    """A binary type only the server sends is flagged."""
+    conn = _bare_connection([_RecordingRole()])
+    conn._route_inbound_binary(  # noqa: SLF001
+        pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 1) + b"x"
+    )
+    assert conn._client.noncompliance == [  # type: ignore[union-attr]  # noqa: SLF001
+        "sent a server-to-client binary message type"
+    ]
+
+
+@pytest.mark.parametrize("message_type", [5, 13, 22, 24, 100, 191, 200])
 def test_unimplemented_binary_type_is_ignored(message_type: int) -> None:
     """A binary type the server does not implement is ignored, even for a strict server."""
     role = _RecordingRole()
@@ -135,12 +146,21 @@ def test_unimplemented_binary_type_is_ignored(message_type: int) -> None:
     assert conn._client.noncompliance == []  # type: ignore[union-attr]  # noqa: SLF001
 
 
-def test_short_binary_payload_is_dropped_safely(caplog: Any) -> None:
-    """A payload shorter than the 9-byte header is dropped with a warning, no exception."""
-    conn = _bare_connection([_RecordingRole()])
-    with caplog.at_level(logging.WARNING):
-        conn._route_inbound_binary(b"\x0c\x00")  # noqa: SLF001
-    assert any("shorter than header" in r.message.lower() for r in caplog.records)
+@pytest.mark.parametrize(
+    ("frame", "noncompliance"),
+    [
+        (b"\x0c\x00", ["sent a source audio chunk shorter than its header"]),
+        (b"\xc8\x00", []),
+        (b"", []),
+    ],
+)
+def test_binary_shorter_than_header_is_dropped(frame: bytes, noncompliance: list[str]) -> None:
+    """A frame shorter than the header is dropped, flagged only for a source audio chunk."""
+    role = _RecordingRole()
+    conn = _bare_connection([role], input_open=True)
+    conn._route_inbound_binary(frame)  # noqa: SLF001
+    assert role.binary == []
+    assert conn._client.noncompliance == noncompliance  # type: ignore[union-attr]  # noqa: SLF001
 
 
 async def test_client_stream_start_and_end_dispatched_to_roles() -> None:
