@@ -2568,7 +2568,7 @@ class SendspinConnection:
                     )
                     break
                 for reason in deviations:
-                    self._flag_noncompliance(f"{self._peek_message_type(text)} {reason}")
+                    self._flag_noncompliance(f"{_peek_message_type(text)} {reason}")
                 await self._handle_message(message, timestamp_us)
             else:
                 # Loop exited normally (iterator exhausted) - connection closed
