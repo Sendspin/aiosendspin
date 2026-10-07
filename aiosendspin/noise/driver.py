@@ -17,6 +17,7 @@ from noise.exceptions import (
 )
 
 from aiosendspin.models.types import ServerErrorReason
+from aiosendspin.util import _peek_message_type
 
 from .constants import (
     ERROR_TYPE_SERVER,
@@ -381,16 +382,6 @@ async def _receive_handshake_discarding_application(
                     return text
     except TimeoutError as exc:
         raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
-
-
-def _peek_message_type(text: str) -> str | None:
-    """Return the envelope ``type`` of a JSON message, or ``None`` if it has none."""
-    try:
-        decoded = orjson.loads(text)
-    except orjson.JSONDecodeError:
-        return None
-    message_type = decoded.get("type") if isinstance(decoded, dict) else None
-    return message_type if isinstance(message_type, str) else None
 
 
 async def _exchange_as_initiator(
