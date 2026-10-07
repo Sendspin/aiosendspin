@@ -29,6 +29,9 @@ from aiosendspin.server.roles.player.v1 import PlayerPersistentState, PlayerV1Ro
 PCM_48K = SupportedAudioFormat(codec=AudioCodec.PCM, sample_rate=48000, bit_depth=16, channels=2)
 FLAC_48K = SupportedAudioFormat(codec=AudioCodec.FLAC, sample_rate=48000, bit_depth=16, channels=2)
 OPUS_48K = SupportedAudioFormat(codec=AudioCodec.OPUS, sample_rate=48000, bit_depth=16, channels=2)
+OPUS_48K_24 = SupportedAudioFormat(
+    codec=AudioCodec.OPUS, sample_rate=48000, bit_depth=24, channels=2
+)
 
 
 class _FakeConnection:
@@ -95,7 +98,17 @@ def _spy_format_changes(client: SendspinClient, monkeypatch: pytest.MonkeyPatch)
 
 
 def _state(fmt: SupportedAudioFormat | None) -> ClientStatePayload:
-    return ClientStatePayload(available=True, player=PlayerStatePayload(volume=50, format=fmt))
+    return ClientStatePayload(
+        available=True,
+        player=PlayerStatePayload(
+            volume=50,
+            output_delay_ms=0,
+            required_lead_time_ms=100,
+            min_buffer_ms=200,
+            supported_commands=[],
+            format=fmt,
+        ),
+    )
 
 
 def _transformer(role: PlayerV1Role) -> object:
@@ -300,6 +313,39 @@ def test_opus_format_ignores_bit_depth(mock_server: MagicMock) -> None:
     req = role.get_audio_requirements()
     assert req is not None
     assert req.bit_depth == 16
+
+
+def test_opus_declared_at_24_bit_shares_16_bit_encoder(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opus declared at 24 bits is selected and shares the 16-bit opus encoder."""
+    monkeypatch.setattr("aiosendspin.server.roles.player.capabilities.opus_available", lambda: True)
+    client, role, _ = _make_player(mock_server, [OPUS_48K_24, PCM_48K])
+
+    req = role.get_audio_requirements()
+    assert req is not None
+    assert req.bit_depth == 16
+    assert req.transformer is client.group.transformer_pool.get_or_create(
+        OpusEncoder,
+        channel_id=req.channel_id.int,
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=req.frame_duration_us,
+    )
+
+
+def test_operator_opus_override_ignores_bit_depth(
+    mock_server: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator opus override matches the declared opus entry whatever its bit_depth."""
+    monkeypatch.setattr("aiosendspin.server.roles.player.capabilities.opus_available", lambda: True)
+    _, role, _ = _make_player(mock_server, [PCM_48K, OPUS_48K_24])
+
+    assert role.set_preferred_format(
+        AudioFormat(sample_rate=48000, bit_depth=16, channels=2), AudioCodec.OPUS
+    )
+    assert isinstance(_transformer(role), OpusEncoder)
 
 
 def test_unencodable_format_falls_back_to_priority(mock_server: MagicMock) -> None:

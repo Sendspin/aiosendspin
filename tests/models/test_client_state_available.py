@@ -5,6 +5,8 @@ enum, which the server normalizes to `available` at deserialization time. The
 payload itself has no `state` field.
 """
 
+# DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+
 from __future__ import annotations
 
 import pytest

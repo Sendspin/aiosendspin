@@ -1468,6 +1468,7 @@ async def test_server_command_out_of_range_output_delay_is_clamped() -> None:
     assert client.output_delay_us == 5_000_000
 
 
+# DEPRECATED(spec-pr-164): remove in aiosendspin <version>
 async def test_server_command_pre_rename_delay_applies_and_notifies() -> None:
     """A pre-rename server/command set_static_delay updates the offset and fires the callback."""
     client = make_sdk_client(

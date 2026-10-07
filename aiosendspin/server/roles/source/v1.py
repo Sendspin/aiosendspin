@@ -14,6 +14,7 @@ from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
 from aiosendspin.models.source import SourceCommandServerPayload
 from aiosendspin.models.types import AudioCodec, BinaryMessageType
 from aiosendspin.server.roles.base import Role
+from aiosendspin.util import WARN_INTERVAL_S
 
 from .events import (
     SourceSignalChangedEvent,
@@ -30,8 +31,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DECODE_WARN_INTERVAL_S = 30.0
-
 
 class SourceV1Role(Role):
     """Per-connection role that decodes audio streamed up by a source client."""
@@ -45,8 +44,6 @@ class SourceV1Role(Role):
         self._decoder: object | None = None
         self._pcm_frame_bytes: int | None = None
         self._pcm_max_chunk_bytes = 0
-        self._decode_failures = 0
-        self._decode_failure_logged_s: float | None = None
         self._stream: SourceStream | None = None
         self._stream_active = False
         # The source object of the client/state this activation requires.
@@ -58,6 +55,8 @@ class SourceV1Role(Role):
         # Stamp decoder output produced during flush.
         self._last_timestamp_us = 0
         self._signal: SignalState | None = None
+        self._decode_error_count = 0
+        self._last_decode_error_log_s: float | None = None
 
     @property
     def role_id(self) -> str:
@@ -170,14 +169,13 @@ class SourceV1Role(Role):
             return
         if source.codec is not AudioCodec.OPUS and not 1 <= source.bit_depth <= 32:
             self._client.flag_noncompliance(
-                f"client-stream/start announced unsupported bit_depth {source.bit_depth}"
+                "client-stream/start announced an unsupported bit_depth"
             )
             return
         if source.codec is AudioCodec.PCM and source.bit_depth % 8:
             # The PCM wire convention only packs whole-byte samples.
             self._client.flag_noncompliance(
-                f"client-stream/start announced pcm bit_depth {source.bit_depth}, "
-                "which is not a whole number of bytes"
+                "client-stream/start announced a pcm bit_depth that is not a whole number of bytes"
             )
             return
         if source.sample_rate <= 0:
@@ -267,21 +265,19 @@ class SourceV1Role(Role):
                 self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
-        except Exception:
-            self._decode_failures += 1
+        except Exception as err:
+            self._decode_error_count += 1
             now_s = time.monotonic()
-            last_s = self._decode_failure_logged_s
-            if last_s is not None and now_s - last_s < _DECODE_WARN_INTERVAL_S:
-                return
-            if last_s is None:
-                logger.warning("Failed to decode source audio chunk", exc_info=True)
-            else:
+            last_log_s = self._last_decode_error_log_s
+            if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
                 logger.warning(
-                    "Failed to decode %d source audio chunks since the last warning",
-                    self._decode_failures,
+                    "Failed to decode %s source audio chunk(s) since last report: %s",
+                    self._decode_error_count,
+                    err,
+                    exc_info=self._decode_error_count == 1,
                 )
-            self._decode_failures = 0
-            self._decode_failure_logged_s = now_s
+                self._decode_error_count = 0
+                self._last_decode_error_log_s = now_s
             return
         # Keep the flush-tail stamp monotonic even if a chunk arrives out of order.
         self._last_timestamp_us = max(self._last_timestamp_us, timestamp_us)
@@ -306,6 +302,8 @@ class SourceV1Role(Role):
         self._decoder = None
         self._stream_active = False
         self._last_timestamp_us = 0
+        self._decode_error_count = 0
+        self._last_decode_error_log_s = None
         if was_active:
             self._client._signal_event(SourceStreamEndedEvent())  # noqa: SLF001
 

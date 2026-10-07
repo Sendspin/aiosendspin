@@ -201,6 +201,18 @@ def _filter_descriptor_values(
     return filtered
 
 
+def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
+    """Whether a recognized method's descriptor has the wrong shape, before value filtering."""
+    locations = descriptor.get("locations")
+    if locations is not None and not isinstance(locations, list):
+        return True
+    if method != PairMethod.DYNAMIC_PAIRING_CODE.value:
+        return False
+    return descriptor.get("formats") == [] or not all(
+        isinstance(descriptor.get(key), list) for key in ("formats", "out_channels")
+    )
+
+
 @dataclass
 class PairMethodDescriptor(SendspinModel):
     """A secret-based pairing method a client offers in client/hello."""
@@ -255,8 +267,8 @@ class SupportedPairMethods(SendspinModel):
     for the server to log. Not part of the wire schema (omitted when None)."""
     offered_both_pairing_code_methods: bool | None = None
     """Whether the client offered both pairing-code methods, recorded for the server to log.
-    The static one is dropped in favor of a usable dynamic one. Not part of the wire schema
-    (omitted when None)."""
+    The static one is dropped in favor of a dynamic one offering digits. Not part of the wire
+    schema (omitted when None)."""
 
     class Config(SendspinConfig):
         """Omit methods the client does not offer."""
@@ -265,7 +277,7 @@ class SupportedPairMethods(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Drop unrecognized methods and values, preferring dynamic over static pairing code."""
+        """Drop unrecognized methods and values, preferring dynamic code with digits over static."""
         normalized = {k: v for k, v in d.items() if k in _PAIR_METHOD_VALUE_FILTERS}
         ignored = sorted(set(d) - set(normalized) - _PAIR_METHOD_SIDECARS)
         for key, value_filters in _PAIR_METHOD_VALUE_FILTERS.items():
@@ -281,9 +293,13 @@ class SupportedPairMethods(SendspinModel):
         unusable = isinstance(dynamic, dict) and not (
             dynamic.get("formats") and dynamic.get("out_channels")
         )
+        # Every server can enter a digits code, but only some can scan a QR code.
+        offers_digits = isinstance(dynamic, dict) and PairingCodeFormat.DIGITS.value in (
+            dynamic.get("formats") or ()
+        )
         if unusable:
             del normalized[PairMethod.DYNAMIC_PAIRING_CODE.value]
-        elif both:
+        elif both and offers_digits:
             del normalized[PairMethod.STATIC_PAIRING_CODE.value]
         # Always overwrite so a client cannot spoof the records via the wire.
         normalized["ignored_methods"] = ignored or None
@@ -362,6 +378,12 @@ class ClientHelloPayload(SendspinModel):
     legacy_pin_methods_used: bool | None = None
     """Whether supported_pair_methods named the pre-rename PIN methods, recorded for the
     server to pair over the PIN wire. Not part of the wire schema (omitted when None)."""
+    malformed_pair_method_descriptor: bool | None = None
+    """Whether a recognized pair method's descriptor had the wrong shape, recorded for the
+    server to flag. Not part of the wire schema (omitted when None)."""
+    unpaired_access_incomplete: bool | None = None
+    """Whether unpaired_access or its enabled field was omitted, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -401,6 +423,18 @@ class ClientHelloPayload(SendspinModel):
         normalized["trust_level_used"] = "trust_level" in normalized or None
         # Always overwrite so a client cannot spoof the record via the wire.
         normalized["legacy_support_keys_used"] = legacy_keys or None
+        normalized["malformed_pair_method_descriptor"] = (
+            isinstance(pair_methods, dict)
+            and any(
+                _is_malformed_descriptor(method, descriptor)
+                for method, descriptor in pair_methods.items()
+                if method in _PAIR_METHOD_VALUE_FILTERS and isinstance(descriptor, dict)
+            )
+        ) or None
+        unpaired_access = normalized.get("unpaired_access")
+        normalized["unpaired_access_incomplete"] = (
+            not isinstance(unpaired_access, dict) or "enabled" not in unpaired_access
+        ) or None
         return normalized
 
     def __post_init__(self) -> None:
@@ -505,6 +539,7 @@ class ClientStatePayload(SendspinModel):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
     legacy_state_used: bool | None = None
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
@@ -524,6 +559,7 @@ class ClientStatePayload(SendspinModel):
         Application-specific role objects are nested under `application_objects`.
         """
         d = collect_application_objects(d)
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         legacy_state = "state" in d
         if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"

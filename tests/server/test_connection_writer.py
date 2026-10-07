@@ -7,7 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Never
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1016,7 +1016,10 @@ def test_send_binary_warns_when_chunk_already_past_deadline(
         clock = ManualClock(now_us_value=10_000_000)
         conn = _make_connection_with_droppable_client(clock, loop)
 
-        with caplog.at_level(logging.WARNING):
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("aiosendspin.server.connection.time.monotonic", return_value=5.0),
+        ):
             conn.send_binary(
                 b"audio",
                 role="player",
@@ -1134,7 +1137,10 @@ def test_late_binary_warning_is_throttled_across_a_burst(
         role._stream_start_time_us = 0  # noqa: SLF001
         handling = BinaryHandling(drop_late=True, grace_period_us=2_000_000)
 
-        with caplog.at_level(logging.WARNING):
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("aiosendspin.server.connection.time.monotonic", return_value=5.0),
+        ):
             for _ in range(5):
                 entry = _RoleQueueEntry(epoch=0, timestamp_us=9_000_000, enqueued_at_us=8_500_000)
                 assert conn._check_late_binary(handling, role, entry) is True  # noqa: SLF001
@@ -1175,6 +1181,33 @@ def test_late_binary_diagnostics_use_the_effective_play_time(
         assert "late_by_us=1000000" in caplog.text
     finally:
         loop.close()
+
+
+@pytest.mark.asyncio
+async def test_first_slow_send_warns_soon_after_boot(caplog: pytest.LogCaptureFixture) -> None:
+    """A stalled write warns even when the monotonic clock is still under the warn interval."""
+    now_s = [5.0]
+
+    async def _stalled_send(_payload: bytes) -> None:
+        now_s[0] += 0.6
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_bytes = AsyncMock(side_effect=_stalled_send)
+    conn = SendspinConnection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=0)),
+        wsock_client=wsock,
+    )
+    binary = _BinaryData(data=b"x", message_type=BinaryMessageType.AUDIO_CHUNK.value)
+    entry = _RoleQueueEntry(epoch=0, timestamp_us=0, binary=binary)
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("aiosendspin.server.connection.time.monotonic", side_effect=lambda: now_s[0]),
+    ):
+        await conn._send_binary_data(wsock, "player", entry, None)  # noqa: SLF001
+
+    assert "Slow send_bytes" in caplog.text
 
 
 async def _start_recording_connection(

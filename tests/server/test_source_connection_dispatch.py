@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -17,6 +18,7 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import AudioCodec, BinaryMessageType, ClientMessage
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.util import WARN_INTERVAL_S
 
 
 class _RecordingRole:
@@ -66,6 +68,8 @@ def _bare_connection(
     conn._logger = logging.getLogger("test.source.dispatch")  # noqa: SLF001
     conn._source_starts_pending = starts  # noqa: SLF001
     conn._source_input_open = input_open  # noqa: SLF001
+    conn._unhandled_binary_count = 0  # noqa: SLF001
+    conn._last_unhandled_binary_log_s = None  # noqa: SLF001
     return conn
 
 
@@ -104,14 +108,21 @@ def test_inbound_binary_stops_at_first_consuming_role() -> None:
 
 
 def test_unhandled_binary_warns(caplog: Any) -> None:
-    """A binary type no role claims is logged as unhandled rather than crashing."""
+    """A binary type no role claims warns once, then reports at debug, rather than crashing."""
     role = _RecordingRole(consume=False)
     conn = _bare_connection([role])
-    with caplog.at_level(logging.WARNING):
-        conn._route_inbound_binary(  # noqa: SLF001
-            pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 1) + b"x"
-        )
-    assert any("unhandled binary" in r.message.lower() for r in caplog.records)
+    chunk = pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, 1) + b"x"
+    with (
+        caplog.at_level(logging.DEBUG),
+        patch("aiosendspin.server.connection.time.monotonic", return_value=5.0),
+    ):
+        for _ in range(3):
+            conn._route_inbound_binary(chunk)  # noqa: SLF001
+        conn._last_unhandled_binary_log_s -= WARN_INTERVAL_S  # noqa: SLF001
+        conn._route_inbound_binary(chunk)  # noqa: SLF001
+    reports = [r for r in caplog.records if "unhandled binary" in r.getMessage().lower()]
+    assert [r.levelno for r in reports] == [logging.WARNING, logging.DEBUG]
+    assert "3 message(s)" in reports[1].getMessage()
 
 
 @pytest.mark.parametrize("message_type", [24, 100, 191, 200])
@@ -142,6 +153,7 @@ async def test_client_stream_start_and_end_dispatched_to_roles() -> None:
     assert role.ends == 1
 
 
+# DEPRECATED(spec-pr-163): remove in aiosendspin <version>
 async def test_superseded_stream_message_names_are_dispatched_and_flagged() -> None:
     """A source on the pre-rename wire is still served, and the deviation recorded."""
     role = _RecordingRole()
@@ -174,6 +186,7 @@ async def test_current_stream_message_names_are_not_flagged() -> None:
     assert conn._client.noncompliance == []  # noqa: SLF001
 
 
+# DEPRECATED(spec-pr-163): remove in aiosendspin <version>
 async def test_superseded_stream_message_name_is_rejected_by_a_strict_server() -> None:
     """The flag is not cosmetic: a strict server drops a source on the old spelling."""
     conn = _bare_connection([_RecordingRole()], strict=True)

@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from aiosendspin.models.core import ServerActivateMessage, ServerActivatePayload
 from aiosendspin.models.types import Activity, PairAbortReason, PairingCodeFormat, PairMethod
 from aiosendspin.noise import pairing_code as pairing_code_mod
+from aiosendspin.noise.constants import SENTINEL_PSK
 from aiosendspin.noise.keys import b64url_decode, b64url_encode, generate_psk
 from aiosendspin.noise.models import (
     ClientPairAuthMessage,
@@ -880,6 +881,31 @@ async def test_pairing_psk_finalize_with_both_psk_fields_is_protocol_error() -> 
     assert server_raw.sent == []
 
 
+@pytest.mark.parametrize("reused", ["sentinel", "pairing"])
+async def test_pairing_psk_finalize_reusing_a_known_psk_is_protocol_error(reused: str) -> None:
+    """A finalize delivering the Sentinel or pairing PSK as the long-term PSK persists nothing."""
+    client_ews, server_ews, _client_raw, server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    pairing_psk = generate_psk()
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    await client_ews.send_str(_psk_finalize(SENTINEL_PSK if reused == "sentinel" else pairing_psk))
+    with pytest.raises(PairingError, match="reused the Sentinel or pairing PSK") as excinfo:
+        await run_pairing_psk_server(
+            server_ews,
+            pairing_index=1,
+            client_id="client-A",
+            store=server_store,
+            pairing_psk=pairing_psk,
+        )
+
+    assert not isinstance(excinfo.value, PairingAbortError)
+    assert await server_store.record_by_client_id("client-A") is None
+    assert server_raw.sent == []
+
+
 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
 async def test_pairing_psk_server_accepts_a_legacy_finalize_first_attempt() -> None:
     """With ``on_legacy_finalize`` set, a finalize before any init is this attempt's."""
@@ -1336,6 +1362,7 @@ async def test_dynamic_pairing_code_aborts_at_round_limit_and_persists_nothing()
         pairing_code = await shown.get()
         return ("2" if pairing_code[0] == "1" else "1") + pairing_code[1:]
 
+    reasons: list[str] = []
     with pytest.raises(PairingAbortError) as excinfo:
         await asyncio.gather(
             run_dynamic_pairing_code_client(
@@ -1355,10 +1382,12 @@ async def test_dynamic_pairing_code_aborts_at_round_limit_and_persists_nothing()
                 pairing_code_provider=provide_wrong,
                 client_id="client-A",
                 store=server_store,
+                on_noncompliance=reasons.append,
             ),
         )
 
     assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
+    assert reasons == []
     assert len(emitted) == PAIRING_ROUND_LIMIT
     assert len(set(emitted)) == 1  # the code is stable across rounds
     assert client_rec.types().count("client/pair-retry") == PAIRING_ROUND_LIMIT - 1
@@ -1366,6 +1395,56 @@ async def test_dynamic_pairing_code_aborts_at_round_limit_and_persists_nothing()
     assert await client_store.pairing_round_count() == PAIRING_ROUND_LIMIT
     assert list(await client_store.list_records()) == []
     assert await server_store.record_by_client_id("client-A") is None
+
+
+async def test_dynamic_pairing_code_server_flags_a_retry_past_the_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the retry after the limit-th failed round is reported."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+
+    async def never_reached() -> bool:
+        return False
+
+    monkeypatch.setattr(client_store, "is_pairing_round_limit_reached", never_reached)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    rounds = 0
+
+    async def emit(pairing_code: str) -> None:
+        shown.put_nowait(pairing_code)
+
+    async def provide_right_after_the_limit() -> str:
+        nonlocal rounds
+        rounds += 1
+        pairing_code = await shown.get()
+        if rounds > PAIRING_ROUND_LIMIT:
+            return pairing_code
+        return ("2" if pairing_code[0] == "1" else "1") + pairing_code[1:]
+
+    reasons: list[str] = []
+    await asyncio.gather(
+        run_dynamic_pairing_code_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_emitter=emit,
+            server_id="server-X",
+            store=client_store,
+        ),
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_provider=provide_right_after_the_limit,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            on_noncompliance=reasons.append,
+        ),
+    )
+    assert reasons == ["sent client/pair-retry past the pairing round limit"]
 
 
 async def test_dynamic_pairing_code_client_aborts_early_when_rounds_carry_over() -> None:

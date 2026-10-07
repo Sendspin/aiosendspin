@@ -17,6 +17,11 @@ _SUPPORTS_EAGER_START = sys.version_info >= (3, 12)
 
 TASKS: set[asyncio.Task[Any]] = set()
 
+# Quiet period between repeats of a throttled warning. Each warning reports how
+# many occurrences it stands for, so a sustained fault keeps its magnitude visible
+# at default level without emitting one line per event.
+WARN_INTERVAL_S = 30.0
+
 # APIs whose deprecation this process has already reported.
 _WARNED_DEPRECATIONS: set[str] = set()
 

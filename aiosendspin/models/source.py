@@ -118,6 +118,7 @@ class ClientStreamStartMessage(ClientMessage):
     """Message sent by a source client to announce the active input stream format."""
 
     payload: ClientStreamStartPayload
+    # DEPRECATED(spec-pr-163): remove in aiosendspin <version>
     type: Literal["client-stream/start", "client_stream/start"] = "client-stream/start"
 
 
@@ -126,4 +127,5 @@ class ClientStreamStartMessage(ClientMessage):
 class ClientStreamEndMessage(ClientMessage):
     """Message sent by a source client to end the current input stream."""
 
+    # DEPRECATED(spec-pr-163): remove in aiosendspin <version>
     type: Literal["client-stream/end", "client_stream/end"] = "client-stream/end"
