@@ -906,6 +906,32 @@ async def test_pairing_psk_finalize_reusing_a_known_psk_is_protocol_error(reused
     assert server_raw.sent == []
 
 
+@pytest.mark.parametrize("long_term_psk", ["A" * 43 + "=", "A" * 42 + "B"])
+async def test_pairing_psk_server_flags_a_non_canonical_field(long_term_psk: str) -> None:
+    """A padded field or one with non-zero trailing bits pairs and is reported."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    reasons: list[str] = []
+
+    await client_ews.send_str(
+        ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=1)).to_json()
+    )
+    await client_ews.send_str(
+        ClientPairFinalizeMessage(
+            payload=ClientPairFinalizePayload(long_term_psk=long_term_psk)
+        ).to_json()
+    )
+    record = await run_pairing_psk_server(
+        server_ews,
+        pairing_index=1,
+        client_id="client-A",
+        store=InMemoryServerPairingStore(),
+        on_noncompliance=reasons.append,
+    )
+
+    assert record.psk == bytes(32)
+    assert reasons == ["long_term_psk is not canonical base64url"]
+
+
 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
 async def test_pairing_psk_server_accepts_a_legacy_finalize_first_attempt() -> None:
     """With ``on_legacy_finalize`` set, a finalize before any init is this attempt's."""
@@ -1278,6 +1304,89 @@ class _RecordingWS:
 
     def types(self) -> list[str]:
         return [json.loads(frame)["type"] for frame in self.sent]
+
+
+class _PaddingWS(_RecordingWS):
+    """Pads one base64url field in the pairing messages sent through it."""
+
+    def __init__(self, ws: EncryptedWebSocket, field: str) -> None:
+        super().__init__(ws)
+        self._field = field
+
+    async def send_str(self, data: str) -> None:
+        frame = json.loads(data)
+        if self._field in frame.get("payload", {}):
+            frame["payload"][self._field] += "===="
+            data = json.dumps(frame)
+        await super().send_str(data)
+
+
+@pytest.mark.parametrize(
+    "field", ["commit_B", "pake_msg_2", "client_kc", "wrapped_nonce_B", "wrapped_psk"]
+)
+async def test_dynamic_pairing_code_server_flags_a_non_canonical_field(field: str) -> None:
+    """A padded field pairs and is reported."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    reasons: list[str] = []
+
+    async def emit(pairing_code: str) -> None:
+        shown.put_nowait(pairing_code)
+
+    await asyncio.gather(
+        run_dynamic_pairing_code_client(
+            _PaddingWS(client_ews, field),  # type: ignore[arg-type]
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_emitter=emit,
+            server_id="server-X",
+            store=InMemoryClientPairingStore(),
+        ),
+        run_dynamic_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_format=PairingCodeFormat.DIGITS,
+            pairing_code_provider=shown.get,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            on_noncompliance=reasons.append,
+        ),
+    )
+
+    assert reasons == [f"{field} is not canonical base64url"]
+
+
+async def test_static_pairing_code_server_flags_a_non_canonical_client_kc() -> None:
+    """A padded ``client_kc`` pairs and is reported."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    reasons: list[str] = []
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    await asyncio.gather(
+        run_static_pairing_code_client(
+            _PaddingWS(client_ews, "client_kc"),  # type: ignore[arg-type]
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            static_pairing_code=_STATIC_PAIRING_CODE,
+            server_id="server-X",
+            store=InMemoryClientPairingStore(),
+        ),
+        run_static_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=0,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            on_noncompliance=reasons.append,
+        ),
+    )
+
+    assert reasons == ["client_kc is not canonical base64url"]
 
 
 async def test_dynamic_pairing_code_retries_a_wrong_round() -> None:
