@@ -157,7 +157,10 @@ def test_superseded_stream_message_names_still_parse() -> None:
 
 def test_stream_messages_are_emitted_under_the_current_names() -> None:
     """What this client sends is the spelling the spec now uses."""
-    assert orjson.loads(ClientStreamEndMessage().to_json())["type"] == "client-stream/end"
+    assert orjson.loads(ClientStreamEndMessage().to_json()) == {
+        "type": "client-stream/end",
+        "payload": {},
+    }
     payload = ClientStreamStartPayload(
         source=ClientStreamStartSource(
             codec=AudioCodec.PCM, sample_rate=48000, bit_depth=16, channels=2

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .base import SendspinConfig, SendspinModel
@@ -124,8 +124,30 @@ class ClientStreamStartMessage(ClientMessage):
 
 # Client -> Server: client-stream/end
 @dataclass
+class ClientStreamEndPayload(SendspinModel):
+    """Empty ``client-stream/end`` payload."""
+
+
+@dataclass
 class ClientStreamEndMessage(ClientMessage):
     """Message sent by a source client to end the current input stream."""
 
+    payload: ClientStreamEndPayload = field(default_factory=ClientStreamEndPayload)
     # DEPRECATED(spec-pr-163): remove in aiosendspin <version>
     type: Literal["client-stream/end", "client_stream/end"] = "client-stream/end"
+    payload_missing: bool | None = None
+    """Set when the message carried no payload object, recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a payload that is not an object, recording that it was missing."""
+        payload_missing = not isinstance(d.get("payload"), dict)
+        normalized = {k: v for k, v in d.items() if k != "payload"} if payload_missing else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return normalized | {"payload_missing": payload_missing or None}
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True

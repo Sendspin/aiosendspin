@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from typing import Any
 from unittest.mock import patch
 
@@ -182,7 +183,7 @@ async def test_superseded_stream_message_names_are_dispatched_and_flagged() -> N
         '{"type":"client_stream/start","payload":{"source":'
         '{"codec":"pcm","sample_rate":48000,"bit_depth":16,"channels":2}}}'
     )
-    end = ClientMessage.from_json('{"type":"client_stream/end"}')
+    end = ClientMessage.from_json('{"type":"client_stream/end","payload":{}}')
 
     await conn._handle_message(start, timestamp_us=0)  # noqa: SLF001
     await conn._handle_message(end, timestamp_us=0)  # noqa: SLF001
@@ -206,6 +207,25 @@ async def test_current_stream_message_names_are_not_flagged() -> None:
     assert conn._client.noncompliance == []  # noqa: SLF001
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    "raw", ['{"type":"client-stream/end"}', '{"type":"client-stream/end","payload":5}']
+)
+async def test_stream_end_without_payload_object_is_flagged_before_ending(
+    raw: str, *, strict: bool
+) -> None:
+    """A client-stream/end without a payload object is flagged, then handled unless strict."""
+    role = _RecordingRole()
+    conn = _bare_connection([role], strict=strict, input_open=True)
+
+    with pytest.raises(ClientComplianceError) if strict else nullcontext():
+        await conn._handle_message(ClientMessage.from_json(raw), timestamp_us=0)  # noqa: SLF001
+
+    assert conn._client.noncompliance == ["sent a message without a payload object"]  # noqa: SLF001
+    assert role.ends == (0 if strict else 1)
+    assert conn._source_input_open is strict  # noqa: SLF001
+
+
 # DEPRECATED(spec-pr-163): remove in aiosendspin <version>
 async def test_superseded_stream_message_name_is_rejected_by_a_strict_server() -> None:
     """The flag is not cosmetic: a strict server drops a source on the old spelling."""
@@ -213,7 +233,7 @@ async def test_superseded_stream_message_name_is_rejected_by_a_strict_server() -
 
     with pytest.raises(ClientComplianceError):
         await conn._handle_message(  # noqa: SLF001
-            ClientMessage.from_json('{"type":"client_stream/end"}'), timestamp_us=0
+            ClientMessage.from_json('{"type":"client_stream/end","payload":{}}'), timestamp_us=0
         )
 
 
