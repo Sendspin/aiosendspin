@@ -34,6 +34,13 @@ _PCM_START = ClientStreamStartMessage(
         )
     )
 )
+_INVALID_START = ClientStreamStartMessage(
+    payload=ClientStreamStartPayload(
+        source=ClientStreamStartSource(
+            codec=AudioCodec.PCM, channels=0, sample_rate=48000, bit_depth=16
+        )
+    )
+)
 _CHUNK = pack_binary_header_raw(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 1) + bytes(4)
 
 
@@ -68,8 +75,8 @@ class _Source:
     def strict(self) -> None:
         self.conn._server.allow_noncompliant_clients = False  # type: ignore[misc]  # noqa: SLF001
 
-    async def stream_start(self) -> None:
-        await self.conn._handle_message(_PCM_START, timestamp_us=0)  # noqa: SLF001
+    async def stream_start(self, message: ClientStreamStartMessage = _PCM_START) -> None:
+        await self.conn._handle_message(message, timestamp_us=0)  # noqa: SLF001
 
     async def stream_end(self) -> None:
         await self.conn._handle_message(ClientStreamEndMessage(), timestamp_us=0)  # noqa: SLF001
@@ -154,6 +161,31 @@ async def test_start_without_authorization_after_role_removal_is_rejected() -> N
 
     with pytest.raises(ClientComplianceError):
         await source.stream_start()
+
+
+@pytest.mark.asyncio
+async def test_invalid_start_after_role_removal_is_rejected() -> None:
+    """Role removal tolerates only otherwise valid in-flight starts."""
+    source = await _source()
+    source.role.request_start()
+    await source.activate([Roles.PLAYER.value])
+    source.strict()
+
+    with pytest.raises(ClientComplianceError):
+        await source.stream_start(_INVALID_START)
+
+
+@pytest.mark.asyncio
+async def test_invalid_replacing_start_is_rejected_before_the_stream_ends() -> None:
+    """A strict rejection of a replacing start leaves the open stream untouched."""
+    source = await _source()
+    source.role.request_start()
+    await source.stream_start()
+    source.strict()
+
+    with pytest.raises(ClientComplianceError):
+        await source.stream_start(_INVALID_START)
+    assert source.stream_events() == [SourceStreamStartedEvent]
 
 
 @pytest.mark.asyncio
