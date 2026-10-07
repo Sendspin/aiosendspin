@@ -126,7 +126,7 @@ class PlayerV1Role(Role):
         self._buffer_tracker = None
         # Initialize timing state for binary handling
         self._stream_start_time_us = None
-        self._last_late_log_s = 0.0
+        self._last_late_log_s = None
         self._late_skips_since_log = 0
         # Cached state reference (avoids repeated dict lookup + isinstance check)
         self._cached_state: PlayerPersistentState | None = None
@@ -530,6 +530,7 @@ class PlayerV1Role(Role):
         — a client that only declared the pre-rename 'set_static_delay' still
         receives a delay command it can act on.
         """
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if PlayerCommand.SET_OUTPUT_DELAY in self.state_supported_commands:
             command = PlayerCommand.SET_OUTPUT_DELAY
         elif PlayerCommand.SET_STATIC_DELAY in self.state_supported_commands:
@@ -655,18 +656,24 @@ class PlayerV1Role(Role):
     # ---- Client message handling ----
 
     def initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:
-        """Report required player fields missing from the initial client/state."""
-        player = payload.player
-        if player is None:
+        """Report a missing player object in the initial client/state."""
+        if payload.player is None:
             return ["has an active player role but no player state"]
+        return []
+
+    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report player fields in a client/state that violate the spec."""
+        state = payload.player
+        if state is None:
+            return []
         reasons: list[str] = []
         if (
-            player.output_delay_ms is None
-            or player.required_lead_time_ms is None
-            or player.min_buffer_ms is None
+            state.output_delay_ms is None
+            or state.required_lead_time_ms is None
+            or state.min_buffer_ms is None
         ):
             reasons.append("omitted required player timing fields")
-        commands = player.supported_commands
+        commands = state.supported_commands
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         # A pre-#177 hello's commands count as declared; that client is already flagged.
         legacy_commands = self._legacy_hello_commands()
@@ -675,26 +682,18 @@ class PlayerV1Role(Role):
         elif commands is None:
             reasons.append("omitted required supported_commands")
             commands = []
-        if PlayerCommand.VOLUME in commands and player.volume is None:
+        if PlayerCommand.VOLUME in commands and state.volume is None:
             reasons.append("omitted volume despite declaring the volume command")
-        if PlayerCommand.MUTE in commands and player.muted is None:
+        if PlayerCommand.MUTE in commands and state.muted is None:
             reasons.append("omitted muted despite declaring the mute command")
-        return reasons
-
-    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
-        """Report player fields in a client/state that violate the spec."""
-        state = payload.player
-        if state is None:
-            return []
-        reasons: list[str] = []
         if state.state is not None:
             reasons.append("used legacy player.state instead of top-level available")
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if state.legacy_delay_key:
             reasons.append(f"used the pre-rename '{state.legacy_delay_key}' key")
         if state.ignored_commands:
-            reasons.append(
-                "declared unrecognized supported_commands: " + ", ".join(state.ignored_commands)
-            )
+            reasons.append("declared unrecognized supported_commands")
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if state.supported_commands and PlayerCommand.SET_STATIC_DELAY in state.supported_commands:
             reasons.append("declared the pre-rename 'set_static_delay' command")
         if state.format is not None and not self._is_declared_format(state.format):

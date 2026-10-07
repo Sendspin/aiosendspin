@@ -72,6 +72,13 @@ if TYPE_CHECKING:
     from aiosendspin.noise.session import NoiseSession
 
 
+# Hello fields every encrypted client sends, so strict-server tests isolate their deviation.
+_PAIRING_HELLO_FIELDS = {
+    "supported_pair_methods": {"pairing_psk": {}},
+    "unpaired_access": {"enabled": False},
+}
+
+
 @dataclass
 class _MockServer:
     """Mock server for testing connection reason lookup."""
@@ -326,6 +333,7 @@ class TestEncryptedActivities:
                         "buffer_capacity": 100_000,
                         **support_extra,
                     },
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -426,6 +434,7 @@ class TestEncryptedActivities:
                     "name": "client-1",
                     "supported_roles": ["visualizer@v1"],
                     "visualizer@v1_support": {"buffer_capacity": 65_536, **support_extra},
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -492,6 +501,7 @@ class TestEncryptedActivities:
                         "types": ["loudness"],
                         "batch_max": 8,
                     },
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -549,6 +559,7 @@ class TestEncryptedActivities:
         assert "client-1" not in strict_server._clients  # noqa: SLF001
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @staticmethod
     def _pre_rename_artwork_hello() -> str:
         return orjson.dumps(
@@ -586,6 +597,7 @@ class TestEncryptedActivities:
         conn._transport = _FakeTransport([WSMessage(WSMsgType.TEXT, raw, "")])  # type: ignore[assignment]  # noqa: SLF001
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_pre_rename_artwork_hello_admitted_and_logged(
         self, mock_server: _MockServer, caplog: pytest.LogCaptureFixture
@@ -600,6 +612,7 @@ class TestEncryptedActivities:
         assert "'bmp' format" in caplog.text
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @pytest.mark.asyncio
     async def test_strict_server_rejects_pre_rename_artwork_hello(self) -> None:
         """Strict mode rejects the pre-rename artwork wire instead of tolerating it."""
@@ -654,7 +667,11 @@ class TestEncryptedActivities:
 
     @staticmethod
     def _artwork_hello(*, support: bool, player: bool = False) -> str:
-        payload: dict[str, object] = {"name": "client-1", "supported_roles": ["artwork@v1"]}
+        payload: dict[str, object] = {
+            "name": "client-1",
+            "supported_roles": ["artwork@v1"],
+            **_PAIRING_HELLO_FIELDS,
+        }
         if support:
             payload["artwork@v1_support"] = {
                 "channels": [{"source": "album", "format": "jpeg", "width": 300, "height": 300}]
@@ -723,46 +740,6 @@ class TestEncryptedActivities:
 
         assert await conn._exchange_hellos() is False  # noqa: SLF001
         assert "client-1" not in strict_server._clients  # noqa: SLF001
-
-    @pytest.mark.asyncio
-    async def test_oversized_artwork_state_ends_message_loop(
-        self, mock_server: _MockServer
-    ) -> None:
-        """A client/state artwork object with more than 4 channels closes the connection."""
-
-        class _AsyncIterTransport:
-            close_code = 1000
-
-            def __init__(self, msgs: list[WSMessage]) -> None:
-                self._msgs = msgs
-
-            def __aiter__(self) -> _AsyncIterTransport:
-                return self
-
-            async def __anext__(self) -> WSMessage:
-                if not self._msgs:
-                    raise StopAsyncIteration
-                return self._msgs.pop(0)
-
-        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
-        state = orjson.dumps(
-            {
-                "type": "client/state",
-                "payload": {"available": True, "artwork": {"channels": [{"source": "none"}] * 5}},
-            }
-        ).decode()
-        time = orjson.dumps({"type": "client/time", "payload": {"client_transmitted": 1}}).decode()
-        conn._transport = _AsyncIterTransport(  # type: ignore[assignment]  # noqa: SLF001
-            [WSMessage(WSMsgType.TEXT, state, ""), WSMessage(WSMsgType.TEXT, time, "")]
-        )
-        conn._handle_message = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
-        conn.disconnect = AsyncMock()  # type: ignore[method-assign]
-
-        await conn._run_message_loop()  # noqa: SLF001
-
-        conn._handle_message.assert_not_awaited()  # noqa: SLF001
-        await conn._cleanup_connection()  # noqa: SLF001
-        conn.disconnect.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_message_loop_hard_rejects_on_compliance_error(
@@ -852,6 +829,18 @@ class TestEncryptedActivities:
         self._prime_encrypted_hello(conn, orjson.dumps(hello).decode())
 
         assert await conn._exchange_hellos() is True  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_encrypted_hello_ignores_client_id(self, mock_server: _MockServer) -> None:
+        """An encrypted hello's client_id is not kept alongside the handshake identity."""
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+        hello = orjson.loads(_client_hello_frame("client-1").data)
+        hello["payload"]["client_id"] = "other"
+        self._prime_encrypted_hello(conn, orjson.dumps(hello).decode())
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert conn._client_info is not None  # noqa: SLF001
+        assert conn._client_info.client_id is None  # noqa: SLF001
 
     @pytest.mark.asyncio
     async def test_dialed_for_playback_declares_playback(self, mock_server: _MockServer) -> None:
@@ -1268,6 +1257,7 @@ class TestLegacyFragmentTolerance:
                     "name": "client-1",
                     "supported_roles": ["player@v1"],
                     "player@v1_support": support,
+                    **_PAIRING_HELLO_FIELDS,
                 },
             }
         ).decode()
@@ -1585,6 +1575,7 @@ class TestCustomRoleSupportParsing:
         assert msg.payload.activatable_roles == []
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     def test_deserialize_artwork_hello_accepts_pre_rename_dimensions(self) -> None:
         """media_width/media_height are rewritten to width/height and recorded."""
         raw = orjson.dumps(
@@ -2154,6 +2145,7 @@ class TestCustomRoleSupportParsing:
             (["foobar@v1"], ["foobar@v1"]),  # unknown family
             (["controller@v1", "metadata@v1"], []),  # implemented
             (["_custom@v1", "player@_draft"], []),  # custom family / version excluded
+            (["player", "@v1", "metadata@"], []),  # unversioned, flagged separately
             (["player@v1", "controller@v2", "foobar@v3"], ["controller@v2", "foobar@v3"]),
         ],
     )

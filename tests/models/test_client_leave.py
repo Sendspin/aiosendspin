@@ -9,9 +9,9 @@ from aiosendspin.models.core import ClientLeaveMessage
 from aiosendspin.models.types import ClientMessage
 
 
-def test_client_leave_serializes_without_payload() -> None:
-    """The wire form is the message type alone."""
-    assert orjson.loads(ClientLeaveMessage().to_json()) == {"type": "client/leave"}
+def test_client_leave_serializes_an_empty_payload() -> None:
+    """The wire form carries an empty payload object."""
+    assert orjson.loads(ClientLeaveMessage().to_json()) == {"type": "client/leave", "payload": {}}
 
 
 @pytest.mark.parametrize(

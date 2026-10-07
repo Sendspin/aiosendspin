@@ -12,6 +12,7 @@ from .base import SendspinConfig, SendspinModel
 
 # Wire names the spec has replaced, kept readable so an existing client still parses.
 SUPERSEDED_NAME_BY_CURRENT: Final[dict[str, str]] = {
+    # DEPRECATED(spec-pr-163): remove in aiosendspin <version>
     "client-stream/start": "client_stream/start",
     "client-stream/end": "client_stream/end",
 }
@@ -191,6 +192,7 @@ class PlayerCommand(Enum):
     VOLUME = "volume"
     MUTE = "mute"
     SET_OUTPUT_DELAY = "set_output_delay"
+    # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
     # Removed from the spec, still served to clients that declare it.
     SET_STATIC_DELAY = "set_static_delay"
 
@@ -218,6 +220,7 @@ class MediaCommand(Enum):
 class PictureFormat(Enum):
     """Supported image formats for artwork/media art."""
 
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     # Removed from the spec, still served to clients that declare it.
     BMP = "bmp"
     JPEG = "jpeg"

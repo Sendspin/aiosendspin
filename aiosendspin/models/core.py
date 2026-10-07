@@ -51,6 +51,7 @@ from .types import (
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
+    MediaCommand,
     PairingCodeFormat,
     PairMethod,
     PlaybackStateType,
@@ -199,6 +200,18 @@ def _filter_descriptor_values(
             else []
         )
     return filtered
+
+
+def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
+    """Whether a recognized method's descriptor has the wrong shape, before value filtering."""
+    locations = descriptor.get("locations")
+    if locations is not None and not isinstance(locations, list):
+        return True
+    if method != PairMethod.DYNAMIC_PAIRING_CODE.value:
+        return False
+    return descriptor.get("formats") == [] or not all(
+        isinstance(descriptor.get(key), list) for key in ("formats", "out_channels")
+    )
 
 
 @dataclass
@@ -366,6 +379,12 @@ class ClientHelloPayload(SendspinModel):
     legacy_pin_methods_used: bool | None = None
     """Whether supported_pair_methods named the pre-rename PIN methods, recorded for the
     server to pair over the PIN wire. Not part of the wire schema (omitted when None)."""
+    malformed_pair_method_descriptor: bool | None = None
+    """Whether a recognized pair method's descriptor had the wrong shape, recorded for the
+    server to flag. Not part of the wire schema (omitted when None)."""
+    unpaired_access_incomplete: bool | None = None
+    """Whether unpaired_access or its enabled field was omitted, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -405,6 +424,18 @@ class ClientHelloPayload(SendspinModel):
         normalized["trust_level_used"] = "trust_level" in normalized or None
         # Always overwrite so a client cannot spoof the record via the wire.
         normalized["legacy_support_keys_used"] = legacy_keys or None
+        normalized["malformed_pair_method_descriptor"] = (
+            isinstance(pair_methods, dict)
+            and any(
+                _is_malformed_descriptor(method, descriptor)
+                for method, descriptor in pair_methods.items()
+                if method in _PAIR_METHOD_VALUE_FILTERS and isinstance(descriptor, dict)
+            )
+        ) or None
+        unpaired_access = normalized.get("unpaired_access")
+        normalized["unpaired_access_incomplete"] = (
+            not isinstance(unpaired_access, dict) or "enabled" not in unpaired_access
+        ) or None
         return normalized
 
     def __post_init__(self) -> None:
@@ -509,6 +540,7 @@ class ClientStatePayload(SendspinModel):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
     legacy_state_used: bool | None = None
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
@@ -528,6 +560,7 @@ class ClientStatePayload(SendspinModel):
         Application-specific role objects are nested under `application_objects`.
         """
         d = collect_application_objects(d)
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         legacy_state = "state" in d
         if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"
@@ -562,11 +595,22 @@ class ClientCommandPayload(SendspinModel):
     """Controller commands - only if client has controller role."""
     application_objects: dict[str, Any] = field(default_factory=dict)
     """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+    unrecognized_command_used: bool | None = None
+    """Whether the controller object named an unrecognized command, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Nest application-specific role objects under `application_objects`."""
-        return collect_application_objects(d)
+        """Drop a controller object with an unrecognized command, and nest application objects."""
+        controller = d.get("controller")
+        unrecognized = isinstance(controller, dict) and is_unknown_enum_value(
+            controller.get("command"), MediaCommand
+        )
+        normalized = {k: v for k, v in d.items() if k != "controller"} if unrecognized else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return collect_application_objects(
+            normalized | {"unrecognized_command_used": unrecognized or None}
+        )
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -625,10 +669,32 @@ class ClientGoodbyeMessage(ClientMessage):
 
 # Client -> Server: client/leave
 @dataclass
+class ClientLeavePayload(SendspinModel):
+    """Empty ``client/leave`` payload."""
+
+
+@dataclass
 class ClientLeaveMessage(ClientMessage):
     """Message sent by the client to leave its current group."""
 
+    payload: ClientLeavePayload = field(default_factory=ClientLeavePayload)
     type: Literal["client/leave"] = "client/leave"
+    payload_missing: bool | None = None
+    """Set when the message carried no payload object, recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a payload that is not an object, recording that it was missing."""
+        payload_missing = not isinstance(d.get("payload"), dict)
+        normalized = {k: v for k, v in d.items() if k != "payload"} if payload_missing else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return normalized | {"payload_missing": payload_missing or None}
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 # Server -> Client: server/hello

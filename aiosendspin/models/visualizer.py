@@ -139,13 +139,21 @@ class VisualizerStatePayload(SendspinModel):
     """Maximum periodic frames per second per type."""
     spectrum: ClientHelloVisualizerSpectrum | None = None
     """Spectrum configuration, required when `types` includes `spectrum`."""
+    non_string_types_used: bool | None = None
+    """Whether `types` carried non-string entries, dropped during parse and recorded for
+    the role to flag. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, payload: dict[str, Any]) -> dict[str, Any]:
-        """Drop duplicate and unknown types, which a newer client may send."""
+        """Drop non-strings, plus the duplicate and unknown types a newer client may send."""
+        payload = dict(payload)
+        raw_types = payload.get("types")
         if "types" in payload:
-            payload = dict(payload)
-            payload["types"] = _supported_types(payload["types"])
+            payload["types"] = _supported_types(raw_types)
+        # Always overwrite so a client cannot spoof the record via the wire.
+        payload["non_string_types_used"] = (
+            isinstance(raw_types, list) and not all(isinstance(t, str) for t in raw_types)
+        ) or None
         return payload
 
     class Config(SendspinConfig):

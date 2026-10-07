@@ -187,11 +187,12 @@ class SendspinServer:
             pairing_store: Persistent store for pairing records and config.
             allow_unencrypted: Accept legacy unencrypted clients over the non-spec
                 transition-mode hello, off by default. Enable it only to bridge
-                pre-encryption clients during migration.
+                pre-encryption clients during migration. Has no effect when
+                ``allow_noncompliant_clients`` is False.
             allow_noncompliant_clients: Tolerate and log deviations from clients
                 built against pre-1.0 spec drafts when True, reject the client when
-                False. Tolerance is transitional and will be removed in a future
-                version.
+                False, unencrypted clients included. Tolerance is transitional and will
+                be removed in a future version.
             languages: BCP 47 tags in descending operator preference, sent to clients
                 in server/hello, or None to declare none.
             clock: Clock source, or None for the default monotonic clock.
@@ -218,6 +219,11 @@ class SendspinServer:
         self._pairing_store = pairing_store
         self._allow_unencrypted = allow_unencrypted
         self._allow_noncompliant_clients = allow_noncompliant_clients
+        if allow_unencrypted and not allow_noncompliant_clients:
+            logger.warning(
+                "allow_unencrypted has no effect: allow_noncompliant_clients=False "
+                "rejects unencrypted clients"
+            )
         self._clock: Clock = clock or RawMonotonicClock()
 
         self._clients: dict[str, SendspinClient] = {}

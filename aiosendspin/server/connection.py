@@ -33,12 +33,13 @@ from __future__ import annotations
 import asyncio
 import heapq
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, cast
 
 import orjson
@@ -74,6 +75,7 @@ from aiosendspin.models.core import (
     StreamClearMessage,
     StreamEndMessage,
     StreamRequestFormatMessage,
+    StreamRequestFormatPayload,
     StreamStartMessage,
 )
 from aiosendspin.models.management import (
@@ -102,11 +104,13 @@ from aiosendspin.models.player import (
 from aiosendspin.models.source import (
     ClientStreamEndMessage,
     ClientStreamStartMessage,
+    ClientStreamStartPayload,
     ServerHelloSourceSupport,
 )
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
     Activity,
+    AudioCodec,
     BinaryMessageType,
     ClientMessage,
     ConnectionReason,
@@ -123,9 +127,16 @@ from aiosendspin.models.types import (
     replacement_for,
     role_family,
 )
-from aiosendspin.noise.constants import SENTINEL_PSK
+from aiosendspin.noise.constants import (
+    ERROR_TYPE_SERVER,
+    HANDSHAKE_TYPE,
+    INIT_TYPE_CLIENT,
+    INIT_TYPE_SERVER,
+    SENTINEL_PSK,
+)
 from aiosendspin.noise.driver import (
     HandshakeAbortedError,
+    HandshakeNoncomplianceError,
     receive_text_frame,
     run_handshake_server,
     run_rehandshake_server,
@@ -146,7 +157,12 @@ from aiosendspin.noise.pairing import (
 )
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import create_task, finish_despite_cancel, warn_deprecated
+from aiosendspin.util import (
+    WARN_INTERVAL_S,
+    create_task,
+    finish_despite_cancel,
+    warn_deprecated,
+)
 
 from .client import SendspinClient
 from .compliance import ClientComplianceError, describe_client, noncompliance_subject
@@ -173,11 +189,6 @@ logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
 
-# Quiet period between repeats of a throttled warning. Each warning reports how
-# many occurrences it stands for, so a sustained fault keeps its magnitude visible
-# at default level without emitting one line per event.
-_WARN_INTERVAL_S = 30.0
-
 # Bound the wait for the writer to drain when quiescing.
 QUIESCE_TIMEOUT_S: float = 30.0
 
@@ -186,6 +197,18 @@ _CLIENT_STATE_TIMEOUT_S = 5.0
 
 # Distinct unknown message types warned about per connection; later ones log at debug.
 _MAX_WARNED_UNKNOWN_TYPES = 16
+
+_CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
+
+_MAC_ADDRESS_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
+
+_NO_PAYLOAD_OBJECT = "sent a message without a payload object"
+
+_SERVER_BINARY_TYPES: frozenset[int] = frozenset(
+    message_type.value
+    for message_type in BinaryMessageType
+    if message_type is not BinaryMessageType.SOURCE_AUDIO_CHUNK
+)
 
 _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
@@ -198,6 +221,28 @@ _PAIRING_MESSAGE_TYPES: frozenset[str] = frozenset(
         "pair/abort",
     }
 )
+
+
+def _message_tags(base: type) -> set[str]:
+    """Return the ``type`` values of every subclass of ``base``."""
+    tags: set[str] = set()
+    pending: list[type] = base.__subclasses__()
+    while pending:
+        variant = pending.pop()
+        pending.extend(variant.__subclasses__())
+        if isinstance(tag := variant.__dict__.get("type"), str):
+            tags.add(tag)
+    return tags
+
+
+@cache
+def _server_message_types() -> frozenset[str]:
+    """Return the message types only a server sends."""
+    sent = _message_tags(ServerMessage) | _message_tags(PairingMessage)
+    sent |= {INIT_TYPE_SERVER, ERROR_TYPE_SERVER}
+    client_sent = _message_tags(ClientMessage) | _PAIRING_MESSAGE_TYPES
+    return frozenset(sent - client_sent - {INIT_TYPE_CLIENT, HANDSHAKE_TYPE})
+
 
 _PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
     {
@@ -212,6 +257,11 @@ _PAIR_TRANSITION_TYPES: frozenset[str] = frozenset(
         "pair/abort",
     }
 )
+
+
+def _is_versioned_role_id(role_id: str) -> bool:
+    family, _, version = role_id.partition("@")
+    return bool(family and version)
 
 
 def _schedules_over_current(
@@ -298,9 +348,9 @@ class SendspinConnection:
         self._pairing_task: asyncio.Task[bool] | None = None
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_index = 0
+        self._activated_pairing_method: PairMethod | None = None
         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
         self._sent_psk_pair_init = False
-        self._activated_pairing_method: PairMethod | None = None
         self._connection_done = asyncio.Event()
         self._transport: Transport | None = None
         self._pending_first_text: str | None = None  # legacy first frame held for the loop
@@ -334,7 +384,7 @@ class SendspinConnection:
         # Rate-limit state for already-late-at-enqueue and slow-send warnings
         self._late_at_enqueue_count: dict[str, int] = {}
         self._last_late_at_enqueue_log_s: dict[str, float] = {}
-        self._last_slow_send_log_s = 0.0
+        self._last_slow_send_log_s: float | None = None
         self._slow_send_count = 0
         # Global scheduler heaps for families
         self._ready_roles: list[tuple[int, int, str]] = []
@@ -407,6 +457,8 @@ class SendspinConnection:
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._warned_unknown_types: set[str] = set()
+        self._unhandled_binary_count = 0
+        self._last_unhandled_binary_log_s: float | None = None
         self._epoch_by_role: defaultdict[str, int] = defaultdict(int)
 
         # Timing tracking for binary frame logging (per role)
@@ -672,7 +724,8 @@ class SendspinConnection:
         behind_by_us = now_us - (timestamp_us - cached[1].get_output_delay_us())
         self._late_at_enqueue_count[role] = self._late_at_enqueue_count.get(role, 0) + 1
         now_s = time.monotonic()
-        if now_s - self._last_late_at_enqueue_log_s.get(role, 0.0) < _WARN_INTERVAL_S:
+        last_log_s = self._last_late_at_enqueue_log_s.get(role)
+        if last_log_s is not None and now_s - last_log_s < WARN_INTERVAL_S:
             return
         self._logger.warning(
             "Enqueued already-late binary type=%s role=%s: %s message(s); "
@@ -861,8 +914,6 @@ class SendspinConnection:
         self._logger.debug("Connection disconnected")
 
     def _initial_state_timeout_callback(self) -> None:
-        if self._initial_state_received:
-            return
         self._initial_state_timeout_handle = None
         try:
             self._flag_noncompliance("did not send the required initial client/state in time")
@@ -871,7 +922,7 @@ class SendspinConnection:
             create_task(self.disconnect(retry_connection=False))
             return
         # Lenient: keep the connection and mark the client connected anyway.
-        if self._client is not None:
+        if self._client is not None and not self._initial_state_received:
             self._initial_state_received = True
             self._client.release_all_role_holds()
             self._cancel_activation_state_timeout()
@@ -893,13 +944,14 @@ class SendspinConnection:
     def _unimplemented_roles(supported_roles: list[str]) -> list[str]:
         """Client-offered roles/versions this server does not implement.
 
-        Excludes `_`-prefixed custom roles and versions. A non-empty result means the
-        client likely speaks a newer spec revision than this server.
+        Excludes `_`-prefixed custom roles and versions, and unversioned role IDs. A non-empty
+        result means the client likely speaks a newer spec revision than this server.
         """
         return [
             r
             for r in supported_roles
             if r not in ROLE_FACTORIES
+            and _is_versioned_role_id(r)
             and not r.startswith("_")
             and not r.partition("@")[2].startswith("_")
         ]
@@ -1008,9 +1060,17 @@ class SendspinConnection:
             setattr(hello, f"{family}_support", spec.parse_support(raw_support))
 
     @classmethod
-    def _deserialize_client_message(cls, raw_message: str) -> ClientMessage:
-        """Deserialize inbound client message with custom support-key normalization."""
-        return cls._client_message_from_dict(orjson.loads(raw_message))
+    def _deserialize_client_message(
+        cls, raw_message: str, active_families: Collection[str] | None = None
+    ) -> ClientMessage:
+        """Deserialize inbound client message with custom support-key normalization.
+
+        With ``active_families``, client/state objects of other roles are dropped unparsed.
+        """
+        decoded = orjson.loads(raw_message)
+        if active_families is not None:
+            decoded = cls._drop_inactive_role_objects(decoded, active_families)
+        return cls._client_message_from_dict(decoded)
 
     @classmethod
     def _client_message_from_dict(cls, decoded: Any) -> ClientMessage:
@@ -1026,6 +1086,23 @@ class SendspinConnection:
                     return parsed
                 missing = parsed.payload.missing_support_roles
         return parsed
+
+    @staticmethod
+    def _drop_inactive_role_objects(message: Any, active_families: Collection[str]) -> Any:
+        if not isinstance(message, dict) or message.get("type") != "client/state":
+            return message
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            return message
+        inactive = {
+            family
+            for family in _CLIENT_STATE_ROLE_FAMILIES
+            if family in payload and family not in active_families
+        }
+        if not inactive:
+            return message
+        kept = {key: value for key, value in payload.items() if key not in inactive}
+        return message | {"payload": kept}
 
     async def _setup_connection(self) -> None:
         """Prepare the socket and run the Noise handshake."""
@@ -1074,23 +1151,29 @@ class SendspinConnection:
             if self._pairing_attempt is not None:
                 raise HandshakeAbortedError("pairing requires an encrypted connection")
             if self._server.allow_unencrypted:
-                self._logger.warning("Accepting unencrypted legacy connection (transition mode)")
                 self._pending_first_text = first_text
                 return raw
             peer = self._request.remote if self._request is not None else self._url
             self._server._warn_unencrypted_refused(peer or "unknown")  # noqa: SLF001
-        result = await run_handshake_server(
-            raw,
-            local_identity=self._server.identity,
-            psk_provider=self._psk_provider,
-            client_init_text=first_text,
-            expected_client_id=self._expected_client_id,
-        )
+        try:
+            result = await run_handshake_server(
+                raw,
+                local_identity=self._server.identity,
+                psk_provider=self._psk_provider,
+                client_init_text=first_text,
+                expected_client_id=self._expected_client_id,
+                strict=not self._server.allow_noncompliant_clients,
+            )
+        except HandshakeNoncomplianceError as exc:
+            self._flag_noncompliance(str(exc))
+            raise
         self._client_id = result.peer_id
         self._noise_psk = result.psk
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
         self._logger = logger.getChild(result.peer_id)
+        for reason in result.noncompliance:
+            self._flag_noncompliance(reason)
         if result.credential_mismatch and self._pairing_attempt is not None:
             # Close so the reconnect, which carries no attempt, can use a record this server holds.
             self._logger.warning("Client lacks the attempt's Pairing PSK, reconnecting without it")
@@ -1111,7 +1194,8 @@ class SendspinConnection:
             decoded = orjson.loads(text)
         except orjson.JSONDecodeError:
             return None
-        return decoded.get("type") if isinstance(decoded, dict) else None
+        message_type = decoded.get("type") if isinstance(decoded, dict) else None
+        return message_type if isinstance(message_type, str) else None
 
     async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
         """Pick the PSK to admit ``client_id`` with, or ``None`` to refuse it."""
@@ -1197,16 +1281,25 @@ class SendspinConnection:
                     self._pairing_attempt = None
             await self._activate()
 
-        if self.requires_initial_state():
+        assert self._client is not None
+        # A strict server also waits on a client whose active roles define no state object.
+        awaits_state = bool(self._client.active_roles) and not self._client_state_received
+        if self.requires_initial_state() or (
+            awaits_state and not self._server.allow_noncompliant_clients
+        ):
             self._initial_state_timeout_handle = self._server.loop.call_later(
                 _CLIENT_STATE_TIMEOUT_S, self._initial_state_timeout_callback
             )
         else:
-            assert self._client is not None
             # Nothing to wait for: roles activated later are held until their own state.
             self._initial_state_received = True
             self._client.mark_connected()
             self._server.on_client_first_connect(self._client.client_id)
+            if awaits_state:
+                # Lenient: the timeout only flags a missing initial client/state.
+                self._initial_state_timeout_handle = self._server.loop.call_later(
+                    _CLIENT_STATE_TIMEOUT_S, self._initial_state_timeout_callback
+                )
         return True
 
     async def _pair_on_connect(self, transport: EncryptedWebSocket) -> bool:
@@ -1275,7 +1368,8 @@ class SendspinConnection:
             decoded = orjson.loads(text)
             payload = decoded.get("payload") if isinstance(decoded, dict) else None
             if self.is_encrypted and isinstance(payload, dict):
-                # Encrypted clients carry version in client/init, so ignore any copy here.
+                # Encrypted clients send client_id and version in client/init, so drop any copies.
+                payload.pop("client_id", None)
                 payload.pop("version", None)
             message, deviations = parse_noting_wire_deviations(
                 self._client_message_from_dict, decoded
@@ -1298,6 +1392,8 @@ class SendspinConnection:
         self._hello_description = describe_client(client_info, self._client_id)
         for reason in deviations:
             self._flag_noncompliance(f"{message.type} {reason}")
+        if not self.is_encrypted:
+            self._flag_noncompliance("connected unencrypted (transition mode)")
         # Encrypted clients omit version (it is in client/init); only a legacy
         # client carries it in the hello, so validate it only when present.
         if client_info.version is not None and client_info.version != 1:
@@ -1381,6 +1477,7 @@ class SendspinConnection:
             self._flag_noncompliance(f"client sent {message_type}, superseded by {current}")
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     def _flag_legacy_artwork_wire(self, support: ClientHelloArtworkSupport) -> None:
         """Flag artwork channels declared on the wire the spec superseded."""
         legacy_keys = sorted(
@@ -1394,7 +1491,26 @@ class SendspinConnection:
             self._flag_noncompliance("client/hello artwork declared the removed 'bmp' format")
 
     def _note_client_hello_wire(self, client_info: ClientHelloPayload) -> None:
-        """Record what the hello reveals about the wire revision the client speaks."""
+        """Flag hello deviations and record what the hello reveals about the client's wire."""
+        if not all(_is_versioned_role_id(role_id) for role_id in client_info.supported_roles):
+            self._flag_noncompliance("client/hello listed roles not of the form role@version")
+        if self.is_encrypted and client_info.unpaired_access_incomplete:
+            self._flag_noncompliance("client/hello omitted the required unpaired_access.enabled")
+        device_info = client_info.device_info
+        if (
+            device_info is not None
+            and device_info.mac_address is not None
+            and not _MAC_ADDRESS_RE.fullmatch(device_info.mac_address)
+        ):
+            self._flag_noncompliance(
+                "client/hello sent a mac_address not in lowercase colon-separated form"
+            )
+        player_support = client_info.player_support
+        if player_support is not None and not any(
+            fmt.codec in (AudioCodec.FLAC, AudioCodec.PCM)
+            for fmt in player_support.supported_formats
+        ):
+            self._flag_noncompliance("client/hello player@v1_support listed neither flac nor pcm")
         if client_info.legacy_support_keys_used:
             self._flag_noncompliance(
                 "client/hello used unversioned support keys: "
@@ -1432,7 +1548,6 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
-        player_support = client_info.player_support
         player_commands = (
             player_support is not None and player_support.supported_commands is not None
         )
@@ -1444,6 +1559,7 @@ class SendspinConnection:
             self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
         if client_info.trust_level_used:
+            self._flag_noncompliance("client/hello sent the removed trust_level key")
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
         # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
@@ -1457,7 +1573,7 @@ class SendspinConnection:
         self._note_pair_method_wire(client_info)
 
     def _note_pair_method_wire(self, client_info: ClientHelloPayload) -> None:
-        """Flag the superseded pair-method shape, and log what the parse set aside."""
+        """Flag pair-method deviations, and log what the parse set aside."""
         # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
         if client_info.legacy_pair_methods_list_used:
             self._flag_noncompliance("client/hello sent supported_pair_methods as a list")
@@ -1468,7 +1584,20 @@ class SendspinConnection:
             self._flag_noncompliance("client/hello offered the pre-rename PIN pairing methods")
         methods = client_info.supported_pair_methods
         if methods is None:
+            if self.is_encrypted:
+                self._flag_noncompliance("client/hello omitted the required supported_pair_methods")
             return
+        if self.is_encrypted and methods.pairing_psk is None:
+            self._flag_noncompliance("client/hello did not offer the pairing_psk method")
+        if client_info.malformed_pair_method_descriptor:
+            self._flag_noncompliance("client/hello sent a malformed pair-method descriptor")
+        dynamic = methods.dynamic_pairing_code
+        if (
+            dynamic is not None
+            and PairingCodeFormat.QR_CODE.value in dynamic.formats
+            and "display" not in dynamic.out_channels
+        ):
+            self._flag_noncompliance("client/hello offered qr_code without a display out_channel")
         if methods.offered_both_pairing_code_methods:
             self._logger.info("client/hello offered both pairing-code methods")
         if methods.ignored_methods:
@@ -1811,7 +1940,6 @@ class SendspinConnection:
                     and self._server.languages is not None
                 ):
                     languages = list(self._server.languages)
-            # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
             self._activated_pairing_method = method
             assert self._client_info is not None
             # No gate on the hello-advertised methods: the advertisement may lag the client's
@@ -1901,6 +2029,7 @@ class SendspinConnection:
         if method is PairMethod.PAIRING_PSK:
             # The attempt is absent when the client dialed in with a staged Pairing PSK.
             attempt = self._pairing_attempt
+            assert self._noise_psk is not None
             return await run_pairing_psk_server(
                 transport,
                 pairing_index=pairing_index,
@@ -1911,6 +2040,8 @@ class SendspinConnection:
                 on_legacy_finalize=(
                     None if self._sent_psk_pair_init else self._flag_legacy_psk_finalize
                 ),
+                pairing_psk=self._noise_psk.psk,
+                on_noncompliance=self._flag_noncompliance,
             )
         assert self._pairing_attempt is not None
         assert self._pairing_attempt.pairing_code_provider is not None
@@ -1930,6 +2061,7 @@ class SendspinConnection:
                 on_pair_pending=self._pairing_attempt.on_pair_pending,
                 owner=self._pairing_attempt.owner,
                 legacy_rounds=legacy_rounds,
+                on_noncompliance=self._flag_noncompliance,
             )
         assert pairing_format is not None
         return await run_dynamic_pairing_code_server(
@@ -1945,6 +2077,7 @@ class SendspinConnection:
             legacy_rounds=legacy_rounds,
             # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
             legacy_pin=bool(self._client_info.legacy_pin_methods_used),
+            on_noncompliance=self._flag_noncompliance,
         )
 
     # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
@@ -2027,7 +2160,10 @@ class SendspinConnection:
             suite=transport.session.suite,
             prologue=self._handshake_hash,
             psk=psk,
+            strict=not self._server.allow_noncompliant_clients,
         )
+        for reason in result.noncompliance:
+            self._flag_noncompliance(reason)
         if self._is_long_term_paired and result.psk.category is not PskCategory.LONG_TERM:
             self._moved_off_record = True
         self._noise_psk = result.psk
@@ -2380,10 +2516,15 @@ class SendspinConnection:
         # Only a pre-#287 client's repeated hello belongs to the attempt; any other is flagged.
         if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
+        self._flag_pairing_frame_before_activate(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
             self._flag_pairing_frame_deviations(cast("str", msg.data), message_type)
         self._pairing_message_queue.put_nowait(msg)
         return True
+
+    def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
+        if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
+            self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
 
     def _flag_pairing_frame_deviations(self, text: str, message_type: str) -> None:
         """Flag the tolerated deviations in a pairing frame before the pairing task parses it."""
@@ -2418,14 +2559,22 @@ class SendspinConnection:
                     continue
 
                 text = cast("str", msg.data)
+                active_families = (
+                    {role.role_family for role in self._client.active_roles}
+                    if self._client is not None
+                    else ()
+                )
                 try:
                     message, deviations = parse_noting_wire_deviations(
-                        self._deserialize_client_message, text
+                        self._deserialize_client_message, text, active_families
                     )
-                except Exception as exc:
+                except (LookupError, TypeError, ValueError) as exc:
                     if self._skip_undecodable_message(text, exc):
                         continue
-                    raise
+                    self._logger.warning(
+                        "Ending connection on a message that failed to parse: %s", exc
+                    )
+                    break
                 for reason in deviations:
                     self._flag_noncompliance(f"{self._peek_message_type(text)} {reason}")
                 await self._handle_message(message, timestamp_us)
@@ -2461,18 +2610,48 @@ class SendspinConnection:
         message_type = self._peek_message_type(text)
         self._note_pairing_frame(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
+            self._flag_pairing_frame_before_activate(message_type)
             # In flight from before the client observed the leave activate.
             self._logger.debug("Discarding pairing message: not in pairing")
             return True
         if message_type == "client/command":
-            self._logger.warning("Ignoring client/command that failed to parse: %s", exc)
+            if not self._has_payload_object(text):
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+            elif self._client is not None and self._client.roles_by_family("controller"):
+                self._flag_noncompliance("sent a malformed client/command controller object")
+            self._logger.debug("Ignoring client/command that failed to parse: %s", exc)
+            return True
+        if message_type == "client/state":
+            self._logger.debug("Ignoring client/state that failed to parse: %s", exc)
+            self._flag_noncompliance("sent a malformed client/state")
             return True
         if not isinstance(message_type, str) or not (
             isinstance(exc, SuitableVariantNotFoundError) and exc.variants_type is ClientMessage
         ):
+            if not isinstance(message_type, str):
+                self._flag_noncompliance("sent a message that is not a valid message envelope")
+            elif message_type == "client/hello":
+                self._flag_noncompliance("sent a second client/hello after the hello exchange")
+            elif not self._has_payload_object(text):
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+            else:
+                self._flag_noncompliance(f"sent a malformed {message_type}")
             return False
-        self._log_unknown_message_type(message_type)
+        if message_type in _server_message_types():
+            self._flag_noncompliance("sent a server-to-client message")
+        elif message_type == INIT_TYPE_CLIENT:
+            self._flag_noncompliance("sent client/init after the connection was established")
+        elif message_type == HANDSHAKE_TYPE:
+            self._flag_noncompliance("sent noise/handshake outside a re-handshake")
+        elif not self._has_payload_object(text):
+            self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+        else:
+            self._log_unknown_message_type(message_type)
         return True
+
+    @staticmethod
+    def _has_payload_object(text: str) -> bool:
+        return isinstance(orjson.loads(text).get("payload"), dict)
 
     def _log_unknown_message_type(self, message_type: str) -> None:
         """Log an ignored message type, warning once per distinct type."""
@@ -2489,10 +2668,13 @@ class SendspinConnection:
 
     def _route_inbound_binary(self, data: bytes) -> None:
         """Route an inbound binary chunk to the role that declares its message type."""
-        if self._client is None:
+        if self._client is None or not data:
             return
         if len(data) < BINARY_HEADER_SIZE:
-            self._logger.warning("Inbound binary message shorter than header, dropping")
+            if data[0] == BinaryMessageType.SOURCE_AUDIO_CHUNK.value:
+                self._flag_noncompliance("sent a source audio chunk shorter than its header")
+            else:
+                self._drop_unrouted_binary(data[0])
             return
         header = unpack_binary_header(data)
         payload = data[BINARY_HEADER_SIZE:]
@@ -2510,21 +2692,43 @@ class SendspinConnection:
                 return
         if is_source_audio:
             return  # In flight from before the source role was removed.
-        self._logger.warning(
-            "Received unhandled binary message type %s from client", header.message_type
-        )
+        self._drop_unrouted_binary(header.message_type)
 
-    def _accept_source_stream_start(self) -> bool:
+    def _drop_unrouted_binary(self, message_type: int) -> None:
+        """Flag a server-to-client binary type, or log an unhandled one with a rate limit."""
+        if message_type in _SERVER_BINARY_TYPES:
+            self._flag_noncompliance("sent a server-to-client binary message type")
+            return
+        self._unhandled_binary_count += 1
+        now_s = time.monotonic()
+        if self._last_unhandled_binary_log_s is None:
+            self._logger.warning(
+                "Ignoring unhandled binary message type %s from client", message_type
+            )
+        elif now_s - self._last_unhandled_binary_log_s < WARN_INTERVAL_S:
+            return
+        else:
+            self._logger.debug(
+                "Ignoring unhandled binary message type %s from client: "
+                "%s message(s) since last report",
+                message_type,
+                self._unhandled_binary_count,
+            )
+        self._unhandled_binary_count = 0
+        self._last_unhandled_binary_log_s = now_s
+
+    def _accept_source_stream_start(self, payload: ClientStreamStartPayload) -> bool:
         """Return whether a client-stream/start is authorized, opening the input stream if so."""
-        if self._source_input_open:
-            return True  # Replaces the open stream's format, which needs no start.
-        if not self._source_starts_pending:
+        # Replacing the open stream's format needs no start.
+        if not self._source_input_open and not self._source_starts_pending:
             self._flag_noncompliance(
                 "client-stream/start sent without a preceding source start command"
             )
             return False
-        self._source_starts_pending -= 1
-        self._source_input_open = True
+        SourceV1Role.check_client_stream_start(payload, on_noncompliance=self._flag_noncompliance)
+        if not self._source_input_open:
+            self._source_starts_pending -= 1
+            self._source_input_open = True
         return True
 
     async def _handle_message(self, message: ClientMessage, timestamp_us: int) -> None:
@@ -2551,34 +2755,16 @@ class SendspinConnection:
             return
 
         if isinstance(message, StreamRequestFormatMessage):
-            if self._client is None:
-                return
-            fmt = message.payload
-            if fmt.player is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format player object, "
-                    "superseded by the client/state player format"
-                )
-            if fmt.artwork is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format artwork object, "
-                    "superseded by the client/state artwork object"
-                )
-            if fmt.visualizer is not None:
-                # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
-                self._flag_noncompliance(
-                    "sent a stream/request-format visualizer object, "
-                    "superseded by the client/state visualizer object"
-                )
-            for role in self._client.active_roles:
-                role.on_stream_request_format(fmt)
+            self._handle_stream_request_format(message.payload)
             return
 
         if isinstance(message, ClientCommandMessage):
             if self._client is None:
                 return
+            if message.payload.unrecognized_command_used and self._client.roles_by_family(
+                "controller"
+            ):
+                self._flag_noncompliance("sent a controller command the server did not offer")
             for role in self._client.active_roles:
                 role.on_command(message.payload)
             return
@@ -2587,7 +2773,7 @@ class SendspinConnection:
             if self._client is None:
                 return
             self._flag_superseded_message_type(message.type)
-            if self._accept_source_stream_start():
+            if self._accept_source_stream_start(message.payload):
                 for role in self._client.active_roles:
                     role.on_client_stream_start(message.payload)
             return
@@ -2596,6 +2782,8 @@ class SendspinConnection:
             if self._client is None:
                 return
             self._flag_superseded_message_type(message.type)
+            if message.payload_missing:
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
             self._source_input_open = False
             for role in self._client.active_roles:
                 role.on_client_stream_end()
@@ -2604,6 +2792,8 @@ class SendspinConnection:
         if isinstance(message, ClientLeaveMessage):
             if self._client is None:
                 return
+            if message.payload_missing:
+                self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
             await self._client.handle_leave()
             return
 
@@ -2616,7 +2806,35 @@ class SendspinConnection:
             await self._handle_goodbye(message.payload)
             return
 
+    def _handle_stream_request_format(self, fmt: StreamRequestFormatPayload) -> None:
+        if self._client is None:
+            return
+        if fmt.player is None and fmt.artwork is None and fmt.visualizer is None:
+            self._flag_noncompliance("sent a stream/request-format without a role object")
+        if fmt.player is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format player object, "
+                "superseded by the client/state player format"
+            )
+        if fmt.artwork is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format artwork object, "
+                "superseded by the client/state artwork object"
+            )
+        if fmt.visualizer is not None:
+            # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+            self._flag_noncompliance(
+                "sent a stream/request-format visualizer object, "
+                "superseded by the client/state visualizer object"
+            )
+        for role in self._client.active_roles:
+            role.on_stream_request_format(fmt)
+
     async def _handle_goodbye(self, payload: ClientGoodbyePayload) -> None:
+        if payload.reason is None and payload.unrecognized_reason is None:
+            self._flag_noncompliance("sent client/goodbye with a null reason")
         if payload.unrecognized_reason is not None:
             self._logger.info(
                 "Received client/goodbye with unrecognized reason %r; not reconnecting",
@@ -2647,19 +2865,24 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
             # A client/state without `available` leaves the availability unchanged.
             self._flag_noncompliance("client/state omitted the required 'available' field")
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         if payload.legacy_state_used:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
         for role in self._client.active_roles:
             for reason in role.client_state_deviations(payload):
                 self._flag_noncompliance(f"client/state {reason}")
+        if payload.available is False and self._source_input_open:
+            self._flag_noncompliance(
+                "client/state reported available: false before client-stream/end"
+            )
 
         released: list[Role] = []
+        if self._initial_state_timeout_handle is not None:
+            self._initial_state_timeout_handle.cancel()
+            self._initial_state_timeout_handle = None
         if is_initial:
             # The state is here: neither timeout may run during the awaits below.
             self._cancel_activation_state_timeout()
-            if self._initial_state_timeout_handle is not None:
-                self._initial_state_timeout_handle.cancel()
-                self._initial_state_timeout_handle = None
         else:
             released = self._apply_activation_state(payload)
             if released:
@@ -2700,12 +2923,7 @@ class SendspinConnection:
     @staticmethod
     def _role_state_objects(payload: ClientStatePayload) -> dict[str, object]:
         """Map each role family that has a client/state object to that object."""
-        return {
-            "player": payload.player,
-            "source": payload.source,
-            "artwork": payload.artwork,
-            "visualizer": payload.visualizer,
-        }
+        return {family: getattr(payload, family) for family in _CLIENT_STATE_ROLE_FAMILIES}
 
     def _apply_activation_state(self, payload: ClientStatePayload) -> list[Role]:
         """Apply a client/state to the held roles whose object it carries, and return them."""
@@ -2802,7 +3020,8 @@ class SendspinConnection:
                 -late_by_us / 1000,
             )
             now_s = time.monotonic()
-            if now_s - role._last_late_log_s >= _WARN_INTERVAL_S:  # noqa: SLF001
+            last_log_s = role._last_late_log_s  # noqa: SLF001
+            if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
                 qsize, qmax = self.queue_status()
                 self._logger.warning(
                     "Late binary type=%s role=%s: skipping %s chunk(s); "
@@ -2898,7 +3117,10 @@ class SendspinConnection:
             if elapsed_ms >= 500.0:
                 self._slow_send_count += 1
             now_s = time.monotonic()
-            if elapsed_ms >= 500.0 and now_s - self._last_slow_send_log_s >= _WARN_INTERVAL_S:
+            if elapsed_ms >= 500.0 and (
+                self._last_slow_send_log_s is None
+                or now_s - self._last_slow_send_log_s >= WARN_INTERVAL_S
+            ):
                 self._logger.warning(
                     "Slow send_bytes: %.1fms size=%s ts_us=%s role=%s; "
                     "%s stall(s) over 500ms since last report",

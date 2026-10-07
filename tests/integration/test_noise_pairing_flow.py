@@ -93,6 +93,7 @@ from aiosendspin.server.server import (
     SendspinServer,
 )
 from tests.conftest import make_sdk_client
+from tests.noise.conftest import non_canonical_peer_id
 
 if TYPE_CHECKING:
     from aiosendspin.noise.models import PairingMessage
@@ -256,6 +257,22 @@ async def test_transition_mode_accepts_legacy_client() -> None:
         assert isinstance(ServerMessage.from_json(msg.data), ServerHelloMessage)
 
 
+async def test_strict_server_closes_legacy_client_despite_transition_mode() -> None:
+    """Rejecting non-compliant clients overrides allow_unencrypted for a legacy client."""
+    server = _make_server(
+        InMemoryServerPairingStore(), allow_unencrypted=True, allow_noncompliant_clients=False
+    )
+    async with (
+        _serve(server) as url,
+        ClientSession() as session,
+        session.ws_connect(url) as ws,
+    ):
+        await ws.send_str(_legacy_hello())
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+    assert server.get_client("legacy-client") is None
+
+
 @pytest.mark.parametrize(
     "first_text",
     [
@@ -281,6 +298,35 @@ async def test_default_server_answers_non_init_first_frame_with_server_error(
         assert ServerErrorMessage.from_json(msg.data).payload.reason is ServerErrorReason.MALFORMED
         msg = await asyncio.wait_for(ws.receive(), timeout=5)
         assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+
+
+async def test_strict_server_answers_non_canonical_client_id_with_server_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A strict server answers a client_id with non-zero unused bits with server/error."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_init = {
+        "type": "client/init",
+        "payload": {
+            "client_id": non_canonical_peer_id(Identity.generate().peer_id),
+            "version": 1,
+            "suite": "25519_ChaChaPoly_SHA256",
+        },
+    }
+    async with (
+        _serve(server) as url,
+        ClientSession() as session,
+        session.ws_connect(url) as ws,
+    ):
+        await ws.send_str(json.dumps(client_init))
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type is WSMsgType.TEXT
+        assert ServerErrorMessage.from_json(msg.data).payload.reason is ServerErrorReason.MALFORMED
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+    assert (
+        "rejecting non-compliant client: client/init client_id is not canonical base64url"
+    ) in caplog.messages
 
 
 async def test_default_server_warns_once_per_peer_about_unencrypted_client(
@@ -1250,6 +1296,54 @@ async def test_live_pairing_dynamic_pairing_code_wrong_then_retry() -> None:
             await client.disconnect()
 
 
+async def test_strict_server_rejects_a_retry_past_the_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client retrying past the round limit is rejected by a strict server."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+
+    async def never_reached() -> bool:
+        return False
+
+    monkeypatch.setattr(client_store, "is_pairing_round_limit_reached", never_reached)
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        if pairing_code is not None:
+            shown.put_nowait(pairing_code)
+
+    rounds = 0
+
+    async def provide_wrong() -> str:
+        nonlocal rounds
+        rounds += 1
+        if rounds > PAIRING_ROUND_LIMIT + 1:
+            pytest.fail("the retry past the round limit was not rejected")
+        pairing_code = await shown.get()
+        return ("2" if pairing_code[0] == "1" else "1") + pairing_code[1:]
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            with pytest.raises(ClientComplianceError):
+                await server.initiate_pairing(
+                    client_identity.peer_id,
+                    _code_attempt(PairMethod.DYNAMIC_PAIRING_CODE, provide_wrong),
+                )
+        finally:
+            await client.disconnect()
+
+
 async def test_live_pairing_round_limit_holds_back_until_pairing_window() -> None:
     """Exhausting the rounds aborts the attempt; the next one waits for the operator action."""
     server_store = InMemoryServerPairingStore()
@@ -1913,6 +2007,55 @@ async def test_cancelled_code_attempt_message_in_flight_does_not_fail_the_next_a
             await client.disconnect()
 
 
+async def test_pairing_psk_finalize_echoing_the_pairing_psk_stores_nothing() -> None:
+    """A client delivering its pairing PSK as the long-term PSK stores nothing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async def echo_pairing_psk(ws: EncryptedWebSocket, *, pairing_index: int, **_: Any) -> None:
+        await ws.send_str(
+            ClientPairInitMessage(
+                payload=ClientPairInitPayload(pairing_index=pairing_index)
+            ).to_json()
+        )
+        await ws.send_str(
+            ClientPairFinalizeMessage(
+                payload=ClientPairFinalizePayload(long_term_psk=b64url_encode(pairing))
+            ).to_json()
+        )
+        await asyncio.Event().wait()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            with (
+                patch.object(client_connection_module, "run_pairing_psk_client", echo_pairing_psk),
+                pytest.raises(PairingError, match="reused the Sentinel or pairing PSK"),
+            ):
+                await server.initiate_pairing(
+                    client_identity.peer_id,
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=client_identity.peer_id,
+                    ),
+                )
+            assert await server_store.record_by_client_id(client_identity.peer_id) is None
+        finally:
+            await client.disconnect()
+
+
 # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
 async def _send_list_form_hello(self: SdkConnection) -> None:
     """Send client/hello with supported_pair_methods in the superseded list form."""
@@ -2108,6 +2251,108 @@ async def test_stray_pairing_frame_outside_pairing_is_discarded() -> None:
             assert client._admitted_connection is not None  # noqa: SLF001
             await client._admitted_connection.send_pair_abort(  # noqa: SLF001
                 PairAbortReason.USER_CANCELLED
+            )
+            await asyncio.sleep(0.1)  # a fatal frame would have torn the connection down
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_strict_server_rejects_a_pairing_frame_before_any_pairing_activate() -> None:
+    """A strict server closes a connection sending a pairing frame before any pairing activate."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=InMemoryClientPairingStore(),
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, client_identity.peer_id)
+            assert client._admitted_connection is not None  # noqa: SLF001
+            await client._admitted_connection.send_pair_abort(  # noqa: SLF001
+                PairAbortReason.USER_CANCELLED
+            )
+            await _wait_until(lambda: not client.connected)
+        finally:
+            await client.disconnect()
+
+
+async def test_strict_server_rejects_a_pairing_frame_before_the_attempts_activate() -> None:
+    """A pairing frame reaching a starting attempt before its activate closes the connection."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    method = PairMethod.DYNAMIC_PAIRING_CODE
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def provide() -> str:
+        return await shown.get()
+
+    async with _serve(server) as url:
+        client = await _code_pairing_client(
+            client_identity, InMemoryClientPairingStore(), method, shown
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            started = asyncio.Event()
+            release = asyncio.Event()
+            rehandshake = conn._rehandshake_for_pairing_if_needed  # noqa: SLF001
+
+            async def stalled_rehandshake(transport: EncryptedWebSocket) -> bool:
+                started.set()
+                await release.wait()
+                return await rehandshake(transport)
+
+            conn._rehandshake_for_pairing_if_needed = stalled_rehandshake  # type: ignore[method-assign]  # noqa: SLF001
+            pairing = asyncio.create_task(conn.initiate_pairing(_code_attempt(method, provide)))
+            await started.wait()
+            assert client._admitted_connection is not None  # noqa: SLF001
+            await client._admitted_connection.send_pair_abort(  # noqa: SLF001
+                PairAbortReason.USER_CANCELLED
+            )
+            await _wait_until(lambda: not client.connected)
+            pairing.cancel()
+            release.set()
+            with suppress(Exception, asyncio.CancelledError):
+                await pairing
+        finally:
+            await client.disconnect()
+
+
+async def test_strict_server_discards_a_pairing_frame_after_a_pairing() -> None:
+    """A pairing frame after a pairing re-keyed the session keeps a strict server's connection."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.PAIRING_PSK,
+                    pairing_psk=pairing,
+                    client_id=client_identity.peer_id,
+                )
+            )
+            await _await_paired_session(client)
+            assert client._admitted_connection is not None  # noqa: SLF001
+            await client._admitted_connection.send_pair_abort(  # noqa: SLF001
+                PairAbortReason.CONCURRENT_ATTEMPT
             )
             await asyncio.sleep(0.1)  # a fatal frame would have torn the connection down
             assert client.connected

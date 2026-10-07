@@ -53,8 +53,6 @@ class ControllerCommandPayload(SendspinModel):
         if self.command == MediaCommand.SEEK:
             if self.position_ms is None:
                 raise ValueError("position_ms must be provided when command is 'seek'")
-            if self.position_ms < 0:
-                raise ValueError(f"position_ms must be non-negative, got {self.position_ms}")
             if self.offset_ms is not None:
                 raise ValueError("offset_ms should not be provided for command 'seek'")
         elif self.command == MediaCommand.SEEK_RELATIVE:

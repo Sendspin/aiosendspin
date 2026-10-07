@@ -928,6 +928,7 @@ def test_artwork_initial_state_without_artwork_is_a_deviation() -> None:
     assert role.initial_state_deviations(_state(_ALBUM)) == []
 
 
+# DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def test_artwork_state_on_superseded_wire_is_a_deviation() -> None:
     """A state artwork object using 'bmp' or media_width/media_height is reported."""
     client = _make_client_stub()
@@ -1214,6 +1215,7 @@ def test_artwork_role_flags_nonpositive_request_dimensions() -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+# DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def test_artwork_role_applies_and_flags_pre_rename_request_dimensions() -> None:
     """A stream/request-format phrased as media_width/media_height resizes, and is flagged."""
     client = _make_legacy_client_stub()
@@ -1232,6 +1234,7 @@ def test_artwork_role_applies_and_flags_pre_rename_request_dimensions() -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+# DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def test_artwork_role_flags_bmp_request_format() -> None:
     """A stream/request-format asking for the removed 'bmp' format is flagged, not rejected."""
     client = _make_legacy_client_stub()
