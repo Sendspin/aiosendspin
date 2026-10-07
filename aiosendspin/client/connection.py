@@ -13,7 +13,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
@@ -124,7 +123,7 @@ from aiosendspin.noise.pairing import (
 from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import WARN_INTERVAL_S
+from aiosendspin.util import WARN_INTERVAL_S, _peek_message_type
 
 from .models import AudioFormat, PCMFormat, ServerInfo
 from .time_sync import SendspinTimeFilter
@@ -1463,21 +1462,11 @@ class SendspinConnection:
             logger.error("WebSocket error: %s", self._ws.exception() if self._ws else "unknown")
             await self.disconnect()
 
-    @staticmethod
-    def _peek_message_type(data: str) -> str | None:
-        """Return the envelope ``type`` of ``data``, or ``None`` if it has none."""
-        try:
-            decoded = orjson.loads(data)
-        except orjson.JSONDecodeError:
-            return None
-        message_type = decoded.get("type") if isinstance(decoded, dict) else None
-        return message_type if isinstance(message_type, str) else None
-
     async def _handle_json_message(self, data: str) -> None:
         try:
             message = ServerMessage.from_json(data)
         except Exception:
-            message_type = self._peek_message_type(data)
+            message_type = _peek_message_type(data)
             if message_type in _PAIRING_MESSAGE_TYPES:
                 # A malformed one still reaches the attempt, which fails on it.
                 await self._route_pairing_message(data, message_type)
