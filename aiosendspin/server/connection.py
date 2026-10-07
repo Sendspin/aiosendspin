@@ -2468,8 +2468,13 @@ class SendspinConnection:
         # Only a pre-#287 client's repeated hello belongs to the attempt; any other is flagged.
         if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
+        self._flag_pairing_frame_before_activate(message_type)
         self._pairing_message_queue.put_nowait(msg)
         return True
+
+    def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
+        if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
+            self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
 
     async def _run_message_loop(self) -> None:
         transport = self._transport
@@ -2539,8 +2544,7 @@ class SendspinConnection:
         message_type = self._peek_message_type(text)
         self._note_pairing_frame(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
-            if self._activated_pairing_method is None:
-                self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
+            self._flag_pairing_frame_before_activate(message_type)
             # In flight from before the client observed the leave activate.
             self._logger.debug("Discarding pairing message: not in pairing")
             return True

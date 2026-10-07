@@ -2177,6 +2177,48 @@ async def test_strict_server_rejects_a_pairing_frame_before_any_pairing_activate
             await client.disconnect()
 
 
+async def test_strict_server_rejects_a_pairing_frame_before_the_attempts_activate() -> None:
+    """A pairing frame reaching a starting attempt before its activate closes the connection."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    method = PairMethod.DYNAMIC_PAIRING_CODE
+    shown: asyncio.Queue[str] = asyncio.Queue()
+
+    async def provide() -> str:
+        return await shown.get()
+
+    async with _serve(server) as url:
+        client = await _code_pairing_client(
+            client_identity, InMemoryClientPairingStore(), method, shown
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            started = asyncio.Event()
+            release = asyncio.Event()
+            rehandshake = conn._rehandshake_for_pairing_if_needed  # noqa: SLF001
+
+            async def stalled_rehandshake(transport: EncryptedWebSocket) -> bool:
+                started.set()
+                await release.wait()
+                return await rehandshake(transport)
+
+            conn._rehandshake_for_pairing_if_needed = stalled_rehandshake  # type: ignore[method-assign]  # noqa: SLF001
+            pairing = asyncio.create_task(conn.initiate_pairing(_code_attempt(method, provide)))
+            await started.wait()
+            assert client._admitted_connection is not None  # noqa: SLF001
+            await client._admitted_connection.send_pair_abort(  # noqa: SLF001
+                PairAbortReason.USER_CANCELLED
+            )
+            await _wait_until(lambda: not client.connected)
+            pairing.cancel()
+            release.set()
+            with suppress(Exception, asyncio.CancelledError):
+                await pairing
+        finally:
+            await client.disconnect()
+
+
 async def test_strict_server_discards_a_pairing_frame_after_a_pairing() -> None:
     """A pairing frame after a pairing re-keyed the session keeps a strict server's connection."""
     server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
