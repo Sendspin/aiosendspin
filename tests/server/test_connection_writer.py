@@ -17,6 +17,8 @@ from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.core import (
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
+    ServerCommandMessage,
+    ServerCommandPayload,
     ServerStateMessage,
     ServerStatePayload,
     ServerTimeMessage,
@@ -30,11 +32,12 @@ from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.models.player import (
     PLAYER_AUDIO_HEADER_SIZE,
     SEND_AHEAD_MAX,
+    PlayerCommandPayload,
     StreamStartPlayer,
     pack_player_audio_frame,
     unpack_player_audio_header,
 )
-from aiosendspin.models.types import AudioCodec, BinaryMessageType
+from aiosendspin.models.types import AudioCodec, BinaryMessageType, PlayerCommand
 from aiosendspin.noise.constants import (
     FRAGMENT_FLAG_LAST,
     MAX_TRANSPORT_PLAINTEXT,
@@ -745,6 +748,59 @@ async def test_in_place_stream_start_follows_queued_binary() -> None:
         await asyncio.sleep(0)
 
     assert send_order[:2] == ["binary", "json"]
+
+    await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_command_is_sent_before_remaining_ready_audio() -> None:
+    """A server/command queued while player audio is ready goes out before that audio."""
+    loop = asyncio.get_running_loop()
+    clock = LoopClock(loop)
+    server = _DummyServer(loop=loop, clock=clock)
+
+    send_order: list[str] = []
+    conn: SendspinConnection
+
+    async def _record_json(_payload: str) -> None:
+        send_order.append("json")
+
+    async def _record_binary(_payload: bytes) -> None:
+        send_order.append("binary")
+        if len(send_order) == 1:
+            conn.send_message(
+                ServerCommandMessage(
+                    payload=ServerCommandPayload(
+                        player=PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=40)
+                    )
+                )
+            )
+
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_str = AsyncMock(side_effect=_record_json)
+    wsock.send_bytes = AsyncMock(side_effect=_record_binary)
+
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
+    await conn._setup_connection()  # noqa: SLF001
+
+    for index in range(3):
+        timestamp_us = clock.now_us() + 2_000_000 + index * 25_000
+        conn.send_binary(
+            pack_binary_header_raw(BinaryMessageType.AUDIO_CHUNK.value, timestamp_us) + b"audio",
+            role="player",
+            timestamp_us=timestamp_us,
+            message_type=BinaryMessageType.AUDIO_CHUNK.value,
+        )
+    conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+
+    for _ in range(50):
+        if len(send_order) >= 4:
+            break
+        await asyncio.sleep(0)
+
+    assert send_order == ["binary", "json", "binary", "binary"]
 
     await conn.disconnect(retry_connection=False)
 

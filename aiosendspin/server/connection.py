@@ -3232,13 +3232,9 @@ class SendspinConnection:
             await self._send_message(wsock, message)
         return True
 
-    async def _process_normal_messages(
-        self,
-        wsock: Transport,
-        ready_entry: tuple[str, _RoleQueueEntry, int, int] | None,
-    ) -> bool:
-        """Send one queued non-role message when no role entry is ready."""
-        if ready_entry is not None or not self._normal_messages:
+    async def _process_normal_messages(self, wsock: Transport) -> bool:
+        """Send one queued non-role message if available."""
+        if not self._normal_messages:
             return False
         message = self._normal_messages.popleft()
         self._queue_size = max(self._queue_size - 1, 0)
@@ -3533,22 +3529,19 @@ class SendspinConnection:
                     iterations_since_yield = 0
                     continue
 
-                now_us = clock_now_us()
-                self._promote_ready_roles(now_us)
-
-                ready_entry = self._peek_ready_entry()
-                has_normal = bool(self._normal_messages)
-
-                if ready_entry is None and not has_normal:
-                    await self._wait_for_writer_work(now_us)
-                    continue
-
-                if await self._process_normal_messages(wsock, ready_entry):
+                if await self._process_normal_messages(wsock):
                     now_us = clock_now_us()
                     iterations_since_yield = 0
                     continue
 
-                assert ready_entry is not None
+                now_us = clock_now_us()
+                self._promote_ready_roles(now_us)
+
+                ready_entry = self._peek_ready_entry()
+                if ready_entry is None:
+                    await self._wait_for_writer_work(now_us)
+                    continue
+
                 sent, now_us = await self._send_role_entry(wsock, ready_entry, now_us)
                 if sent:
                     iterations_since_yield = 0
