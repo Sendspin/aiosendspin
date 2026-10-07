@@ -215,3 +215,16 @@ async def test_undecodable_authorized_stream_drops_its_audio_quietly() -> None:
     await source.stream_end()
 
     assert source.stream_events() == []
+
+
+@pytest.mark.asyncio
+async def test_unavailable_before_stream_end_is_rejected_before_it_applies() -> None:
+    """A source must end its open input stream before it reports available: false."""
+    source = await _source()
+    source.role.request_start()
+    await source.stream_start()
+    source.strict()
+
+    with pytest.raises(ClientComplianceError):
+        await source.state(available=False)
+    assert source.client.available
