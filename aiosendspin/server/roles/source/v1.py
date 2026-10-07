@@ -181,10 +181,14 @@ class SourceV1Role(Role):
             )
             return
         if source.sample_rate <= 0:
-            self._client.flag_noncompliance("client-stream/start announced unsupported sample_rate")
+            self._client.flag_noncompliance(
+                "client-stream/start announced an unsupported sample_rate"
+            )
             return
         if source.channels <= 0:
-            self._client.flag_noncompliance("client-stream/start announced unsupported channels")
+            self._client.flag_noncompliance(
+                "client-stream/start announced an unsupported channels count"
+            )
             return
         audio_format = AudioFormat(
             sample_rate=source.sample_rate,
