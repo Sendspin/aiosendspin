@@ -309,9 +309,9 @@ class SendspinConnection:
         self._pairing_task: asyncio.Task[bool] | None = None
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_index = 0
+        self._activated_pairing_method: PairMethod | None = None
         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
         self._sent_psk_pair_init = False
-        self._activated_pairing_method: PairMethod | None = None
         self._connection_done = asyncio.Event()
         self._transport: Transport | None = None
         self._pending_first_text: str | None = None  # legacy first frame held for the loop
@@ -1896,7 +1896,6 @@ class SendspinConnection:
                     and self._server.languages is not None
                 ):
                     languages = list(self._server.languages)
-            # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
             self._activated_pairing_method = method
             assert self._client_info is not None
             # No gate on the hello-advertised methods: the advertisement may lag the client's
@@ -2032,6 +2031,7 @@ class SendspinConnection:
             legacy_rounds=legacy_rounds,
             # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
             legacy_pin=bool(self._client_info.legacy_pin_methods_used),
+            on_noncompliance=self._flag_noncompliance,
         )
 
     # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
@@ -2470,8 +2470,13 @@ class SendspinConnection:
         # Only a pre-#287 client's repeated hello belongs to the attempt; any other is flagged.
         if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
+        self._flag_pairing_frame_before_activate(message_type)
         self._pairing_message_queue.put_nowait(msg)
         return True
+
+    def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
+        if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
+            self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
 
     async def _run_message_loop(self) -> None:
         transport = self._transport
@@ -2541,6 +2546,7 @@ class SendspinConnection:
         message_type = self._peek_message_type(text)
         self._note_pairing_frame(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
+            self._flag_pairing_frame_before_activate(message_type)
             # In flight from before the client observed the leave activate.
             self._logger.debug("Discarding pairing message: not in pairing")
             return True
