@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .base import SendspinConfig, SendspinModel
-from .core import UnpairedAccess
+from .core import _LEGACY_PIN_METHODS, UnpairedAccess
 from .types import (
     ClientMessage,
     ManagementResult,
@@ -284,6 +284,16 @@ class ManagementResultData(SendspinModel):
         """Omit fields not relevant to the answered request."""
 
         omit_none = True
+
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Map the pre-rename PIN keys to their new names, keeping the new key if both are sent."""
+        renamed = {k: v for k, v in d.items() if k not in _LEGACY_PIN_METHODS}
+        for legacy_key, key in _LEGACY_PIN_METHODS.items():
+            if legacy_key in d:
+                renamed.setdefault(key, d[legacy_key])
+        return renamed
 
 
 @dataclass
