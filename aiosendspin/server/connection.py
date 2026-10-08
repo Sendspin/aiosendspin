@@ -38,7 +38,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache, partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -2438,6 +2438,10 @@ class SendspinConnection:
         Deprecated: the Sendspin spec no longer defines the management activity.
         """
         warn_deprecated("SendspinConnection.set_pairing_config", MANAGEMENT_DEPRECATION)
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        # Key on the list form, since a client with its PIN methods disabled offers none of them.
+        if self._client_info is not None and self._client_info.legacy_pair_methods_list_used:
+            patch = replace(patch, legacy_pin_wire=True)
         payload = await self._management_request(
             ManagementSetPairingConfigMessage(payload=patch), ManagementResultPayload
         )
@@ -2532,8 +2536,16 @@ class SendspinConnection:
         assert transport is not None
         cancelled = False
         try:
-            async for msg in transport:
-                timestamp_us = self._server.clock.now_us()
+            while True:
+                msg, timestamp_us = await self._receive_timed(transport)
+
+                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    close_code = transport.close_code
+                    log_func = (
+                        self._logger.debug if close_code in (1000, 1001) else self._logger.warning
+                    )
+                    log_func("WebSocket closed, close_code=%s", close_code)
+                    break
 
                 if self._try_route_to_pairing_queue(msg):
                     continue
@@ -2570,16 +2582,6 @@ class SendspinConnection:
                 for reason in deviations:
                     self._flag_noncompliance(f"{_peek_message_type(text)} {reason}")
                 await self._handle_message(message, timestamp_us)
-            else:
-                # Loop exited normally (iterator exhausted) - connection closed
-                close_code = transport.close_code
-                log_func = (
-                    self._logger.debug if close_code in (1000, 1001) else self._logger.warning
-                )
-                log_func(
-                    "WebSocket closed, close_code=%s",
-                    close_code,
-                )
         except asyncio.CancelledError:
             cancelled = True
             self._logger.debug("Message loop cancelled")
@@ -2596,6 +2598,13 @@ class SendspinConnection:
                 self._writer_task.cancel()
             if not cancelled:
                 self._connection_done.set()
+
+    async def _receive_timed(self, transport: Transport) -> tuple[WSMessage, int]:
+        """Return the next message and its receive time, taken before decryption."""
+        if isinstance(transport, EncryptedWebSocket):
+            return await transport.receive_timed(self._server.clock)
+        msg = await transport.receive()
+        return msg, self._server.clock.now_us()
 
     def _skip_undecodable_message(self, text: str, exc: Exception) -> bool:
         """Return whether a text message that failed to parse is skipped rather than fatal."""
@@ -3232,13 +3241,9 @@ class SendspinConnection:
             await self._send_message(wsock, message)
         return True
 
-    async def _process_normal_messages(
-        self,
-        wsock: Transport,
-        ready_entry: tuple[str, _RoleQueueEntry, int, int] | None,
-    ) -> bool:
-        """Send one queued non-role message when no role entry is ready."""
-        if ready_entry is not None or not self._normal_messages:
+    async def _process_normal_messages(self, wsock: Transport) -> bool:
+        """Send one queued non-role message if available."""
+        if not self._normal_messages:
             return False
         message = self._normal_messages.popleft()
         self._queue_size = max(self._queue_size - 1, 0)
@@ -3533,22 +3538,19 @@ class SendspinConnection:
                     iterations_since_yield = 0
                     continue
 
-                now_us = clock_now_us()
-                self._promote_ready_roles(now_us)
-
-                ready_entry = self._peek_ready_entry()
-                has_normal = bool(self._normal_messages)
-
-                if ready_entry is None and not has_normal:
-                    await self._wait_for_writer_work(now_us)
-                    continue
-
-                if await self._process_normal_messages(wsock, ready_entry):
+                if await self._process_normal_messages(wsock):
                     now_us = clock_now_us()
                     iterations_since_yield = 0
                     continue
 
-                assert ready_entry is not None
+                now_us = clock_now_us()
+                self._promote_ready_roles(now_us)
+
+                ready_entry = self._peek_ready_entry()
+                if ready_entry is None:
+                    await self._wait_for_writer_work(now_us)
+                    continue
+
                 sent, now_us = await self._send_role_entry(wsock, ready_entry, now_us)
                 if sent:
                     iterations_since_yield = 0

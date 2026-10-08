@@ -159,3 +159,21 @@ def test_get_config_data_round_trips() -> None:
     raw = orjson.loads(message.to_json())["payload"]["data"]
     assert "escalated" not in raw["pairing_psk"]
     assert raw["dynamic_pairing_code"]["escalated"] is True
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def test_get_config_data_accepts_pre_rename_pin_keys() -> None:
+    """A result with the pre-rename static_pin/dynamic_pin objects parses into the new fields."""
+    payload = ManagementResultPayload.from_dict(
+        {
+            "result": "ok",
+            "data": {
+                "static_pin": {"enabled": True},
+                "dynamic_pin": {"enabled": False, "min_pin_length": 6, "escalated": True},
+            },
+        }
+    )
+    assert payload.data == ManagementResultData(
+        static_pairing_code=PairingMethodConfig(enabled=True),
+        dynamic_pairing_code=PairingMethodConfig(enabled=False, escalated=True),
+    )

@@ -747,23 +747,20 @@ class TestEncryptedActivities:
     ) -> None:
         """A ClientComplianceError during dispatch ends the loop with no warm reconnect."""
 
-        class _AsyncIterTransport:
+        class _ListTransport:
             close_code = 1000
 
             def __init__(self, msgs: list[WSMessage]) -> None:
                 self._msgs = msgs
 
-            def __aiter__(self) -> _AsyncIterTransport:
-                return self
-
-            async def __anext__(self) -> WSMessage:
+            async def receive(self) -> WSMessage:
                 if not self._msgs:
-                    raise StopAsyncIteration
+                    return WSMessage(WSMsgType.CLOSED, None, None)
                 return self._msgs.pop(0)
 
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
         text = orjson.dumps({"type": "client/time", "payload": {"client_transmitted": 1}}).decode()
-        conn._transport = _AsyncIterTransport([WSMessage(WSMsgType.TEXT, text, "")])  # type: ignore[assignment]  # noqa: SLF001
+        conn._transport = _ListTransport([WSMessage(WSMsgType.TEXT, text, "")])  # type: ignore[assignment]  # noqa: SLF001
         conn._handle_message = AsyncMock(side_effect=ClientComplianceError("bad"))  # type: ignore[method-assign]  # noqa: SLF001
         conn.disconnect = AsyncMock()  # type: ignore[method-assign]
 
@@ -776,18 +773,15 @@ class TestEncryptedActivities:
     async def test_client_binary_frame_is_ignored_not_rejected(self) -> None:
         """A client binary frame is logged and skipped, never rejecting the connection."""
 
-        class _AsyncIterTransport:
+        class _ListTransport:
             close_code = 1000
 
             def __init__(self, msgs: list[WSMessage]) -> None:
                 self._msgs = msgs
 
-            def __aiter__(self) -> _AsyncIterTransport:
-                return self
-
-            async def __anext__(self) -> WSMessage:
+            async def receive(self) -> WSMessage:
                 if not self._msgs:
-                    raise StopAsyncIteration
+                    return WSMessage(WSMsgType.CLOSED, None, None)
                 return self._msgs.pop(0)
 
         loop = asyncio.get_running_loop()
@@ -795,7 +789,7 @@ class TestEncryptedActivities:
             loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
         )
         conn = SendspinConnection(strict_server, wsock_client=AsyncMock())
-        conn._transport = _AsyncIterTransport([WSMessage(WSMsgType.BINARY, b"\x00", "")])  # type: ignore[assignment]  # noqa: SLF001
+        conn._transport = _ListTransport([WSMessage(WSMsgType.BINARY, b"\x00", "")])  # type: ignore[assignment]  # noqa: SLF001
 
         await conn._run_message_loop()  # noqa: SLF001
         assert conn._closing is False  # noqa: SLF001

@@ -119,6 +119,8 @@ _FFT_DRIVEN_TYPES: frozenset[SupportedVisualizerType] = frozenset(
 )
 # Highest periodic frame rate the server emits, matching common high-refresh displays.
 _RATE_MAX_CAP = 120
+# Bounds per-frame spectrum cost, at the 48 kHz FFT's frequency bin count.
+_N_DISP_BINS_MAX = 1024
 # Periodic frames for a beat-wanting client are held to this lead ahead of the
 # playhead. Keeping the wire-ts cursor near the playhead means a beat schedule
 # landing mid-stream (a flow-mode track change re-pushes the whole schedule)
@@ -885,6 +887,18 @@ class VisualizerV1Role(Role):
         types = [t for t in request.types if t in _IMPLEMENTED_TYPES]
         if "spectrum" in types and request.spectrum is None:
             # Flagged as a deviation; a lenient server streams the other types.
+            types.remove("spectrum")
+        if (
+            "spectrum" in types
+            and request.spectrum is not None
+            and request.spectrum.n_disp_bins > _N_DISP_BINS_MAX
+        ):
+            _LOGGER.debug(
+                "Client %s requested %d spectrum bins, above the limit of %d: omitting spectrum",
+                self._client.client_id,
+                request.spectrum.n_disp_bins,
+                _N_DISP_BINS_MAX,
+            )
             types.remove("spectrum")
         # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         # `pitch` rides spec-reserved binary type 21. Only a lenient server streams

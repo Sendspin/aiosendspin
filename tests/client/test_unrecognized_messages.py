@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +22,9 @@ from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.util import WARN_INTERVAL_S
 from tests.conftest import make_sdk_client
 from tests.noise.conftest import FakeWebSocket, make_paired_sessions
+
+if TYPE_CHECKING:
+    from aiosendspin.clock import Clock
 
 
 async def _activated_connection() -> tuple[SendspinConnection, list[bytes]]:
@@ -59,7 +62,8 @@ async def test_unknown_json_type_is_ignored() -> None:
     conn, _ = await _activated_connection()
 
     await conn._handle_ws_message(  # noqa: SLF001
-        WSMessage(WSMsgType.TEXT, '{"type":"server/from-the-future","payload":{"x":1}}', "")
+        WSMessage(WSMsgType.TEXT, '{"type":"server/from-the-future","payload":{"x":1}}', ""),
+        conn.now_us(),
     )
 
     conn.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
@@ -73,7 +77,8 @@ async def test_unimplemented_binary_id_is_ignored(message_id: int) -> None:
     conn, _ = await _activated_connection()
 
     await conn._handle_ws_message(  # noqa: SLF001
-        WSMessage(WSMsgType.BINARY, bytes([message_id]) + b"data", "")
+        WSMessage(WSMsgType.BINARY, bytes([message_id]) + b"data", ""),
+        conn.now_us(),
     )
 
     conn.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
@@ -102,7 +107,8 @@ async def test_implemented_binary_id_with_inactive_stream_is_dropped() -> None:
     conn, audio = await _activated_connection()
 
     await conn._handle_ws_message(  # noqa: SLF001
-        WSMessage(WSMsgType.BINARY, pack_player_audio_header(1, 0) + b"\x00\x00\x00\x00", "")
+        WSMessage(WSMsgType.BINARY, pack_player_audio_header(1, 0) + b"\x00\x00\x00\x00", ""),
+        conn.now_us(),
     )
 
     assert audio == []
@@ -119,7 +125,7 @@ async def test_reserved_binary_id_is_ignored(type_byte: int) -> None:
     ws = EncryptedWebSocket(raw, responder)
     await raw.push(WSMessage(WSMsgType.BINARY, initiator.encrypt(bytes([type_byte, 4, 5])), ""))
 
-    await conn._handle_ws_message(await ws.receive())  # noqa: SLF001
+    await conn._handle_ws_message(await ws.receive(), conn.now_us())  # noqa: SLF001
 
     conn.disconnect.assert_not_awaited()  # type: ignore[attr-defined]
     assert conn._protocol_error_task is None  # noqa: SLF001
@@ -136,13 +142,10 @@ class _RehandshakeWs:
         ]
         self._reply = reply
 
-    def __aiter__(self) -> _RehandshakeWs:
-        return self
-
-    async def __anext__(self) -> WSMessage:
+    async def receive_timed(self, clock: Clock) -> tuple[WSMessage, int]:
         if not self._pending:
-            raise StopAsyncIteration
-        return self._pending.pop()
+            return WSMessage(WSMsgType.CLOSED, None, None), clock.now_us()
+        return self._pending.pop(), clock.now_us()
 
     async def receive(self) -> WSMessage:
         return self._reply

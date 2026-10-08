@@ -1442,10 +1442,14 @@ class SendspinConnection:
         self._exchange_in_progress = False
 
     async def _reader_loop(self) -> None:
-        assert self._ws is not None
+        ws = self._ws
+        assert ws is not None
         try:
-            async for msg in self._ws:
-                await self._handle_ws_message(msg)
+            while True:
+                msg, received_us = await ws.receive_timed(self._client.clock)
+                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    break
+                await self._handle_ws_message(msg, received_us)
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -1453,16 +1457,16 @@ class SendspinConnection:
         finally:
             await self.disconnect()
 
-    async def _handle_ws_message(self, msg: WSMessage) -> None:
+    async def _handle_ws_message(self, msg: WSMessage, received_us: int) -> None:
         if msg.type is WSMsgType.TEXT:
-            await self._handle_json_message(msg.data)
+            await self._handle_json_message(msg.data, received_us)
         elif msg.type is WSMsgType.BINARY:
             self._handle_binary_message(msg.data)
         elif msg.type is WSMsgType.ERROR:
             logger.error("WebSocket error: %s", self._ws.exception() if self._ws else "unknown")
             await self.disconnect()
 
-    async def _handle_json_message(self, data: str) -> None:
+    async def _handle_json_message(self, data: str, received_us: int) -> None:
         try:
             message = ServerMessage.from_json(data)
         except Exception:
@@ -1480,7 +1484,7 @@ class SendspinConnection:
             case ServerActivateMessage(payload=payload):
                 await self._handle_server_activate(payload)
             case ServerTimeMessage(payload=payload):
-                await self._handle_server_time(payload)
+                await self._handle_server_time(payload, received_us)
             case StreamStartMessage():
                 await self._handle_stream_start(message)
             case StreamClearMessage():
@@ -1624,18 +1628,17 @@ class SendspinConnection:
         if self._time_task is None or self._time_task.done():
             self._time_task = self._client.loop.create_task(self._time_sync_loop())
 
-    async def _handle_server_time(self, payload: ServerTimePayload) -> None:
+    async def _handle_server_time(self, payload: ServerTimePayload, received_us: int) -> None:
         was_synchronized = self._time_filter.is_synchronized
-        now_us = self.now_us()
         offset = (
             (payload.server_received - payload.client_transmitted)
-            + (payload.server_transmitted - now_us)
+            + (payload.server_transmitted - received_us)
         ) / 2
         delay = (
-            (now_us - payload.client_transmitted)
+            (received_us - payload.client_transmitted)
             - (payload.server_transmitted - payload.server_received)
         ) / 2
-        self._time_filter.update(round(offset), round(delay), now_us)
+        self._time_filter.update(round(offset), round(delay), received_us)
         for name, pending in self._pending_state.items():
             pending.apply_handle.cancel()
             pending.apply_handle = self._call_at_server_time(
