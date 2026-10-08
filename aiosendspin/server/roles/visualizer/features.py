@@ -110,6 +110,9 @@ class VisualizerFeatureExtractor:
         # Hop is derived from rate_max. Zero/negative means "one frame per chunk":
         # cursor is reset to chunk_end after every chunk.
         self._hop_us: int = 1_000_000 // config.rate_max if config.rate_max > 0 else 0
+        self._has_periodic_types = any(
+            t in config.types for t in ("loudness", "f_peak", "spectrum", "pitch")
+        )
         self._window_samples: int = min(self._window_samples_for_rate(sample_rate), sample_rate)
 
         # Rolling mono buffer + ts of its first sample.
@@ -213,7 +216,7 @@ class VisualizerFeatureExtractor:
 
         frames: list[ExtractedFrame] = []
         assert self._next_emit_ts_us is not None
-        while self._next_emit_ts_us <= chunk_end_ts_us:
+        while self._has_periodic_types and self._next_emit_ts_us <= chunk_end_ts_us:
             emit_ts = self._next_emit_ts_us
             window = self._extract_window(emit_ts)
             if window is None:
@@ -274,10 +277,6 @@ class VisualizerFeatureExtractor:
 
     def _compute_frame(self, mono: np.ndarray, emit_ts: int) -> ExtractedFrame:
         """Compute a single frame from a windowed mono PCM slice."""
-        needs_fft = any(
-            t in self._config.types for t in ("loudness", "f_peak", "spectrum", "pitch")
-        )
-
         loudness: int | None = None
         f_peak_freq: int | None = None
         f_peak_amp: int | None = None
@@ -285,27 +284,26 @@ class VisualizerFeatureExtractor:
         pitch_midi_q88: int | None = None
         pitch_confidence: int | None = None
 
-        if needs_fft:
-            freqs, magnitude = self._fft_magnitude(mono)
-            compensated = self._apply_psychoacoustic_compensation(freqs, magnitude)
+        freqs, magnitude = self._fft_magnitude(mono)
+        compensated = self._apply_psychoacoustic_compensation(freqs, magnitude)
 
-            if "loudness" in self._config.types:
-                loudness = self._compute_loudness_db(compensated, mono.size)
+        if "loudness" in self._config.types:
+            loudness = self._compute_loudness_db(compensated, mono.size)
 
-            if "f_peak" in self._config.types:
-                f_peak_freq, f_peak_amp = self._compute_f_peak(freqs, compensated, mono.size)
+        if "f_peak" in self._config.types:
+            f_peak_freq, f_peak_amp = self._compute_f_peak(freqs, compensated, mono.size)
 
-            if "spectrum" in self._config.types:
-                spectrum = self._compute_spectrum(freqs, compensated)
+        if "spectrum" in self._config.types:
+            spectrum = self._compute_spectrum(freqs, compensated)
 
-            # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
-            if "pitch" in self._config.types:
-                pitch_midi_q88, pitch_confidence = self._compute_pitch_yinfft(mono, magnitude)
-                if pitch_midi_q88 is None:
-                    self._pitch_register = None
-                    self._pitch_last_ts_us = None
-                else:
-                    pitch_midi_q88 = self._stabilize_pitch_octave(pitch_midi_q88, emit_ts)
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        if "pitch" in self._config.types:
+            pitch_midi_q88, pitch_confidence = self._compute_pitch_yinfft(mono, magnitude)
+            if pitch_midi_q88 is None:
+                self._pitch_register = None
+                self._pitch_last_ts_us = None
+            else:
+                pitch_midi_q88 = self._stabilize_pitch_octave(pitch_midi_q88, emit_ts)
 
         return ExtractedFrame(
             timestamp_us=emit_ts,
