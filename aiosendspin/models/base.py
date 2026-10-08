@@ -1,7 +1,8 @@
 """Shared serialization behavior for Sendspin protocol models.
 
 The protocol types `int`-annotated wire fields as integers, but Python does not enforce
-annotations at runtime. This module keeps those fields integer-typed during serialization.
+annotations at runtime. This module keeps those fields integer-typed during serialization,
+and checks the JSON type of integer, boolean and string fields during parsing.
 It also provides the parse helpers that set aside unrecognized enum identifiers, and the
 hooks that carry application-specific role objects between the wire and the models.
 """
@@ -10,11 +11,17 @@ from __future__ import annotations
 
 import math
 import operator
+import re
+from collections.abc import Callable
+from contextvars import ContextVar
 from enum import Enum
-from typing import Any
+from functools import cache
+from typing import Any, get_type_hints
 
 from mashumaro.config import BaseConfig
+from mashumaro.exceptions import InvalidFieldValue
 from mashumaro.mixins.orjson import DataClassORJSONMixin
+from mashumaro.types import Alias
 
 
 def int_to_wire(value: Any) -> int:
@@ -95,13 +102,207 @@ def expand_application_objects(d: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+_JSON_TYPE_NAMES: dict[type, str] = {
+    bool: "a boolean",
+    int: "an integer",
+    float: "a number",
+    str: "a string",
+    list: "an array",
+    dict: "an object",
+    type(None): "null",
+}
+_INT64_MIN = -(2**63)
+_INT64_LIMIT = 2**63
+_DECIMAL_INTEGER = re.compile(r"-?[0-9]+")
+
+
+class _WireTypeMismatchError(Exception):
+    """Raised by a parse hook while locating the field of a recorded type mismatch."""
+
+    def __init__(self, got: str, expected: str) -> None:
+        super().__init__(got, expected)
+        self.got = got
+        self.expected = expected
+
+
+class _LocateMismatch:
+    """Collector state that makes parse hooks raise at the first type mismatch."""
+
+
+_LOCATE = _LocateMismatch()
+_wire_deviations: ContextVar[dict[str, None] | _LocateMismatch | None] = ContextVar(
+    "wire_deviations", default=None
+)
+
+
+def _json_type(value: Any) -> str:
+    return _JSON_TYPE_NAMES.get(type(value), type(value).__name__)
+
+
+def _mismatch_reason(got: str, expected: str, path: str | None = None) -> str:
+    where = f" for '{path}'" if path else ""
+    return f"sent {got}{where} instead of {expected}"
+
+
+def note_wire_deviation(reason: str) -> None:
+    """Record a tolerated deviation for the enclosing ``parse_noting_wire_deviations``."""
+    collector = _wire_deviations.get()
+    if isinstance(collector, dict):
+        collector[reason] = None
+
+
+def _note_type_mismatch(value: Any, expected: str) -> None:
+    collector = _wire_deviations.get()
+    if collector is None:
+        return
+    if isinstance(collector, _LocateMismatch):
+        raise _WireTypeMismatchError(_json_type(value), expected)
+    collector[_mismatch_reason(_json_type(value), expected)] = None
+
+
+@cache
+def _wire_field_name(holder_class: type, field_name: str) -> str:
+    """Return the wire key of a model field, honoring an ``Alias`` annotation."""
+    hint = get_type_hints(holder_class, include_extras=True).get(field_name)
+    for meta in getattr(hint, "__metadata__", ()):
+        if isinstance(meta, Alias):
+            return meta.name
+    return field_name
+
+
+def _mismatch_path(exc: BaseException) -> tuple[_WireTypeMismatchError, str] | None:
+    """Return the mismatch that ended a locating parse and the dotted path of its field."""
+    fields: list[str] = []
+    cause: BaseException | None = exc
+    while isinstance(cause, InvalidFieldValue):
+        fields.append(_wire_field_name(cause.holder_class, cause.field_name))
+        cause = cause.__context__
+    if not isinstance(cause, _WireTypeMismatchError):
+        return None
+    # Message envelopes wrap everything in ``payload``, which names nothing to a reader.
+    if fields[:1] == ["payload"]:
+        fields = fields[1:]
+    return cause, ".".join(fields)
+
+
+def parse_noting_wire_deviations[**P, T](
+    parse: Callable[P, T], *args: P.args, **kwargs: P.kwargs
+) -> tuple[T, list[str]]:
+    """Run ``parse`` and return its result with each tolerated deviation it recorded.
+
+    A recorded type mismatch is named by the field of the first one, found by parsing again.
+    """
+    collector: dict[str, None] = {}
+    token = _wire_deviations.set(collector)
+    try:
+        result = parse(*args, **kwargs)
+    finally:
+        _wire_deviations.reset(token)
+    if not collector:
+        return result, []
+    reasons = list(collector)
+    token = _wire_deviations.set(_LOCATE)
+    try:
+        parse(*args, **kwargs)
+    except InvalidFieldValue as exc:
+        if located := _mismatch_path(exc):
+            mismatch, path = located
+            unnamed = _mismatch_reason(mismatch.got, mismatch.expected)
+            named = _mismatch_reason(mismatch.got, mismatch.expected, path)
+            reasons = [named if reason == unnamed else reason for reason in reasons]
+    finally:
+        _wire_deviations.reset(token)
+    return result, reasons
+
+
+def int_from_wire(value: Any) -> int:
+    """Parse an integer field, recording and converting a number, boolean or decimal string.
+
+    A float with no fractional part is a JSON integer and passes unrecorded.
+
+    Raises:
+        TypeError: If the value has no integer reading.
+        ValueError: If a float or decimal string lies outside the signed 64-bit range.
+    """
+    if type(value) is int:
+        return value
+    if isinstance(value, bool):
+        _note_type_mismatch(value, "an integer")
+        return int(value)
+    if isinstance(value, float) and math.isfinite(value):
+        parsed = int(value)
+        tolerated = not value.is_integer()
+    elif isinstance(value, str) and _DECIMAL_INTEGER.fullmatch(value):
+        parsed = int(value)
+        tolerated = True
+    else:
+        msg = f"expected an integer, got {_json_type(value)}: {value!r}"
+        raise TypeError(msg)
+    if not _INT64_MIN <= parsed < _INT64_LIMIT:
+        msg = f"integer out of the signed 64-bit range: {value!r}"
+        raise ValueError(msg)
+    if tolerated:
+        _note_type_mismatch(value, "an integer")
+    return parsed
+
+
+def bool_from_wire(value: Any) -> bool:
+    """Parse a boolean field, recording and converting ``"true"``/``"false"`` and ``1``/``0``.
+
+    Raises:
+        TypeError: If the value has no boolean reading.
+    """
+    if type(value) is bool:
+        return value
+    if value in ("true", "false") or (type(value) is int and value in (0, 1)):
+        _note_type_mismatch(value, "a boolean")
+        return value in ("true", 1)
+    msg = f"expected a boolean, got {_json_type(value)}: {value!r}"
+    raise TypeError(msg)
+
+
+def str_from_wire(value: Any) -> str:
+    """Parse a string field, recording and converting a number.
+
+    Raises:
+        TypeError: If the value is not a string or a number.
+    """
+    if type(value) is str:
+        return value
+    if isinstance(value, str):
+        return str(value)
+    if type(value) in (int, float):
+        _note_type_mismatch(value, "a string")
+        return str(value)
+    msg = f"expected a string, got {_json_type(value)}: {value!r}"
+    raise TypeError(msg)
+
+
+def str_list_from_wire(value: Any) -> list[str]:
+    """Parse a string-list field, rejecting a non-list rather than iterating it.
+
+    Raises:
+        TypeError: If the value is not a list or an entry is not a string or a number.
+    """
+    if not isinstance(value, list):
+        msg = f"expected an array, got {_json_type(value)}: {value!r}"
+        raise TypeError(msg)
+    return [str_from_wire(entry) for entry in value]
+
+
 class SendspinConfig(BaseConfig):
     """Base mashumaro config for Sendspin models.
 
-    Model configs must derive from this class to retain integer coercion.
+    Model configs must derive from this class to retain integer coercion and the wire type
+    checks.
     """
 
-    serialization_strategy = {int: {"serialize": int_to_wire}}  # noqa: RUF012
+    serialization_strategy = {  # noqa: RUF012
+        int: {"serialize": int_to_wire, "deserialize": int_from_wire},
+        bool: {"deserialize": bool_from_wire},
+        str: {"deserialize": str_from_wire},
+        list[str]: {"deserialize": str_list_from_wire},
+    }
 
 
 class SendspinModel(DataClassORJSONMixin):

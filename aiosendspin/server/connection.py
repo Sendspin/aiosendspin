@@ -47,6 +47,7 @@ from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from mashumaro.exceptions import SuitableVariantNotFoundError
 
 from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw, unpack_binary_header
+from aiosendspin.models.base import parse_noting_wire_deviations
 from aiosendspin.models.core import (
     ActivatePairing,
     ClientCommandMessage,
@@ -1362,7 +1363,9 @@ class SendspinConnection:
                 # Encrypted clients send client_id and version in client/init, so drop any copies.
                 payload.pop("client_id", None)
                 payload.pop("version", None)
-            message = self._client_message_from_dict(decoded)
+            message, deviations = parse_noting_wire_deviations(
+                self._client_message_from_dict, decoded
+            )
         except (LookupError, TypeError, ValueError) as exc:
             self._logger.error("Malformed client/hello: %s", exc)
             await self.disconnect(retry_connection=False)
@@ -1379,6 +1382,8 @@ class SendspinConnection:
         # Recorded before the first deviation can be flagged below, while the connection
         # still has no attached client to name.
         self._hello_description = describe_client(client_info, self._client_id)
+        for reason in deviations:
+            self._flag_noncompliance(f"{message.type} {reason}")
         if not self.is_encrypted:
             self._flag_noncompliance("connected unencrypted (transition mode)")
         # Encrypted clients omit version (it is in client/init); only a legacy
@@ -2504,12 +2509,23 @@ class SendspinConnection:
         if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
         self._flag_pairing_frame_before_activate(message_type)
+        if message_type in _PAIRING_MESSAGE_TYPES:
+            self._flag_pairing_frame_deviations(cast("str", msg.data), message_type)
         self._pairing_message_queue.put_nowait(msg)
         return True
 
     def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
         if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
             self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
+
+    def _flag_pairing_frame_deviations(self, text: str, message_type: str) -> None:
+        """Flag the tolerated deviations in a pairing frame before the pairing task parses it."""
+        try:
+            _, deviations = parse_noting_wire_deviations(PairingMessage.from_json, text)
+        except (LookupError, ValueError):
+            return  # The pairing task reports the malformed frame.
+        for reason in deviations:
+            self._flag_noncompliance(f"{message_type} {reason}")
 
     async def _run_message_loop(self) -> None:
         transport = self._transport
@@ -2541,7 +2557,9 @@ class SendspinConnection:
                     else ()
                 )
                 try:
-                    message = self._deserialize_client_message(text, active_families)
+                    message, deviations = parse_noting_wire_deviations(
+                        self._deserialize_client_message, text, active_families
+                    )
                 except (LookupError, TypeError, ValueError) as exc:
                     if self._skip_undecodable_message(text, exc):
                         continue
@@ -2549,6 +2567,8 @@ class SendspinConnection:
                         "Ending connection on a message that failed to parse: %s", exc
                     )
                     break
+                for reason in deviations:
+                    self._flag_noncompliance(f"{_peek_message_type(text)} {reason}")
                 await self._handle_message(message, timestamp_us)
             else:
                 # Loop exited normally (iterator exhausted) - connection closed

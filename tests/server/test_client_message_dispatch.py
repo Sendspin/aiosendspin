@@ -298,6 +298,30 @@ async def test_malformed_inactive_role_object_is_ignored() -> None:
 
 
 @pytest.mark.parametrize("strict", [False, True])
+async def test_wire_type_deviation_is_flagged_before_dispatch(
+    strict: bool,  # noqa: FBT001
+) -> None:
+    """A tolerated wire type is flagged first, and in strict mode the message never dispatches."""
+    time = orjson.dumps({"type": "client/time", "payload": {"client_transmitted": 5.7}})
+    conn, client = _connection([time.decode(), _LEAVE], strict=strict)
+    conn.send_priority_message = MagicMock()  # type: ignore[method-assign]
+
+    await conn._run_message_loop()  # noqa: SLF001
+
+    assert client.noncompliance == [
+        "client/time sent a number for 'client_transmitted' instead of an integer"
+    ]
+    if strict:
+        conn.send_priority_message.assert_not_called()
+        client.handle_leave.assert_not_awaited()
+        assert conn._closing is True  # noqa: SLF001
+    else:
+        reply = conn.send_priority_message.call_args.args[0]
+        assert reply.payload.client_transmitted == 5
+        client.handle_leave.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("strict", [False, True])
 async def test_malformed_active_role_object_is_flagged(
     strict: bool,  # noqa: FBT001
 ) -> None:
