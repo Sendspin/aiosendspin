@@ -302,6 +302,40 @@ def test_loudness_ema_smooths_step_input() -> None:
     assert first < 0.8 * last
 
 
+def test_peak_detected_promptly_with_low_rate_max() -> None:
+    """A transient between two periodic frames still yields a timely `peak`."""
+    config = StreamStartVisualizer(types=("peak",), rate_max=1)
+    extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
+    silence = bytes(1_200 * 2 * 2)
+    burst = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+
+    frames = []
+    for i in range(44):
+        pcm = burst if i == 20 else silence
+        frames.extend(extractor.process_chunk(pcm, i * 25_000))
+
+    peak_ts = [f.timestamp_us for f in frames if f.peak is not None]
+    assert peak_ts, "no peak detected"
+    assert 500_000 < peak_ts[0] <= 550_000
+
+
+def test_peak_and_periodic_frames_merge_in_timestamp_order() -> None:
+    """Onset frames interleave with periodic frames without going backwards."""
+    config = StreamStartVisualizer(types=("loudness", "peak"), rate_max=30)
+    extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
+    silence = bytes(1_200 * 2 * 2)
+    burst = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+
+    frames = []
+    for i in range(44):
+        pcm = burst if i == 20 else silence
+        frames.extend(extractor.process_chunk(pcm, i * 25_000))
+
+    timestamps = [f.timestamp_us for f in frames]
+    assert any(f.peak is not None for f in frames)
+    assert timestamps == sorted(timestamps)
+
+
 # ---------------------------------------------------------------------------
 # Pitch detection
 # ---------------------------------------------------------------------------

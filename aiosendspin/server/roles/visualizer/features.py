@@ -49,6 +49,8 @@ _PITCH_UNVOICED_DPRIME = 0.35
 _PITCH_REGISTER_ALPHA = 0.25
 _PITCH_SNAP_MAX_SEMITONES = 7.0
 _PITCH_REGISTER_GAP_US = 400_000
+# Fixed onset hop, independent of `rate_max`. Changing it changes `peak` sensitivity.
+_ONSET_HOP_US = 1_000_000 // 60
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,9 @@ class VisualizerFeatureExtractor:
         # Hop is derived from rate_max. Zero/negative means "one frame per chunk":
         # cursor is reset to chunk_end after every chunk.
         self._hop_us: int = 1_000_000 // config.rate_max if config.rate_max > 0 else 0
+        self._has_periodic_types = any(
+            t in config.types for t in ("loudness", "f_peak", "spectrum", "pitch")
+        )
         self._window_samples: int = min(self._window_samples_for_rate(sample_rate), sample_rate)
 
         # Rolling mono buffer + ts of its first sample.
@@ -115,6 +120,7 @@ class VisualizerFeatureExtractor:
         self._buffer_start_ts_us: int | None = None
         # Cursor: ts of the NEXT frame to emit. Set on first chunk.
         self._next_emit_ts_us: int | None = None
+        self._next_onset_ts_us: int | None = None
 
         # Per-FFT-size caches for values that are constant once the window
         # size settles (recomputing them every frame is pure overhead on
@@ -159,6 +165,7 @@ class VisualizerFeatureExtractor:
         self._buffer = np.zeros(0, dtype=np.float32)
         self._buffer_start_ts_us = None
         self._next_emit_ts_us = None
+        self._next_onset_ts_us = None
         self._spectrum_ema = None
         self._loudness_ema = None
         self._f_peak_last_idx = None
@@ -168,7 +175,7 @@ class VisualizerFeatureExtractor:
         self._pitch_last_ts_us = None
 
     def process_chunk(self, pcm: bytes, timestamp_us: int) -> list[ExtractedFrame]:
-        """Append PCM and emit one frame per hop boundary that fits.
+        """Append PCM and emit one frame per hop boundary that fits, plus detected onsets.
 
         Returns frames in non-decreasing timestamp order. May be empty if the
         chunk is too short to advance past the next hop boundary.
@@ -191,6 +198,7 @@ class VisualizerFeatureExtractor:
                 self._buffer = np.zeros(0, dtype=np.float32)
                 self._buffer_start_ts_us = None
                 self._next_emit_ts_us = None
+                self._next_onset_ts_us = None
 
         if self._buffer_start_ts_us is None:
             self._buffer = mono.copy()
@@ -198,6 +206,7 @@ class VisualizerFeatureExtractor:
             # Anchor first emit at chunk end so the first frame's window
             # covers the whole chunk.
             self._next_emit_ts_us = chunk_end_ts_us
+            self._next_onset_ts_us = chunk_end_ts_us
         else:
             self._buffer = np.concatenate([self._buffer, mono])
 
@@ -207,7 +216,7 @@ class VisualizerFeatureExtractor:
 
         frames: list[ExtractedFrame] = []
         assert self._next_emit_ts_us is not None
-        while self._next_emit_ts_us <= chunk_end_ts_us:
+        while self._has_periodic_types and self._next_emit_ts_us <= chunk_end_ts_us:
             emit_ts = self._next_emit_ts_us
             window = self._extract_window(emit_ts)
             if window is None:
@@ -221,7 +230,27 @@ class VisualizerFeatureExtractor:
                 break
             self._next_emit_ts_us += self._hop_us
 
+        if "peak" in self._config.types:
+            frames.extend(self._detect_onsets(chunk_end_ts_us))
+            frames.sort(key=lambda frame: frame.timestamp_us)
+
         self._trim_buffer()
+        return frames
+
+    def _detect_onsets(self, chunk_end_ts_us: int) -> list[ExtractedFrame]:
+        frames: list[ExtractedFrame] = []
+        assert self._next_onset_ts_us is not None
+        while self._next_onset_ts_us <= chunk_end_ts_us:
+            onset_ts = self._next_onset_ts_us
+            self._next_onset_ts_us += _ONSET_HOP_US
+            window = self._extract_window(onset_ts)
+            if window is None:
+                continue
+            freqs, magnitude = self._fft_magnitude(window)
+            compensated = self._apply_psychoacoustic_compensation(freqs, magnitude)
+            peak = self._detect_onset(compensated, onset_ts)
+            if peak is not None:
+                frames.append(ExtractedFrame(timestamp_us=onset_ts, peak=peak))
         return frames
 
     def _extract_window(self, emit_ts: int) -> np.ndarray | None:
@@ -248,46 +277,33 @@ class VisualizerFeatureExtractor:
 
     def _compute_frame(self, mono: np.ndarray, emit_ts: int) -> ExtractedFrame:
         """Compute a single frame from a windowed mono PCM slice."""
-        needs_fft = any(
-            t in self._config.types for t in ("loudness", "f_peak", "spectrum", "peak", "pitch")
-        )
-
         loudness: int | None = None
         f_peak_freq: int | None = None
         f_peak_amp: int | None = None
         spectrum: np.ndarray | None = None
-        peak: int | None = None
         pitch_midi_q88: int | None = None
         pitch_confidence: int | None = None
 
-        if needs_fft:
-            freqs, magnitude = self._fft_magnitude(mono)
-            compensated = self._apply_psychoacoustic_compensation(freqs, magnitude)
+        freqs, magnitude = self._fft_magnitude(mono)
+        compensated = self._apply_psychoacoustic_compensation(freqs, magnitude)
 
-            if "loudness" in self._config.types:
-                loudness = self._compute_loudness_db(compensated, mono.size)
+        if "loudness" in self._config.types:
+            loudness = self._compute_loudness_db(compensated, mono.size)
 
-            if "f_peak" in self._config.types:
-                f_peak_freq, f_peak_amp = self._compute_f_peak(freqs, compensated, mono.size)
+        if "f_peak" in self._config.types:
+            f_peak_freq, f_peak_amp = self._compute_f_peak(freqs, compensated, mono.size)
 
-            if "spectrum" in self._config.types:
-                spectrum = self._compute_spectrum(freqs, compensated)
+        if "spectrum" in self._config.types:
+            spectrum = self._compute_spectrum(freqs, compensated)
 
-            if "peak" in self._config.types:
-                # TODO: onset detection runs only at the periodic hop, so `peak` is
-                # throttled by rate_max. The spec says peak is event-driven and NOT
-                # throttled. Decouple onset detection to run per audio chunk,
-                # independent of the periodic frame hop.
-                peak = self._detect_onset(compensated, emit_ts)
-
-            # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
-            if "pitch" in self._config.types:
-                pitch_midi_q88, pitch_confidence = self._compute_pitch_yinfft(mono, magnitude)
-                if pitch_midi_q88 is None:
-                    self._pitch_register = None
-                    self._pitch_last_ts_us = None
-                else:
-                    pitch_midi_q88 = self._stabilize_pitch_octave(pitch_midi_q88, emit_ts)
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        if "pitch" in self._config.types:
+            pitch_midi_q88, pitch_confidence = self._compute_pitch_yinfft(mono, magnitude)
+            if pitch_midi_q88 is None:
+                self._pitch_register = None
+                self._pitch_last_ts_us = None
+            else:
+                pitch_midi_q88 = self._stabilize_pitch_octave(pitch_midi_q88, emit_ts)
 
         return ExtractedFrame(
             timestamp_us=emit_ts,
@@ -295,7 +311,6 @@ class VisualizerFeatureExtractor:
             f_peak_freq=f_peak_freq,
             f_peak_amp=f_peak_amp,
             spectrum=spectrum,
-            peak=peak,
             pitch_midi_q88=pitch_midi_q88,
             pitch_confidence=pitch_confidence,
         )
