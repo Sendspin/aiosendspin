@@ -250,6 +250,20 @@ def test_on_stream_start_sends_stream_start_with_negotiated_config() -> None:
     assert message.payload.visualizer.spectrum.n_disp_bins == 8
 
 
+def test_stream_start_omits_spectrum_above_bin_limit() -> None:
+    """A spectrum request above the bin limit is dropped from the negotiated types."""
+    client = _make_client_stub()
+    client.visualizer_state["spectrum"]["n_disp_bins"] = 1025
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+
+    message = _last_stream_start(client)
+    assert message.payload.visualizer is not None
+    assert list(message.payload.visualizer.types) == ["loudness", "f_peak"]
+    assert message.payload.visualizer.spectrum is None
+
+
 def test_on_stream_start_resent_after_stream_end() -> None:
     """stream/start is re-sent after stream/end → on_stream_start cycle."""
     client = _make_client_stub()
