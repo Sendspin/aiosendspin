@@ -49,8 +49,8 @@ _PITCH_UNVOICED_DPRIME = 0.35
 _PITCH_REGISTER_ALPHA = 0.25
 _PITCH_SNAP_MAX_SEMITONES = 7.0
 _PITCH_REGISTER_GAP_US = 400_000
-# Fixed onset hop so `peak` latency does not depend on `rate_max`.
-_ONSET_HOP_US = 10_000
+# Fixed onset hop, independent of `rate_max`. Changing it changes `peak` sensitivity.
+_ONSET_HOP_US = 1_000_000 // 60
 
 
 @dataclass(frozen=True)
