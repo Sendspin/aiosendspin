@@ -3516,10 +3516,10 @@ async def test_live_pairing_keeps_the_writer_running_during_exchange() -> None:
             time_replies = 0
             handle_server_time = sdk_conn._handle_server_time  # noqa: SLF001
 
-            async def counting_handle_server_time(payload: Any) -> None:
+            async def counting_handle_server_time(payload: Any, received_us: int) -> None:
                 nonlocal time_replies
                 time_replies += 1
-                await handle_server_time(payload)
+                await handle_server_time(payload, received_us)
 
             sdk_conn._handle_server_time = counting_handle_server_time  # type: ignore[method-assign]  # noqa: SLF001
 
