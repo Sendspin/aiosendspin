@@ -1442,10 +1442,11 @@ class SendspinConnection:
         self._exchange_in_progress = False
 
     async def _reader_loop(self) -> None:
-        assert self._ws is not None
+        ws = self._ws
+        assert ws is not None
         try:
             while True:
-                msg, received_us = await self._ws.receive_timed(self._client.clock)
+                msg, received_us = await ws.receive_timed(self._client.clock)
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                     break
                 await self._handle_ws_message(msg, received_us)

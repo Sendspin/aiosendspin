@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import struct
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -1566,6 +1567,24 @@ async def test_server_time_is_timed_before_decryption(monkeypatch: pytest.Monkey
     await connection._reader_loop()  # noqa: SLF001
 
     connection._time_filter.update.assert_called_once_with(500, 4_500, 1_000_000)  # type: ignore[attr-defined]  # noqa: SLF001
+
+
+async def test_reader_stops_quietly_after_a_handler_disconnects(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A disconnect from inside a message handler ends the reader without logging an error."""
+    connection = await _connection(PskCategory.LONG_TERM)
+    _, responder = make_paired_sessions()
+    raw = FakeWebSocket()
+    connection._ws = EncryptedWebSocket(raw, responder)  # noqa: SLF001
+    connection._connected = True  # noqa: SLF001
+    await raw.push(WSMessage(WSMsgType.ERROR, RuntimeError("transport failed"), ""))
+    await raw.push(None)
+
+    with caplog.at_level(logging.ERROR):
+        await connection._reader_loop()  # noqa: SLF001
+
+    assert "WebSocket reader encountered an error" not in caplog.text
 
 
 _SERVER_TIME = ServerTimePayload(client_transmitted=0, server_received=0, server_transmitted=0)
