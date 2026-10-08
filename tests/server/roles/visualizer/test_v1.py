@@ -250,6 +250,19 @@ def test_on_stream_start_sends_stream_start_with_negotiated_config() -> None:
     assert message.payload.visualizer.spectrum.n_disp_bins == 8
 
 
+def test_stream_start_caps_rate_max() -> None:
+    """A huge requested rate_max is lowered in stream/start."""
+    client = _make_client_stub()
+    client.visualizer_state["rate_max"] = 1_000_000
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+
+    message = _last_stream_start(client)
+    assert message.payload.visualizer is not None
+    assert message.payload.visualizer.rate_max == 120
+
+
 def test_stream_start_omits_spectrum_above_bin_limit() -> None:
     """A spectrum request above the bin limit is dropped from the negotiated types."""
     client = _make_client_stub()

@@ -117,6 +117,8 @@ _FFT_DRIVEN_TYPES: frozenset[SupportedVisualizerType] = frozenset(
         "pitch",
     }
 )
+# Highest periodic frame rate the server emits, matching common high-refresh displays.
+_RATE_MAX_CAP = 120
 # Bounds per-frame spectrum cost, at the 48 kHz FFT's frequency bin count.
 _N_DISP_BINS_MAX = 1024
 # Periodic frames for a beat-wanting client are held to this lead ahead of the
@@ -967,7 +969,12 @@ class VisualizerV1Role(Role):
             if without_pitch:
                 exposed_types = without_pitch
         return StreamStartVisualizer.from_request(
-            replace(self._request, types=exposed_types), tracks_downbeats=self._tracks_downbeats
+            replace(
+                self._request,
+                types=exposed_types,
+                rate_max=min(self._request.rate_max, _RATE_MAX_CAP),
+            ),
+            tracks_downbeats=self._tracks_downbeats,
         )
 
     # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
