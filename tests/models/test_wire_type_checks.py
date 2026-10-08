@@ -48,6 +48,17 @@ def test_tolerated_value_is_converted_and_recorded_once(
     assert reasons == [reason]
 
 
+def test_each_mismatch_names_its_own_field() -> None:
+    """Mismatches of the same kind in different fields are recorded separately."""
+    _, reasons = _parse(_Fields, {"number": "1", "text": 2, "names": [3]})
+
+    assert reasons == [
+        "sent a string for 'number' instead of an integer",
+        "sent an integer for 'text' instead of a string",
+        "sent an integer for 'names' instead of a string",
+    ]
+
+
 def test_integral_float_is_an_integer() -> None:
     """JSON has one number type, so 50.0 is an integer and is not recorded."""
     parsed, reasons = _parse(_Fields, {"number": 50.0})

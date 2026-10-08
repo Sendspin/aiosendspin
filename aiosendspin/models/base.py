@@ -114,6 +114,9 @@ _JSON_TYPE_NAMES: dict[type, str] = {
 _INT64_MIN = -(2**63)
 _INT64_LIMIT = 2**63
 _DECIMAL_INTEGER = re.compile(r"-?[0-9]+")
+# Each located mismatch costs a reparse, so later ones are named only by their kind,
+# or dropped when a located one had the same kind.
+_MAX_LOCATED_MISMATCHES = 8
 
 
 class _WireTypeMismatchError(Exception):
@@ -126,11 +129,13 @@ class _WireTypeMismatchError(Exception):
 
 
 class _LocateMismatch:
-    """Collector state that makes parse hooks raise at the first type mismatch."""
+    """Collector state that makes parse hooks raise at the type mismatch after ``skip`` others."""
+
+    def __init__(self, skip: int) -> None:
+        self.skip = skip
 
 
-_LOCATE = _LocateMismatch()
-_wire_deviations: ContextVar[dict[str, None] | _LocateMismatch | None] = ContextVar(
+_wire_deviations: ContextVar[list[str | tuple[str, str]] | _LocateMismatch | None] = ContextVar(
     "wire_deviations", default=None
 )
 
@@ -147,8 +152,8 @@ def _mismatch_reason(got: str, expected: str, path: str | None = None) -> str:
 def note_wire_deviation(reason: str) -> None:
     """Record a tolerated deviation for the enclosing ``parse_noting_wire_deviations``."""
     collector = _wire_deviations.get()
-    if isinstance(collector, dict):
-        collector[reason] = None
+    if isinstance(collector, list):
+        collector.append(reason)
 
 
 def _note_type_mismatch(value: Any, expected: str) -> None:
@@ -156,8 +161,11 @@ def _note_type_mismatch(value: Any, expected: str) -> None:
     if collector is None:
         return
     if isinstance(collector, _LocateMismatch):
-        raise _WireTypeMismatchError(_json_type(value), expected)
-    collector[_mismatch_reason(_json_type(value), expected)] = None
+        if collector.skip == 0:
+            raise _WireTypeMismatchError(_json_type(value), expected)
+        collector.skip -= 1
+        return
+    collector.append((_json_type(value), expected))
 
 
 @cache
@@ -190,29 +198,38 @@ def parse_noting_wire_deviations[**P, T](
 ) -> tuple[T, list[str]]:
     """Run ``parse`` and return its result with each tolerated deviation it recorded.
 
-    A recorded type mismatch is named by the field of the first one, found by parsing again.
+    Each of the first recorded type mismatches is named by its field, found by parsing again.
     """
-    collector: dict[str, None] = {}
+    collector: list[str | tuple[str, str]] = []
     token = _wire_deviations.set(collector)
     try:
         result = parse(*args, **kwargs)
     finally:
         _wire_deviations.reset(token)
-    if not collector:
-        return result, []
-    reasons = list(collector)
-    token = _wire_deviations.set(_LOCATE)
-    try:
-        parse(*args, **kwargs)
-    except InvalidFieldValue as exc:
-        if located := _mismatch_path(exc):
-            mismatch, path = located
-            unnamed = _mismatch_reason(mismatch.got, mismatch.expected)
-            named = _mismatch_reason(mismatch.got, mismatch.expected, path)
-            reasons = [named if reason == unnamed else reason for reason in reasons]
-    finally:
-        _wire_deviations.reset(token)
-    return result, reasons
+    reasons: list[str] = []
+    mismatches_before = 0
+    located_kinds: set[tuple[str, str]] = set()
+    for entry in collector:
+        if isinstance(entry, str):
+            reasons.append(entry)
+            continue
+        reason = _mismatch_reason(*entry)
+        if mismatches_before < _MAX_LOCATED_MISMATCHES:
+            token = _wire_deviations.set(_LocateMismatch(skip=mismatches_before))
+            try:
+                parse(*args, **kwargs)
+            except InvalidFieldValue as exc:
+                if located := _mismatch_path(exc):
+                    mismatch, path = located
+                    reason = _mismatch_reason(mismatch.got, mismatch.expected, path)
+                    located_kinds.add(entry)
+            finally:
+                _wire_deviations.reset(token)
+        elif entry in located_kinds:
+            continue
+        mismatches_before += 1
+        reasons.append(reason)
+    return result, list(dict.fromkeys(reasons))
 
 
 def int_from_wire(value: Any) -> int:
