@@ -101,9 +101,9 @@ class ControllerStatePayload(SendspinModel):
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Drop supported commands this implementation does not recognize."""
         if "supported_commands" not in d:
-            return d
+            return super().__pre_deserialize__(d)
         commands, _ = split_enum_values(d["supported_commands"], MediaCommand)
-        return d | {"supported_commands": commands}
+        return super().__pre_deserialize__(d | {"supported_commands": commands})
 
     def __post_init__(self) -> None:
         """Validate field values."""

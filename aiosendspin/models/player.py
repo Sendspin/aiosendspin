@@ -231,7 +231,7 @@ class PlayerStatePayload(SendspinModel):
         if "supported_commands" in d:
             normalized["supported_commands"] = commands
         normalized["ignored_commands"] = ignored or None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
     def __post_init__(self) -> None:
         """Validate field values."""
@@ -277,7 +277,7 @@ class PlayerCommandPayload(SendspinModel):
         delay_ms = normalized.get("output_delay_ms")
         if isinstance(delay_ms, int):
             normalized["output_delay_ms"] = min(max(delay_ms, 0), 5000)
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
     def __post_init__(self) -> None:
         """Validate field values and command consistency."""

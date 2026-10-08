@@ -101,7 +101,7 @@ class ClientHelloVisualizerSupport(SendspinModel):
         if "types" in payload:
             payload = dict(payload)
             payload["types"] = _supported_types(payload["types"])
-        return payload
+        return super().__pre_deserialize__(payload)
 
     def __post_init__(self) -> None:
         """Validate support object constraints."""
@@ -154,7 +154,7 @@ class VisualizerStatePayload(SendspinModel):
         payload["non_string_types_used"] = (
             isinstance(raw_types, list) and not all(isinstance(t, str) for t in raw_types)
         ) or None
-        return payload
+        return super().__pre_deserialize__(payload)
 
     class Config(SendspinConfig):
         """Config for json serialization."""

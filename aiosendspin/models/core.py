@@ -308,7 +308,7 @@ class SupportedPairMethods(SendspinModel):
             [PairMethod.DYNAMIC_PAIRING_CODE.value] if unusable else None
         )
         normalized["offered_both_pairing_code_methods"] = both or None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
 
 assert set(_PAIR_METHOD_VALUE_FILTERS) <= {f.name for f in fields(SupportedPairMethods)}
@@ -436,7 +436,7 @@ class ClientHelloPayload(SendspinModel):
         normalized["unpaired_access_incomplete"] = (
             not isinstance(unpaired_access, dict) or "enabled" not in unpaired_access
         ) or None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
     def __post_init__(self) -> None:
         """Match support configs to supported roles, recording each mismatch."""
@@ -566,7 +566,7 @@ class ClientStatePayload(SendspinModel):
             d["available"] = d["state"] != "external_source"
         # Always overwrite so a client cannot spoof the record via the wire.
         d["legacy_state_used"] = legacy_state or None
-        return d
+        return super().__pre_deserialize__(d)
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -608,8 +608,10 @@ class ClientCommandPayload(SendspinModel):
         )
         normalized = {k: v for k, v in d.items() if k != "controller"} if unrecognized else d
         # Always overwrite so a client cannot spoof the record via the wire.
-        return collect_application_objects(
-            normalized | {"unrecognized_command_used": unrecognized or None}
+        return super().__pre_deserialize__(
+            collect_application_objects(
+                normalized | {"unrecognized_command_used": unrecognized or None}
+            )
         )
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
@@ -651,7 +653,7 @@ class ClientGoodbyePayload(SendspinModel):
         normalized = d | {"unrecognized_reason": reason if unrecognized else None}
         if unrecognized:
             normalized["reason"] = None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -689,7 +691,9 @@ class ClientLeaveMessage(ClientMessage):
         payload_missing = not isinstance(d.get("payload"), dict)
         normalized = {k: v for k, v in d.items() if k != "payload"} if payload_missing else d
         # Always overwrite so a client cannot spoof the record via the wire.
-        return normalized | {"payload_missing": payload_missing or None}
+        return super().__pre_deserialize__(
+            normalized | {"payload_missing": payload_missing or None}
+        )
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -822,7 +826,7 @@ class ServerActivatePayload(SendspinModel):
             normalized["activities"] = activities
         # Always overwrite so a server cannot spoof the record via the wire.
         normalized["ignored_activities"] = ignored or None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -924,7 +928,7 @@ class ServerStatePayload(SendspinModel):
         if null_roles := sorted(key for key, value in d.items() if value is None):
             msg = f"server/state role objects must not be null, got {null_roles}"
             raise ValueError(msg)
-        return collect_application_objects(d)
+        return super().__pre_deserialize__(collect_application_objects(d))
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -1016,8 +1020,10 @@ class GroupUpdateServerPayload(SendspinModel):
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Drop a playback state this implementation does not recognize."""
         if is_unknown_enum_value(d.get("playback_state"), PlaybackStateType):
-            return {k: v for k, v in d.items() if k != "playback_state"}
-        return d
+            return super().__pre_deserialize__(
+                {k: v for k, v in d.items() if k != "playback_state"}
+            )
+        return super().__pre_deserialize__(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -1056,7 +1062,7 @@ class ServerCommandPayload(SendspinModel):
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Nest application-specific role objects under `application_objects`."""
-        return collect_application_objects(d)
+        return super().__pre_deserialize__(collect_application_objects(d))
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -1147,7 +1153,7 @@ class StreamStartPayload(SendspinModel):
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Nest application-specific role objects under `application_objects`."""
-        return collect_application_objects(d)
+        return super().__pre_deserialize__(collect_application_objects(d))
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""

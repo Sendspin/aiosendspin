@@ -2,21 +2,23 @@
 
 The protocol types `int`-annotated wire fields as integers, but Python does not enforce
 annotations at runtime. This module keeps those fields integer-typed during serialization,
-and checks the JSON type of integer, boolean and string fields during parsing.
+and checks the JSON type of integer, boolean, string and array fields during parsing.
 It also provides the parse helpers that set aside unrecognized enum identifiers, and the
 hooks that carry application-specific role objects between the wire and the models.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import operator
 import re
+import types
 from collections.abc import Callable
 from contextvars import ContextVar
 from enum import Enum
 from functools import cache
-from typing import Any, get_type_hints
+from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from mashumaro.config import BaseConfig
 from mashumaro.exceptions import InvalidFieldValue
@@ -295,16 +297,18 @@ def str_from_wire(value: Any) -> str:
     raise TypeError(msg)
 
 
-def str_list_from_wire(value: Any) -> list[str]:
-    """Parse a string-list field, rejecting a non-list rather than iterating it.
-
-    Raises:
-        TypeError: If the value is not a list or an entry is not a string or a number.
-    """
-    if not isinstance(value, list):
-        msg = f"expected an array, got {_json_type(value)}: {value!r}"
-        raise TypeError(msg)
-    return [str_from_wire(entry) for entry in value]
+@cache
+def _array_fields(model: type) -> tuple[tuple[str, str, Any], ...]:
+    """Return the name, wire key and type of each list and tuple field of a dataclass model."""
+    hints = get_type_hints(model, include_extras=True)
+    fields = []
+    for field in dataclasses.fields(model):
+        hint = hints[field.name]
+        inner = get_args(hint)[0] if get_origin(hint) is Annotated else hint
+        members = get_args(inner) if get_origin(inner) in (Union, types.UnionType) else (inner,)
+        if any(get_origin(member) in (list, tuple) for member in members):
+            fields.append((field.name, _wire_field_name(model, field.name), hint))
+    return tuple(fields)
 
 
 class SendspinConfig(BaseConfig):
@@ -318,12 +322,26 @@ class SendspinConfig(BaseConfig):
         int: {"serialize": int_to_wire, "deserialize": int_from_wire},
         bool: {"deserialize": bool_from_wire},
         str: {"deserialize": str_from_wire},
-        list[str]: {"deserialize": str_list_from_wire},
     }
 
 
 class SendspinModel(DataClassORJSONMixin):
     """Base class for Sendspin protocol models. Applies `SendspinConfig` by default."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Reject a non-array value for a list or tuple field, which mashumaro would iterate.
+
+        Subclass overrides return their result through this hook.
+
+        Raises:
+            InvalidFieldValue: If a list or tuple field holds a value other than an array or null.
+        """
+        for name, key, hint in _array_fields(cls):  # type: ignore[arg-type]
+            value = d.get(key)
+            if value is not None and not isinstance(value, list):
+                raise InvalidFieldValue(name, hint, value, cls, msg="expected an array")
+        return d
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

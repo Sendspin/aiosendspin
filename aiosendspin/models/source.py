@@ -51,7 +51,7 @@ class ServerHelloSourceSupport(SendspinModel):
         if isinstance(codecs, list):
             known = {codec.value for codec in AudioCodec}
             d = {**d, "supported_codecs": [codec for codec in codecs if codec in known]}
-        return d
+        return super().__pre_deserialize__(d)
 
 
 # Client -> Server: client/state source object
@@ -145,7 +145,9 @@ class ClientStreamEndMessage(ClientMessage):
         payload_missing = not isinstance(d.get("payload"), dict)
         normalized = {k: v for k, v in d.items() if k != "payload"} if payload_missing else d
         # Always overwrite so a client cannot spoof the record via the wire.
-        return normalized | {"payload_missing": payload_missing or None}
+        return super().__pre_deserialize__(
+            normalized | {"payload_missing": payload_missing or None}
+        )
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

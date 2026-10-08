@@ -125,7 +125,7 @@ class ArtworkChannel(SendspinModel):
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Accept the pre-rename `media_width`/`media_height` spelling."""
-        return _rewrite_legacy_dimensions(d)
+        return super().__pre_deserialize__(_rewrite_legacy_dimensions(d))
 
     def __post_init__(self) -> None:
         """Validate field values."""
@@ -236,7 +236,7 @@ class StreamRequestFormatArtwork(SendspinModel):
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Accept the pre-rename `media_width`/`media_height` spelling."""
-        return _rewrite_legacy_dimensions(d)
+        return super().__pre_deserialize__(_rewrite_legacy_dimensions(d))
 
     def __post_init__(self) -> None:
         """Validate field values."""
