@@ -330,17 +330,27 @@ class SendspinModel(DataClassORJSONMixin):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Reject a non-array value for a list or tuple field, which mashumaro would iterate.
+        """Check list and tuple fields, which mashumaro would otherwise iterate whatever they hold.
 
-        Subclass overrides return their result through this hook.
+        An empty object is recorded and read as an empty array. Subclass overrides return their
+        result through this hook.
 
         Raises:
-            InvalidFieldValue: If a list or tuple field holds a value other than an array or null.
+            InvalidFieldValue: If a list or tuple field holds a value other than an array, an empty
+                object or null.
         """
         for name, key, hint in _array_fields(cls):  # type: ignore[arg-type]
             value = d.get(key)
-            if value is not None and not isinstance(value, list):
+            if value is None or isinstance(value, list):
+                continue
+            if not isinstance(value, dict) or value:
                 raise InvalidFieldValue(name, hint, value, cls, msg="expected an array")
+            try:
+                _note_type_mismatch(value, "an array")
+            except _WireTypeMismatchError as exc:
+                # Name this field, since mashumaro wraps hook errors only at the enclosing field.
+                raise InvalidFieldValue(name, hint, value, cls) from exc
+            d = {**d, key: []}
         return d
 
     class Config(SendspinConfig):
