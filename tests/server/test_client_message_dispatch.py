@@ -333,3 +333,19 @@ async def test_malformed_active_role_object_is_flagged(
     assert client.noncompliance == ["sent a malformed client/state"]
     assert conn._closing is strict  # noqa: SLF001
     assert client.handle_leave.await_count == (0 if strict else 1)
+
+
+async def test_empty_object_for_an_array_is_flagged_and_read_as_empty() -> None:
+    """An empty object in an array field is flagged, and dispatches as an empty array."""
+    state = {"type": "client/state", "payload": {"player": {"supported_commands": {}}}}
+    conn, client = _connection([orjson.dumps(state).decode()])
+    client.active_roles = (SimpleNamespace(role_family="player"),)
+    conn._handle_message = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+    await conn._run_message_loop()  # noqa: SLF001
+
+    assert client.noncompliance == [
+        "client/state sent an object for 'player.supported_commands' instead of an array"
+    ]
+    message = conn._handle_message.await_args.args[0]  # noqa: SLF001
+    assert message.payload.player.supported_commands == []

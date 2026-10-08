@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass, field, is_dataclass
 from typing import Any
 
 import orjson
 import pytest
 from mashumaro.exceptions import InvalidFieldValue
 
-from aiosendspin.models.base import SendspinModel, parse_noting_wire_deviations
+from aiosendspin.models.base import SendspinModel, _array_fields, parse_noting_wire_deviations
 from aiosendspin.models.core import ClientMessage
 from aiosendspin.noise.models import PairingMessage
 
@@ -144,3 +145,26 @@ def test_pair_retry_without_payload_is_recorded(message: object, reasons: list[s
     _, recorded = _parse(PairingMessage, message)
 
     assert recorded == reasons
+
+
+def _subclasses(model: type) -> Iterator[type]:
+    for subclass in model.__subclasses__():
+        yield subclass
+        yield from _subclasses(subclass)
+
+
+_ARRAY_FIELDS = [
+    pytest.param(model, key, id=f"{model.__module__}.{model.__qualname__}.{key}")
+    for model in _subclasses(SendspinModel)
+    if model.__module__.startswith("aiosendspin.") and is_dataclass(model)
+    for _, key, _ in _array_fields(model)
+    # Skip records the model's own hook always overwrites, which no wire value reaches.
+    if model.__pre_deserialize__({key: []}).get(key) == []
+]
+
+
+@pytest.mark.parametrize(("model", "key"), _ARRAY_FIELDS)
+def test_array_field_rejects_a_non_array(model: type[SendspinModel], key: str) -> None:
+    """Every list or tuple field rejects an object, including on models with their own hook."""
+    with pytest.raises(InvalidFieldValue):
+        model.__pre_deserialize__({key: {"volume": True}})

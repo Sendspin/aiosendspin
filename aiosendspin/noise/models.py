@@ -157,8 +157,10 @@ class PairAbortPayload(SendspinModel):
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Read the pre-rename ``pin_mismatch`` reason as ``pairing_code_mismatch``."""
         if d.get("reason") == "pin_mismatch":
-            return {**d, "reason": PairAbortReason.PAIRING_CODE_MISMATCH.value}
-        return d
+            return super().__pre_deserialize__(
+                {**d, "reason": PairAbortReason.PAIRING_CODE_MISMATCH.value}
+            )
+        return super().__pre_deserialize__(d)
 
 
 @dataclass
@@ -313,7 +315,7 @@ class ClientPairRetryMessage(PairingMessage):
             note_wire_deviation("omitted the required payload object")
         elif not isinstance(payload, dict):
             note_wire_deviation("sent a payload that is not an object")
-        return d
+        return super().__pre_deserialize__(d)
 
 
 @dataclass

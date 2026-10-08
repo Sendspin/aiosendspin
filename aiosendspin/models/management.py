@@ -293,7 +293,7 @@ class ManagementResultData(SendspinModel):
         for legacy_key, key in _LEGACY_PIN_METHODS.items():
             if legacy_key in d:
                 renamed.setdefault(key, d[legacy_key])
-        return renamed
+        return super().__pre_deserialize__(renamed)
 
 
 @dataclass
