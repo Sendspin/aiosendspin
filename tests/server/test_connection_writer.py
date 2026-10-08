@@ -11,11 +11,14 @@ from typing import Any, Never
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.models import pack_binary_header_raw
 from aiosendspin.models.artwork import pack_artwork_cancel, pack_artwork_parts
 from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.core import (
+    ClientTimeMessage,
+    ClientTimePayload,
     GroupUpdateServerMessage,
     GroupUpdateServerPayload,
     ServerCommandMessage,
@@ -1447,6 +1450,39 @@ async def test_writer_sends_prepacked_binary_unchanged(message_type: int) -> Non
     assert sent == [frame]
 
     await conn.disconnect(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_server_received_is_taken_before_decryption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """server/time reports when client/time arrived, not when it was decrypted."""
+    clock = ManualClock(now_us_value=1_000_000)
+    server_session, client_session = make_paired_sessions()
+    raw = FakeWebSocket()
+    conn = SendspinConnection(
+        _DummyServer(loop=asyncio.get_running_loop(), clock=clock), wsock_client=MagicMock()
+    )
+    conn._transport = EncryptedWebSocket(raw, server_session)  # noqa: SLF001
+    decrypt = server_session.decrypt
+
+    def decrypt_slowly(data: bytes) -> bytes:
+        clock.advance_us(500)
+        return decrypt(data)
+
+    monkeypatch.setattr(server_session, "decrypt", decrypt_slowly)
+    client_time = ClientTimeMessage(payload=ClientTimePayload(client_transmitted=1))
+    await raw.push(
+        WSMessage(
+            WSMsgType.BINARY, client_session.encrypt(b"\x00" + client_time.to_json().encode()), ""
+        )
+    )
+    await raw.push(None)
+
+    with patch.object(conn, "send_priority_message") as send_priority:
+        await conn._run_message_loop()  # noqa: SLF001
+
+    assert send_priority.call_args.args[0].payload.server_received == 1_000_000
 
 
 @pytest.mark.asyncio

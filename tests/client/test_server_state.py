@@ -283,7 +283,8 @@ async def test_clock_update_reschedules_scheduled_update() -> None:
     time_filter.compute_client_time.side_effect = lambda server_us: server_us - _LATER_US + _NOW_US
     conn._time_filter = time_filter  # noqa: SLF001
     await conn._handle_server_time(  # noqa: SLF001
-        ServerTimePayload(client_transmitted=0, server_received=0, server_transmitted=0)
+        ServerTimePayload(client_transmitted=0, server_received=0, server_transmitted=0),
+        conn.now_us(),
     )
     await asyncio.sleep(0.05)
 
