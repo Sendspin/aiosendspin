@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Never
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -752,9 +753,32 @@ async def test_in_place_stream_start_follows_queued_binary() -> None:
     await conn.disconnect(retry_connection=False)
 
 
+@pytest.mark.parametrize(
+    "queue_control",
+    [
+        pytest.param(
+            lambda conn: conn.send_message(
+                ServerCommandMessage(
+                    payload=ServerCommandPayload(
+                        player=PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=40)
+                    )
+                )
+            ),
+            id="player_command",
+        ),
+        pytest.param(
+            lambda conn: conn.send_role_message(
+                "metadata", _state(metadata=SessionUpdateMetadata(timestamp=1, title="Song"))
+            ),
+            id="metadata_state",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_command_is_sent_before_remaining_ready_audio() -> None:
-    """A server/command queued while player audio is ready goes out before that audio."""
+async def test_control_message_is_sent_before_remaining_ready_audio(
+    queue_control: Callable[[SendspinConnection], None],
+) -> None:
+    """A control message queued while player audio is ready goes out before that audio."""
     loop = asyncio.get_running_loop()
     clock = LoopClock(loop)
     server = _DummyServer(loop=loop, clock=clock)
@@ -768,13 +792,7 @@ async def test_command_is_sent_before_remaining_ready_audio() -> None:
     async def _record_binary(_payload: bytes) -> None:
         send_order.append("binary")
         if len(send_order) == 1:
-            conn.send_message(
-                ServerCommandMessage(
-                    payload=ServerCommandPayload(
-                        player=PlayerCommandPayload(command=PlayerCommand.VOLUME, volume=40)
-                    )
-                )
-            )
+            queue_control(conn)
 
     wsock = MagicMock()
     wsock.closed = False
