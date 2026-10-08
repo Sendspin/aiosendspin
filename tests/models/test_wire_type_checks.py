@@ -59,6 +59,16 @@ def test_each_mismatch_names_its_own_field() -> None:
     ]
 
 
+def test_mismatches_past_the_located_limit_are_named_by_kind() -> None:
+    """Past the limit, a mismatch is dropped if its kind was named and unnamed otherwise."""
+    _, reasons = _parse(_Fields, {"names": [1] * 9 + [1.5]})
+
+    assert reasons == [
+        "sent an integer for 'names' instead of a string",
+        "sent a number instead of a string",
+    ]
+
+
 def test_integral_float_is_an_integer() -> None:
     """JSON has one number type, so 50.0 is an integer and is not recorded."""
     parsed, reasons = _parse(_Fields, {"number": 50.0})
