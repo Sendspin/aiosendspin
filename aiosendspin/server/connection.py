@@ -38,7 +38,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache, partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -2438,6 +2438,10 @@ class SendspinConnection:
         Deprecated: the Sendspin spec no longer defines the management activity.
         """
         warn_deprecated("SendspinConnection.set_pairing_config", MANAGEMENT_DEPRECATION)
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        # Key on the list form, since a client with its PIN methods disabled offers none of them.
+        if self._client_info is not None and self._client_info.legacy_pair_methods_list_used:
+            patch = replace(patch, legacy_pin_wire=True)
         payload = await self._management_request(
             ManagementSetPairingConfigMessage(payload=patch), ManagementResultPayload
         )

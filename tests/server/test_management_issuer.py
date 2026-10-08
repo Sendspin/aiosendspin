@@ -9,9 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.management import (
     ManagementListRecordsMessage,
     ManagementResultPayload,
+    ManagementSetPairingConfigMessage,
+    ManagementSetPairingConfigPayload,
+    SetDynamicPairingCodeConfig,
+    SetStaticPairingCodeConfig,
 )
 from aiosendspin.models.types import ManagementResult
 from aiosendspin.noise.keys import generate_psk, psk_id_for
@@ -94,6 +99,34 @@ async def test_management_request_rejects_wrong_reply_type() -> None:
     conn._resolve_management(ManagementResultPayload(result=ManagementResult.OK))  # noqa: SLF001
     with pytest.raises(RuntimeError, match="expected a"):
         await task
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+async def test_set_pairing_config_uses_pin_keys_for_legacy_pin_client() -> None:
+    """A list-form hello offering no PIN method still gets the pre-rename patch keys."""
+    conn = _bare_connection()
+    conn._transport = object()  # type: ignore[assignment]  # noqa: SLF001 - non-None sentinel
+    conn._disconnecting = False  # noqa: SLF001
+    conn._management_active = True  # noqa: SLF001
+    conn._noise_psk = _long_term_psk()  # noqa: SLF001
+    conn._client_info = ClientHelloPayload.from_json(  # noqa: SLF001
+        '{"name":"Client","supported_roles":["controller@v1"],'
+        '"supported_pair_methods":[{"method":"pairing_psk"}]}'
+    )
+    sent: list[ManagementSetPairingConfigMessage] = []
+    conn.send_priority_message = sent.append  # type: ignore[assignment,method-assign]
+    patch = ManagementSetPairingConfigPayload(
+        static_pairing_code=SetStaticPairingCodeConfig(enabled=True, code="12345678"),
+        dynamic_pairing_code=SetDynamicPairingCodeConfig(enabled=False),
+    )
+    task = asyncio.ensure_future(conn.set_pairing_config(patch))
+    await asyncio.sleep(0)  # let the request register its waiter
+    conn._resolve_management(ManagementResultPayload(result=ManagementResult.OK))  # noqa: SLF001
+    assert await task is ManagementResult.OK
+    assert sent[0].to_dict()["payload"] == {
+        "static_pin": {"enabled": True, "pin": "12345678"},
+        "dynamic_pin": {"enabled": False},
+    }
 
 
 def _long_term_psk() -> ResolvedPsk:

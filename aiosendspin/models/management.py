@@ -7,7 +7,7 @@ Deprecated: the Sendspin spec no longer defines the management activity; only
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from .base import SendspinConfig, SendspinModel
 from .core import UnpairedAccess
@@ -182,11 +182,28 @@ class ManagementSetPairingConfigPayload(SendspinModel):
     dynamic_pairing_code: SetDynamicPairingCodeConfig | None = None
     record_mode: RecordModeConfig | None = None
     unpaired_access: SetUnpairedAccessConfig | None = None
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    legacy_pin_wire: bool | None = None
+    """Serialize with the pre-rename PIN method keys, for a client on the pre-rename wire.
+    Not part of the wire schema (omitted when None)."""
 
     class Config(SendspinConfig):
         """Absent (omitted) objects mean 'leave unchanged'."""
 
         omit_none = True
+
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Rename pairing-code method keys to their PIN names when ``legacy_pin_wire`` is set."""
+        if not d.pop("legacy_pin_wire", None):
+            return d
+        if (static := d.pop("static_pairing_code", None)) is not None:
+            if "code" in static:
+                static["pin"] = static.pop("code")
+            d["static_pin"] = static
+        if (dynamic := d.pop("dynamic_pairing_code", None)) is not None:
+            d["dynamic_pin"] = dynamic
+        return d
 
 
 @dataclass
