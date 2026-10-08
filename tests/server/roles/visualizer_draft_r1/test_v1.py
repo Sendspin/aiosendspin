@@ -113,6 +113,22 @@ def test_visualizer_role_on_stream_start_sends_stream_start() -> None:
     assert message.payload.visualizer.batch_max == 8
 
 
+def test_visualizer_role_omits_spectrum_above_bin_limit() -> None:
+    """A spectrum request above the bin limit is dropped from the negotiated types."""
+    client = _make_client_stub()
+    client.info.visualizer_draft_r1_support["spectrum"]["n_disp_bins"] = 1025
+    role = VisualizerDraftR1Role(client=client)
+    role.on_connect()
+
+    role.on_stream_start()
+
+    _family, message = client.send_role_message.call_args.args
+    assert isinstance(message, StreamStartMessage)
+    assert message.payload.visualizer is not None
+    assert list(message.payload.visualizer.types) == ["loudness", "f_peak"]
+    assert message.payload.visualizer.spectrum is None
+
+
 def test_visualizer_role_on_deactivate_ends_active_stream() -> None:
     """on_deactivate() sends stream/end while a visualizer stream is active."""
     client = _make_client_stub()
