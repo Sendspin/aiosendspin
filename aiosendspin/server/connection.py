@@ -2532,8 +2532,16 @@ class SendspinConnection:
         assert transport is not None
         cancelled = False
         try:
-            async for msg in transport:
-                timestamp_us = self._server.clock.now_us()
+            while True:
+                msg, timestamp_us = await self._receive_timed(transport)
+
+                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    close_code = transport.close_code
+                    log_func = (
+                        self._logger.debug if close_code in (1000, 1001) else self._logger.warning
+                    )
+                    log_func("WebSocket closed, close_code=%s", close_code)
+                    break
 
                 if self._try_route_to_pairing_queue(msg):
                     continue
@@ -2570,16 +2578,6 @@ class SendspinConnection:
                 for reason in deviations:
                     self._flag_noncompliance(f"{_peek_message_type(text)} {reason}")
                 await self._handle_message(message, timestamp_us)
-            else:
-                # Loop exited normally (iterator exhausted) - connection closed
-                close_code = transport.close_code
-                log_func = (
-                    self._logger.debug if close_code in (1000, 1001) else self._logger.warning
-                )
-                log_func(
-                    "WebSocket closed, close_code=%s",
-                    close_code,
-                )
         except asyncio.CancelledError:
             cancelled = True
             self._logger.debug("Message loop cancelled")
@@ -2596,6 +2594,13 @@ class SendspinConnection:
                 self._writer_task.cancel()
             if not cancelled:
                 self._connection_done.set()
+
+    async def _receive_timed(self, transport: Transport) -> tuple[WSMessage, int]:
+        """Return the next message and its receive time, taken before decryption."""
+        if isinstance(transport, EncryptedWebSocket):
+            return await transport.receive_timed(self._server.clock)
+        msg = await transport.receive()
+        return msg, self._server.clock.now_us()
 
     def _skip_undecodable_message(self, text: str, exc: Exception) -> bool:
         """Return whether a text message that failed to parse is skipped rather than fatal."""

@@ -15,18 +15,15 @@ from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import _MAX_WARNED_UNKNOWN_TYPES, SendspinConnection
 
 
-class _AsyncIterTransport:
+class _ListTransport:
     close_code = 1000
 
     def __init__(self, texts: list[str]) -> None:
         self._msgs = [WSMessage(WSMsgType.TEXT, text, "") for text in texts]
 
-    def __aiter__(self) -> _AsyncIterTransport:
-        return self
-
-    async def __anext__(self) -> WSMessage:
+    async def receive(self) -> WSMessage:
         if not self._msgs:
-            raise StopAsyncIteration
+            return WSMessage(WSMsgType.CLOSED, None, None)
         return self._msgs.pop(0)
 
 
@@ -54,7 +51,7 @@ def _connection(
     conn = SendspinConnection(server, wsock_client=AsyncMock())
     client = _FakeClient(strict=strict, controller=controller)
     conn._client = client  # type: ignore[assignment]  # noqa: SLF001
-    conn._transport = _AsyncIterTransport(texts)  # type: ignore[assignment]  # noqa: SLF001
+    conn._transport = _ListTransport(texts)  # type: ignore[assignment]  # noqa: SLF001
     return conn, client
 
 

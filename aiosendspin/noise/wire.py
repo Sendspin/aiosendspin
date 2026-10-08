@@ -22,6 +22,8 @@ from .constants import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from aiosendspin.clock import Clock
+
     from .session import NoiseSession
 
 # Bounds a single connection's reassembly buffer against a peer streaming endless fragments.
@@ -170,14 +172,23 @@ class EncryptedWebSocket:
         """
         while True:
             raw = await self._ws.receive()
-            if raw.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-                return raw
             decoded = self._decode(raw)
             if decoded is not None:
                 return decoded
 
+    async def receive_timed(self, clock: Clock) -> tuple[WSMessage, int]:
+        """Like ``receive()``, also returning when its last frame arrived, before decryption."""
+        while True:
+            raw = await self._ws.receive()
+            received_us = clock.now_us()
+            decoded = self._decode(raw)
+            if decoded is not None:
+                return decoded, received_us
+
     def _decode(self, msg: WSMessage) -> WSMessage | None:
         """Decrypt one frame; return a ``WSMessage`` or ``None`` to await more fragments."""
+        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+            return msg
         if msg.type is WSMsgType.BINARY:
             try:
                 plaintext = self._session.decrypt(msg.data)
