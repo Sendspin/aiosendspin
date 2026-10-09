@@ -154,9 +154,9 @@ class SendspinGroup:
         """
         Stop only the current PushStream transport.
 
-        This preserves group playback state as PLAYING. Use this when you are
-        about to immediately start another stream and want clients to stay in a
-        logical PLAYING state during the transition.
+        This preserves group playback state as PLAYING, but sends stream/end to
+        the clients. To switch to another stream, call start_stream() instead,
+        which replaces the current stream without ending it.
 
         To stop transport and also mark the group state as STOPPED, call stop().
 
