@@ -105,9 +105,9 @@ class VisualizerFeatureExtractor:
         self._channels = channels
         self._config = config
 
-        # Hop is derived from rate_max. Zero/negative means "one frame per chunk":
+        # Hop is derived from rate_max, rounded up. Zero/negative means "one frame per chunk":
         # cursor is reset to chunk_end after every chunk.
-        self._hop_us: int = 1_000_000 // config.rate_max if config.rate_max > 0 else 0
+        self._hop_us: int = -(-1_000_000 // config.rate_max) if config.rate_max > 0 else 0
         self._window_samples: int = min(self._window_samples_for_rate(sample_rate), sample_rate)
 
         # Rolling mono buffer + ts of its first sample.

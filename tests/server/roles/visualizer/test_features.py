@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import struct
 
@@ -198,6 +199,17 @@ def test_hop_matches_rate_max_30_over_one_second() -> None:
 
     frames = _feed_steady_chunks(extractor, sample_rate=48_000, channels=2, hz=1000.0, chunks=40)
     assert 28 <= len(frames) <= 32
+
+
+def test_hop_never_exceeds_rate_max() -> None:
+    """Consecutive frames are at least 1/rate_max apart when the hop does not divide 1 s."""
+    config = _spectrum_config(rate_max=30)
+    extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
+
+    frames = _feed_steady_chunks(extractor, sample_rate=48_000, channels=2, hz=1000.0, chunks=40)
+
+    gaps = [b.timestamp_us - a.timestamp_us for a, b in itertools.pairwise(frames)]
+    assert min(gaps) * 30 >= 1_000_000, gaps
 
 
 def test_one_frame_per_chunk_with_rate_max_equal_chunk_rate() -> None:
