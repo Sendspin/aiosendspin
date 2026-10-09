@@ -954,9 +954,10 @@ class SendspinServer:
 
                     if not conn.should_retry_server_initiated_connection:
                         reason = conn.goodbye_reason
-                        if (
+                        # With no goodbye and no server-side close, a non-playback session dropped.
+                        if url in self._mdns_client_urls.values() and (
                             reason in _NO_REDIAL_GOODBYE_REASONS
-                            and url in self._mdns_client_urls.values()
+                            or (reason is None and not conn._closing)  # noqa: SLF001
                         ):
                             self._mdns_goodbye_urls.add(url)
                         logger.debug(

@@ -725,11 +725,20 @@ async def test_mdns_update_reconnect_decision(
         server.connect_to_client.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "goodbye_reason",
+    [
+        GoodbyeReason.USER_REQUEST,
+        # A non-playback session that dropped without goodbye.
+        None,
+    ],
+)
 @pytest.mark.asyncio
 async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
     monkeypatch: pytest.MonkeyPatch,
+    goodbye_reason: GoodbyeReason | None,
 ) -> None:
-    """An mDNS update skips a client that said goodbye with a no-reconnect reason."""
+    """An mDNS update skips a client that ended its session without asking for a reconnect."""
     server = _make_server(_PersistentSuccessfulSession())
     service_name = "service._sendspin._tcp.local."
     service_type = "_sendspin._tcp.local."
@@ -740,21 +749,19 @@ async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
     _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
     monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
 
-    class _UserRequestGoodbyeConnection:
-        """Connection double whose client says goodbye with ``user_request``."""
+    class _EndedSessionConnection:
+        """Connection double whose client ends the session without asking for a reconnect."""
 
-        goodbye_reason = GoodbyeReason.USER_REQUEST
         should_retry_server_initiated_connection = False
+        _closing = False
 
         def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
-            pass
+            self.goodbye_reason = goodbye_reason
 
         async def handle_client(self) -> None:
             return
 
-    monkeypatch.setattr(
-        "aiosendspin.server.server.SendspinConnection", _UserRequestGoodbyeConnection
-    )
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _EndedSessionConnection)
 
     await server._handle_service_added(  # noqa: SLF001
         MagicMock(), service_type, service_name, ServiceStateChange.Added
