@@ -403,7 +403,9 @@ class ArtworkV1Role(Role):
         self._channels = []
 
     # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-    def _send_single_message(self, channel: int, image_data: bytes, timestamp_us: int) -> None:
+    def _send_single_message(
+        self, channel: int, image_data: bytes, timestamp_us: int, *, epoch_exempt: bool = False
+    ) -> None:
         """Send `image_data` as one `[type][timestamp][image]` message."""
         message_type = artwork_message_type(channel)
         self._client.send_binary(
@@ -411,15 +413,16 @@ class ArtworkV1Role(Role):
             role_family=self.role_family,
             timestamp_us=timestamp_us,
             message_type=message_type,
+            epoch_exempt=epoch_exempt,
         )
 
     def _send_clear_now(self, channel: int, timestamp_us: int) -> None:
         """Enqueue a clear for `channel` at once; no transfer may be in flight."""
+        # Must survive a later cancel dropping the role's queued binary.
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self.uses_single_message_framing():
-            self._send_single_message(channel, b"", timestamp_us)
+            self._send_single_message(channel, b"", timestamp_us, epoch_exempt=True)
             return
-        # Must survive a later cancel dropping the role's queued binary.
         self._send_transfer_message(
             channel, pack_artwork_announce(channel, timestamp_us, 0), epoch_exempt=True
         )

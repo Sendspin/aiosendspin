@@ -127,12 +127,11 @@ def _record(client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
             events.append(type(message).__name__)
 
     def _binary(data: bytes, **kwargs: Any) -> None:
-        if kwargs.get("epoch_exempt"):
-            events.append(("exempt", _decode(data)))
-        elif client.info.artwork_support is None:
-            events.append(_decode(data))
+        if client.info.artwork_support is None:
+            event = _decode(data)
         else:
-            events.append(("binary", kwargs["message_type"] - 8, len(data)))
+            event = ("binary", kwargs["message_type"] - 8, len(data))
+        events.append(("exempt", event) if kwargs.get("epoch_exempt") else event)
 
     def _schedule(_role: object, channel: int, _config: object) -> None:
         events.append(("image", channel))
@@ -1085,7 +1084,7 @@ def test_legacy_state_replaces_hello_channels(monkeypatch: pytest.MonkeyPatch) -
 
     assert events == [
         ("drop", ["artwork"]),
-        ("binary", 0, 9),
+        ("exempt", ("binary", 0, 9)),
         ("start", [_NONE_WIRE, _ARTIST_WIRE]),
         ("image", 1),
     ]
@@ -1137,7 +1136,7 @@ def test_legacy_request_format_disabling_channel_keeps_its_format_and_size(
 
     assert events == [
         ("drop", ["artwork"]),
-        ("binary", 0, 9),
+        ("exempt", ("binary", 0, 9)),
         ("start", [{**_ALBUM_WIRE, "source": "none"}, _ARTIST_WIRE]),
         ("image", 1),
     ]
