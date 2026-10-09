@@ -30,6 +30,8 @@ from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
 
 class _DummyConnection:
+    receives_group_updates = True
+
     clears_role_state_with_null = False
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002

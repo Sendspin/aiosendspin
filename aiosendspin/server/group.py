@@ -212,16 +212,17 @@ class SendspinGroup:
         )
 
     def _send_group_update(self, client: SendspinClient, message: GroupUpdateServerMessage) -> None:
-        """Send one group/update to a client that has finished coming up.
+        """Send one group/update to a client whose first server/activate is out.
 
-        A client still mid-bring-up is told the group's state by ``on_client_connected``
-        once its first client/state lands, so anything sent before then is superseded.
+        The connection sends the group's current state with that activation, so anything
+        sent before then is superseded.
         """
-        if client.is_connected:
+        connection = client.connection
+        if connection is not None and connection.receives_group_updates:
             client.send_message(message)
 
     def _send_group_update_to_clients(self) -> None:
-        """Send group/update to every member that has finished coming up."""
+        """Send group/update to every member whose first server/activate is out."""
         group_message = self._group_update_message()
         for client in self._clients:
             self._send_group_update(client, group_message)
@@ -232,11 +233,9 @@ class SendspinGroup:
             self._send_group_update_to_clients()
 
     def on_client_connected(self, client: SendspinClient) -> None:
-        """Send current group state to a client that just finished handshaking."""
+        """Join the roles of a client that just finished handshaking to the active stream."""
         if client not in self._clients:
             return
-
-        self._send_group_update(client, self._group_update_message())
 
         if self._push_stream is not None and not self._push_stream.is_stopped:
             for role in client.active_roles:
@@ -424,7 +423,7 @@ class SendspinGroup:
         # Each client needs to be in a group, add it to a new one
         new_group = SendspinGroup(self._server, client)
         # Send group update to notify client of their new solo group
-        new_group.on_client_connected(client)
+        new_group._send_group_update(client, new_group._group_update_message())
 
     async def _stop_and_invalidate_stale_binary(self, clients: Iterable[SendspinClient]) -> None:
         """Stop the group, directly signaling roles when mid-track-transition.

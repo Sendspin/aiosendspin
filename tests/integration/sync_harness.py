@@ -51,6 +51,8 @@ class Event:
 class CaptureConnection:
     """Capture JSON + binary messages in order."""
 
+    receives_group_updates = True
+
     def __init__(self) -> None:
         """Initialize an empty event capture buffer."""
         self.events: list[Event] = []

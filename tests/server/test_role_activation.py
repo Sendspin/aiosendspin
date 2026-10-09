@@ -21,6 +21,7 @@ from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStatePayload,
+    GroupUpdateServerMessage,
     PairMethodDescriptor,
     ServerCommandMessage,
     ServerCommandPayload,
@@ -40,6 +41,7 @@ from aiosendspin.models.types import (
     BinaryMessageType,
     PairMethod,
     PictureFormat,
+    PlaybackStateType,
     PlayerCommand,
     Roles,
 )
@@ -585,6 +587,26 @@ async def test_strict_server_holds_stateless_roles_until_initial_state() -> None
 
     disconnect.assert_awaited_once_with(retry_connection=False)
     assert not client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_group_update_follows_the_first_activation_before_client_state() -> None:
+    """The first server/activate brings group/update, and changes follow before client/state."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    client = _client(conn)
+
+    def group_updates() -> list[GroupUpdateServerMessage]:
+        return [m for m in conn._normal_messages if isinstance(m, GroupUpdateServerMessage)]  # noqa: SLF001
+
+    assert not client.is_connected
+    assert len(group_updates()) == 1
+
+    client.group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
+    assert len(group_updates()) == 2
+
+    await conn._handle_client_state(_full_state())  # noqa: SLF001
+    assert client.is_connected
+    assert len(group_updates()) == 2
 
 
 @pytest.mark.asyncio

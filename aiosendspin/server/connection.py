@@ -452,6 +452,7 @@ class SendspinConnection:
 
         self._initial_state_received = False
         self._client_state_received = False
+        self._receives_group_updates = False
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
         self._activation_state_timeout_handle: asyncio.TimerHandle | None = None
         # Binary held while a role that receives binary awaits the initial client/state.
@@ -557,6 +558,17 @@ class SendspinConnection:
     def reads_repeat_shuffle_from_metadata(self) -> bool:
         """Whether the client reads repeat and shuffle from the metadata object."""
         return self._legacy_hello
+
+    @property
+    def receives_group_updates(self) -> bool:
+        """Whether the first server/activate is out, so group/update follows every change."""
+        return self._receives_group_updates
+
+    def _start_group_updates(self) -> None:
+        """Send the group's current state and, from now on, every change to it."""
+        assert self._client is not None
+        self._receives_group_updates = True
+        self.send_message(self._client.group._group_update_message())  # noqa: SLF001
 
     def requires_initial_state(self) -> bool:
         """Whether this connection must receive initial client/state before being 'connected'."""
@@ -1266,6 +1278,7 @@ class SendspinConnection:
             await self._activate()
 
         assert self._client is not None
+        self._start_group_updates()
         # A strict server also waits on a client whose active roles define no state object.
         awaits_state = bool(self._client.active_roles) and not self._client_state_received
         if self.requires_initial_state() or (
@@ -1970,9 +1983,7 @@ class SendspinConnection:
                 self._resume_writer()
                 if self._declared_activities is None:
                     # The first server/activate is due a group/update even while pairing.
-                    assert self._client is not None
-                    group = self._client.group
-                    self.send_message(group._group_update_message())  # noqa: SLF001
+                    self._start_group_updates()
             record = await self._run_pairing_protocol(method, transport, pairing_format)
         except (PairingTimeoutError, InvalidPairingCodeError):
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
