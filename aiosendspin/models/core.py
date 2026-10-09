@@ -138,7 +138,12 @@ _PAIR_METHOD_VALUE_FILTERS: dict[str, dict[str, frozenset[str]]] = {
 
 # Records the parser writes onto the container; never read from the wire.
 _PAIR_METHOD_SIDECARS: frozenset[str] = frozenset(
-    {"ignored_methods", "unusable_methods", "offered_both_pairing_code_methods"}
+    {
+        "ignored_methods",
+        "ignored_values",
+        "unusable_methods",
+        "offered_both_pairing_code_methods",
+    }
 )
 
 
@@ -184,9 +189,10 @@ def _uses_legacy_pin_methods(entries: Any) -> bool:
 
 def _filter_descriptor_values(
     descriptor: dict[str, Any], value_filters: dict[str, frozenset[str]]
-) -> dict[str, Any]:
-    """Drop descriptor values this implementation does not recognize."""
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Drop unrecognized descriptor values, also returning each dropped identifier and its field."""
     filtered = dict(descriptor)
+    ignored: list[tuple[str, str]] = []
     for field_name, allowed in value_filters.items():
         if field_name not in filtered:
             continue
@@ -194,12 +200,13 @@ def _filter_descriptor_values(
         # A field of the wrong type offers nothing usable, same as one filtered empty. Values
         # are matched as identifiers, so anything that is not one is simply not recognized —
         # tested before membership, since an unhashable value cannot be looked up at all.
-        filtered[field_name] = (
-            [v for v in values if isinstance(v, str) and v in allowed]
-            if isinstance(values, list)
-            else []
-        )
-    return filtered
+        if not isinstance(values, list):
+            filtered[field_name] = []
+            continue
+        identifiers = [v for v in values if isinstance(v, str)]
+        filtered[field_name] = [v for v in identifiers if v in allowed]
+        ignored.extend((field_name, v) for v in identifiers if v not in allowed)
+    return filtered, ignored
 
 
 def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
@@ -270,6 +277,9 @@ class SupportedPairMethods(SendspinModel):
     """Whether the client offered both pairing-code methods, recorded for the server to log.
     The static one is dropped in favor of a dynamic one offering digits. Not part of the wire
     schema (omitted when None)."""
+    ignored_values: list[str] | None = None
+    """Descriptor values this implementation does not recognize, as ``method.field=value``,
+    recorded for the server to log. Not part of the wire schema (omitted when None)."""
 
     class Config(SendspinConfig):
         """Omit methods the client does not offer."""
@@ -281,11 +291,13 @@ class SupportedPairMethods(SendspinModel):
         """Drop unrecognized methods and values, preferring dynamic code with digits over static."""
         normalized = {k: v for k, v in d.items() if k in _PAIR_METHOD_VALUE_FILTERS}
         ignored = sorted(set(d) - set(normalized) - _PAIR_METHOD_SIDECARS)
+        ignored_values: list[str] = []
         for key, value_filters in _PAIR_METHOD_VALUE_FILTERS.items():
             descriptor = normalized.get(key)
             if not isinstance(descriptor, dict):
                 continue
-            normalized[key] = _filter_descriptor_values(descriptor, value_filters)
+            normalized[key], dropped = _filter_descriptor_values(descriptor, value_filters)
+            ignored_values.extend(f"{key}.{field}={value}" for field, value in dropped)
         both = (
             PairMethod.STATIC_PAIRING_CODE.value in normalized
             and PairMethod.DYNAMIC_PAIRING_CODE.value in normalized
@@ -304,6 +316,7 @@ class SupportedPairMethods(SendspinModel):
             del normalized[PairMethod.STATIC_PAIRING_CODE.value]
         # Always overwrite so a client cannot spoof the records via the wire.
         normalized["ignored_methods"] = ignored or None
+        normalized["ignored_values"] = ignored_values or None
         normalized["unusable_methods"] = (
             [PairMethod.DYNAMIC_PAIRING_CODE.value] if unusable else None
         )
