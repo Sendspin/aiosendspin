@@ -285,8 +285,7 @@ class ArtworkV1Role(Role):
             if value is not None and value <= 0
         ]
         if invalid_dims:
-            # Skip the update: non-positive dims would otherwise raise out of
-            # ArtworkChannel and tear the connection down.
+            # Skip the update, even for a none channel that ArtworkChannel would accept.
             self._client.flag_noncompliance(
                 "stream/request-format artwork dimensions must be positive: "
                 + ", ".join(invalid_dims)
@@ -295,12 +294,22 @@ class ArtworkV1Role(Role):
 
         channels = list(self._channels)
         current = channels[artwork_request.channel]
-        channels[artwork_request.channel] = ArtworkChannel(
-            source=artwork_request.source if artwork_request.source is not None else current.source,
-            format=artwork_request.format if artwork_request.format is not None else current.format,
-            width=artwork_request.width if artwork_request.width is not None else current.width,
-            height=artwork_request.height if artwork_request.height is not None else current.height,
-        )
+        try:
+            channels[artwork_request.channel] = ArtworkChannel(
+                source=artwork_request.source
+                if artwork_request.source is not None
+                else current.source,
+                format=artwork_request.format
+                if artwork_request.format is not None
+                else current.format,
+                width=artwork_request.width if artwork_request.width is not None else current.width,
+                height=artwork_request.height
+                if artwork_request.height is not None
+                else current.height,
+            )
+        except ValueError as err:
+            self._client.flag_noncompliance(f"stream/request-format artwork channel: {err}")
+            return
         self._apply_channels(channels)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
@@ -363,9 +372,9 @@ class ArtworkV1Role(Role):
         streamed = [
             i for i, config in enumerate(configs) if config.source is not ArtworkSource.NONE
         ]
-        # With no channel streamed, keep one entry: the stream stays active so a later
-        # client/state can enable a channel, which it could not do after a stream/end.
-        stream_channels = configs[: streamed[-1] + 1] if streamed else configs[:1]
+        # With no channel streamed, the stream stays active so a later client/state can
+        # enable a channel, which it could not do after a stream/end.
+        stream_channels = configs[: streamed[-1] + 1] if streamed else []
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
         if self._client.info.artwork_support is not None:
             # A hello-wire client requires every declared channel, with format and size.
@@ -394,7 +403,9 @@ class ArtworkV1Role(Role):
         self._channels = []
 
     # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
-    def _send_single_message(self, channel: int, image_data: bytes, timestamp_us: int) -> None:
+    def _send_single_message(
+        self, channel: int, image_data: bytes, timestamp_us: int, *, epoch_exempt: bool = False
+    ) -> None:
         """Send `image_data` as one `[type][timestamp][image]` message."""
         message_type = artwork_message_type(channel)
         self._client.send_binary(
@@ -402,15 +413,19 @@ class ArtworkV1Role(Role):
             role_family=self.role_family,
             timestamp_us=timestamp_us,
             message_type=message_type,
+            epoch_exempt=epoch_exempt,
         )
 
     def _send_clear_now(self, channel: int, timestamp_us: int) -> None:
         """Enqueue a clear for `channel` at once; no transfer may be in flight."""
+        # Must survive a later cancel dropping the role's queued binary.
         # DEPRECATED(spec-pr-188): remove in aiosendspin <version>
         if self.uses_single_message_framing():
-            self._send_single_message(channel, b"", timestamp_us)
+            self._send_single_message(channel, b"", timestamp_us, epoch_exempt=True)
             return
-        self._send_transfer_message(channel, pack_artwork_announce(channel, timestamp_us, 0))
+        self._send_transfer_message(
+            channel, pack_artwork_announce(channel, timestamp_us, 0), epoch_exempt=True
+        )
 
     def _send_transfer_message(
         self, channel: int, data: bytes, *, epoch_exempt: bool = False

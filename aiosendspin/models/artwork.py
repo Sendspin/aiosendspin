@@ -129,7 +129,9 @@ class ArtworkChannel(SendspinModel):
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        if self.source is not ArtworkSource.NONE and None in (self.format, self.width, self.height):
+        if self.source is ArtworkSource.NONE:
+            return
+        if None in (self.format, self.width, self.height):
             raise ValueError(
                 f"format, width and height are required for source {self.source.value}"
             )

@@ -127,12 +127,11 @@ def _record(client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
             events.append(type(message).__name__)
 
     def _binary(data: bytes, **kwargs: Any) -> None:
-        if kwargs.get("epoch_exempt"):
-            events.append(("exempt", _decode(data)))
-        elif client.info.artwork_support is None:
-            events.append(_decode(data))
+        if client.info.artwork_support is None:
+            event = _decode(data)
         else:
-            events.append(("binary", kwargs["message_type"] - 8, len(data)))
+            event = ("binary", kwargs["message_type"] - 8, len(data))
+        events.append(("exempt", event) if kwargs.get("epoch_exempt") else event)
 
     def _schedule(_role: object, channel: int, _config: object) -> None:
         events.append(("image", channel))
@@ -261,8 +260,8 @@ async def test_artwork_encoded_for_old_configuration_is_discarded(
         ([_ALBUM], [_ALBUM_WIRE]),
         ([_ALBUM, _NONE, _ARTIST, _NONE], [_ALBUM_WIRE, _NONE_WIRE, _ARTIST_WIRE]),
         ([_NONE, _ARTIST], [_NONE_WIRE, _ARTIST_WIRE]),
-        ([_NONE], [_NONE_WIRE]),
-        ([_NONE, _NONE, _NONE, _NONE], [_NONE_WIRE]),
+        ([_NONE], []),
+        ([_NONE, _NONE, _NONE, _NONE], []),
     ],
 )
 def test_artwork_state_starts_truncated_stream(
@@ -333,7 +332,7 @@ def test_artwork_state_change_drops_clears_restarts_and_resends(
 
     assert events == [
         ("drop", ["artwork"]),
-        ("announce", 0, _NOW_US, 0),
+        ("exempt", ("announce", 0, _NOW_US, 0)),
         ("start", [_NONE_WIRE, _ARTIST_WIRE, _ARTIST_WIRE]),
         ("image", 1),
         ("image", 2),
@@ -378,8 +377,8 @@ def test_artwork_all_none_state_keeps_stream_active(monkeypatch: pytest.MonkeyPa
 
     assert events == [
         ("drop", ["artwork"]),
-        ("announce", 0, _NOW_US, 0),
-        ("start", [_NONE_WIRE]),
+        ("exempt", ("announce", 0, _NOW_US, 0)),
+        ("start", []),
         ("drop", ["artwork"]),
         ("start", [_ALBUM_WIRE]),
         ("image", 0),
@@ -596,7 +595,7 @@ async def test_artwork_in_flight_transfer_cancelled_before_reconfiguring_stream_
     assert events == [
         ("drop", ["artwork"]),
         ("exempt", ("cancel", 1)),
-        ("announce", 0, _NOW_US, 0),
+        ("exempt", ("announce", 0, _NOW_US, 0)),
         ("start", [_NONE_WIRE, _ARTIST_WIRE]),
         ("image", 1),
     ]
@@ -1085,7 +1084,7 @@ def test_legacy_state_replaces_hello_channels(monkeypatch: pytest.MonkeyPatch) -
 
     assert events == [
         ("drop", ["artwork"]),
-        ("binary", 0, 9),
+        ("exempt", ("binary", 0, 9)),
         ("start", [_NONE_WIRE, _ARTIST_WIRE]),
         ("image", 1),
     ]
@@ -1137,7 +1136,7 @@ def test_legacy_request_format_disabling_channel_keeps_its_format_and_size(
 
     assert events == [
         ("drop", ["artwork"]),
-        ("binary", 0, 9),
+        ("exempt", ("binary", 0, 9)),
         ("start", [{**_ALBUM_WIRE, "source": "none"}, _ARTIST_WIRE]),
         ("image", 1),
     ]
@@ -1212,6 +1211,24 @@ def test_artwork_role_flags_nonpositive_request_dimensions() -> None:
         StreamRequestFormatPayload(artwork=StreamRequestFormatArtwork(channel=0, width=-10))
     )
     client.flag_noncompliance.assert_called_once()
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_artwork_role_flags_request_enabling_none_channel_without_size() -> None:
+    """Enabling a none channel declared without a usable size is flagged, not applied."""
+    client = _make_legacy_client_stub(
+        _ALBUM,
+        ArtworkChannel(source=ArtworkSource.NONE, format=PictureFormat.JPEG, width=0, height=0),
+    )
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            artwork=StreamRequestFormatArtwork(channel=1, source=ArtworkSource.ARTIST)
+        )
+    )
+    client.flag_noncompliance.assert_called_once()
+    assert 1 not in role.get_channel_configs()
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
