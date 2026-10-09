@@ -59,6 +59,7 @@ from aiosendspin.models.core import (
     ClientStateMessage,
     ClientStatePayload,
     ClientTimeMessage,
+    DynamicPairMethodDescriptor,
     LegacyServerActivateMessage,
     LegacyServerHelloMessage,
     LegacyServerHelloPayload,
@@ -1296,6 +1297,7 @@ class SendspinConnection:
 
     async def _pair_on_connect(self, transport: EncryptedWebSocket) -> bool:
         """Run the pairing this connection was admitted for, alongside the message loops."""
+        self._refuse_unadvertised_pairing(self._pairing_attempt)
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_message_queue = queue
         # The writer starts once the first server/activate is out.
@@ -1753,8 +1755,8 @@ class SendspinConnection:
         An unpaired connection keeps its playback, roles and group during the attempt; a
         long-term paired one leaves playback and its roles first.
 
-        A pair abort raises after leaving pairing, or after closing the connection when its
-        reason closes it.
+        A pair abort raises after leaving pairing, or before entering it for a method or format
+        the client does not offer, or after closing the connection when its reason closes it.
         A server-side timeout or malformed operator input (``InvalidPairingCodeError``) raises
         after leaving pairing, also keeping the connection; so does a Pairing PSK attempt whose
         ``client_id`` is not this connection's, before entering pairing.
@@ -1768,6 +1770,7 @@ class SendspinConnection:
         transport = self._transport
         if not isinstance(transport, EncryptedWebSocket):
             raise PairingError("cannot pair over an unencrypted connection")
+        self._refuse_unadvertised_pairing(attempt)
         if not self._in_pairing:
             if self._pairing_quiesces:
                 await self._quiesce_for_pairing()
@@ -1923,7 +1926,7 @@ class SendspinConnection:
             languages: list[str] | None = None
             if method is PairMethod.DYNAMIC_PAIRING_CODE:
                 assert self._pairing_attempt is not None
-                pairing_format = self._negotiated_dynamic_pairing_format()
+                pairing_format = self._pairing_attempt.pairing_format
                 # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
                 # Clients predating server/hello languages read them from the digits activation.
                 if (
@@ -1934,9 +1937,6 @@ class SendspinConnection:
                     languages = list(self._server.languages)
             self._activated_pairing_method = method
             assert self._client_info is not None
-            # No gate on the hello-advertised methods: the advertisement may lag the client's
-            # live pairing config (management can change it mid-connection). The client
-            # arbitrates, aborting an unsupported method with ``method_not_supported``.
             await self._pause_writer()
             activation_payload = self._pairing_activation(
                 ActivatePairing(
@@ -2094,24 +2094,23 @@ class SendspinConnection:
         """Flag a Pairing PSK attempt started by client/pair-finalize; raises when strict."""
         self._flag_noncompliance("Pairing PSK client/pair-finalize sent without client/pair-init")
 
-    def _negotiated_dynamic_pairing_format(self) -> PairingCodeFormat:
-        """Return the attempt's emission format, checked against the advertised descriptor."""
+    def _refuse_unadvertised_pairing(self, attempt: PairingAttempt | None) -> None:
+        """Abort an attempt the client/hello rules out, or when strict any method it left out."""
         assert self._client_info is not None
-        assert self._pairing_attempt is not None
-        requested = self._pairing_attempt.pairing_format
-        assert requested is not None
+        method = attempt.method if attempt is not None else PairMethod.PAIRING_PSK
         methods = self._client_info.supported_pair_methods
-        descriptor = methods.dynamic_pairing_code if methods is not None else None
-        if methods is not None and PairMethod.DYNAMIC_PAIRING_CODE.value in (
-            methods.unusable_methods or ()
-        ):
-            raise PairingError("client offers no usable dynamic_pairing_code format or channel")
+        descriptor = getattr(methods, method.value, None)
         if descriptor is None:
-            # The advertisement lags a management enable; the client arbitrates.
-            return requested
-        if requested.value not in descriptor.formats:
-            raise PairingError(f"client does not offer the {requested.value} emission format")
-        return requested
+            unusable = methods is not None and method.value in (methods.unusable_methods or ())
+            # A lenient server lets the client decide, since its config may change after the hello.
+            if self._server.allow_noncompliant_clients and not unusable:
+                return
+            raise LocalPairingAbortError(PairAbortReason.METHOD_NOT_SUPPORTED)
+        if isinstance(descriptor, DynamicPairMethodDescriptor):
+            assert attempt is not None
+            assert attempt.pairing_format is not None
+            if attempt.pairing_format.value not in descriptor.formats:
+                raise LocalPairingAbortError(PairAbortReason.METHOD_NOT_SUPPORTED)
 
     async def _rehandshake_for_pairing_if_needed(self, transport: Transport) -> bool:
         """If the attempt needs a PSK other than the current one, re-handshake onto it."""
