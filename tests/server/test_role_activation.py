@@ -624,6 +624,36 @@ async def test_group_update_follows_the_first_activation_before_client_state() -
 
 
 @pytest.mark.asyncio
+async def test_initial_state_read_during_the_activation_is_not_awaited_again() -> None:
+    """A client/state read while the first server/activate goes out leaves nothing to flag."""
+    loop = asyncio.get_running_loop()
+    server = _MockServer(loop=loop, clock=LoopClock(loop))
+    await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    psk = generate_psk()
+    conn._client_id = CLIENT_ID  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk), psk=psk, category=PskCategory.SENTINEL, counterparty_id=CLIENT_ID
+    )
+    hello = _hello([Roles.PLAYER.value])
+    fake = _FakeTransport([WSMessage(WSMsgType.TEXT, ClientHelloMessage(hello).to_json(), "")])
+    conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+    send_priority = conn._process_priority_messages  # noqa: SLF001
+
+    async def send_with_state(transport: object) -> bool:
+        if not conn._initial_state_received:  # noqa: SLF001
+            await conn._handle_client_state(_full_state())  # noqa: SLF001
+        return await send_priority(transport)  # type: ignore[arg-type]
+
+    conn._process_priority_messages = send_with_state  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await conn._exchange_hellos()  # noqa: SLF001
+
+    assert _client(conn).is_connected
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_strict_server_connects_stateless_roles_whose_state_came_while_pairing() -> None:
     """A client/state sent during pairing on connect is the initial state of later roles."""
     loop = asyncio.get_running_loop()

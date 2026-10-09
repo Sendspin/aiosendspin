@@ -1275,6 +1275,8 @@ class SendspinConnection:
 
         assert self._client is not None
         self._start_group_updates()
+        if self._initial_state_received:
+            return True  # The initial client/state arrived while server/activate went out.
         # A strict server also waits on a client whose active roles define no state object.
         awaits_state = bool(self._client.active_roles) and not self._client_state_received
         if self.requires_initial_state() or (
