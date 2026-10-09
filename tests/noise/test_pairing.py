@@ -760,6 +760,39 @@ async def test_pairing_psk_server_times_out_a_stalled_record_store(
         )
 
 
+async def test_server_acks_a_stored_record_before_a_stalled_grant_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the record is stored the client gets the ack, even if the cleanup after it stalls."""
+    monkeypatch.setattr("aiosendspin.noise.pairing._SERVER_FINALIZE_TIMEOUT_S", 0.05)
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    client_store = InMemoryClientPairingStore()
+    server_store = InMemoryServerPairingStore()
+
+    async def stalled_remove_trusted_unpaired(_client_id: str) -> None:
+        await asyncio.Event().wait()
+
+    server_store.remove_trusted_unpaired = stalled_remove_trusted_unpaired  # type: ignore[method-assign]
+    server = asyncio.create_task(
+        run_pairing_psk_server(
+            server_ews, pairing_index=1, client_id="client-A", store=server_store
+        )
+    )
+    async with asyncio.timeout(1):
+        await run_pairing_psk_client(
+            client_ews, pairing_index=1, server_id="server-X", store=client_store
+        )
+    with pytest.raises(PairingError) as excinfo:
+        await server
+    assert not isinstance(excinfo.value, PairingTimeoutError)
+
+    client_record = await client_store.record_by_server_id("server-X")
+    server_record = await server_store.record_by_client_id("client-A")
+    assert client_record is not None
+    assert server_record is not None
+    assert client_record.psk == server_record.psk
+
+
 async def test_pairing_psk_server_discards_a_cancelled_attempts_messages() -> None:
     """A late init and finalize from a cancelled attempt do not finalize the next attempt."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
