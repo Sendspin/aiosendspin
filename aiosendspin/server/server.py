@@ -1240,6 +1240,12 @@ class SendspinServer:
         old_url = self._mdns_client_urls.get(name)
         if state_change is ServiceStateChange.Updated and old_url in self._mdns_goodbye_urls:
             logger.debug("Not redialing %s after its goodbye on an mDNS update", name)
+            if url != old_url:
+                self._mdns_goodbye_urls.discard(old_url)
+                self._mdns_goodbye_urls.add(url)
+                self._mdns_client_urls[name] = url
+                for client_id in [c for c, u in self._client_urls.items() if u == old_url]:
+                    self.register_client_url(client_id, url)
             return
         if old_url is not None and old_url != url and old_url in self._connection_tasks:
             old_parts = urlsplit(old_url)

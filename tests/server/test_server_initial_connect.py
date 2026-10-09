@@ -775,6 +775,35 @@ async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
 
 
 @pytest.mark.asyncio
+async def test_mdns_update_after_goodbye_tracks_new_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skipped mDNS update still moves the client to its new address for a later reclaim."""
+    server = _make_server(_PersistentSuccessfulSession())
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+    old_url = "ws://10.0.0.2:9999/sendspin"
+    new_url = "ws://10.0.0.7:9999/sendspin"
+
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    server._mdns_client_urls[service_name] = old_url  # noqa: SLF001
+    server._mdns_goodbye_urls.add(old_url)  # noqa: SLF001
+    server.register_client_url("speaker", old_url)
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
+    await server._handle_service_added(  # noqa: SLF001
+        MagicMock(), service_type, service_name, ServiceStateChange.Updated
+    )
+    assert new_url not in server._connection_tasks  # noqa: SLF001
+
+    assert server.reclaim_client_for_playback("speaker", timeout_s=0)
+    assert new_url in server._connection_tasks  # noqa: SLF001
+    server.disconnect_from_client(new_url)
+
+
+@pytest.mark.asyncio
 async def test_playback_request_skips_client_that_required_pairing() -> None:
     """A playback request does not redial a client whose last goodbye was ``pairing_required``."""
     server = _make_server(_PersistentSuccessfulSession())
