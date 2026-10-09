@@ -1197,7 +1197,8 @@ class SendspinServer:
         if path is None or not str(path).startswith("/"):
             return
 
-        url = f"ws://{address}:{port}{path}"
+        host = f"[{address}]" if ip_address(address).version == 6 else address
+        url = f"ws://{host}:{port}{path}"
         old_url = self._mdns_client_urls.get(name)
         if old_url is not None and old_url != url and old_url in self._connection_tasks:
             old_parts = urlsplit(old_url)

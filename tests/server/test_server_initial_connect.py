@@ -674,6 +674,8 @@ async def test_mdns_removal_cancels_connection_when_no_persistent_client() -> No
         (["10.0.0.5"], 9999, "/sendspin", True, "ws://10.0.0.5:9999/sendspin", True),
         # URL changed but no active task -> reconnect.
         (["10.0.0.3"], 9999, "/sendspin", False, "ws://10.0.0.3:9999/sendspin", True),
+        # IPv6-only client -> bracketed literal.
+        (["fd00::3"], 9999, "/sendspin", False, "ws://[fd00::3]:9999/sendspin", True),
     ],
 )
 @pytest.mark.asyncio
