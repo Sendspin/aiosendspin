@@ -944,6 +944,38 @@ async def test_strict_server_refuses_a_method_enabled_after_hello() -> None:
             await client.disconnect()
 
 
+async def test_strict_pairing_dial_never_activates_an_unadvertised_method() -> None:
+    """A strict server never activates an unadvertised method on a pairing dial."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
+    sdk = make_sdk_client(
+        identity=identity,
+        pairing_store=client_store,
+        client_name="c",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(
+            pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+        ),
+    )
+    client_aborts: list[PairAbortReason] = []
+    sdk.add_pairing_abort_listener(client_aborts.append)
+    attempt = PairingAttempt(
+        method=PairMethod.DYNAMIC_PAIRING_CODE,
+        pairing_code_provider=lambda: asyncio.sleep(0),
+        pairing_format=PairingCodeFormat.DIGITS,
+    )
+    try:
+        async with _host_incoming_client(sdk) as url, _dial(server, url, pairing_attempt=attempt):
+            await _await_connected_client(server, identity.peer_id)
+        assert client_aborts == []
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_live_pairing_qr_code() -> None:
     """Operator pairs by scanning the client-rendered token; digits channels stay silent."""
     server_store = InMemoryServerPairingStore()
