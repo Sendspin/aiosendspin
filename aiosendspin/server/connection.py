@@ -1954,10 +1954,12 @@ class SendspinConnection:
                 if self._legacy_hello
                 else ServerActivateMessage(activation_payload)
             )
-            # Counted before the send, since a cancel during it may still deliver the activation.
+            # Finish the send through a cancel so the count matches the activations sent.
+            _, cancelled = await finish_despite_cancel(transport.send_str(activation.to_json()))
             self._pairing_index += 1
-            await transport.send_str(activation.to_json())
             self._pairing_activities = activation_payload.activities
+            if cancelled:
+                await abort_pairing(transport, PairAbortReason.USER_CANCELLED)
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
             if not self._legacy_hello:
                 self._resume_writer()

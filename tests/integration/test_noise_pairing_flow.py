@@ -2475,6 +2475,54 @@ async def test_strict_server_rejects_a_pair_init_ahead_of_its_count_outside_an_a
             await client.disconnect()
 
 
+async def test_attempt_cancelled_while_its_activation_is_sending_lets_the_next_one_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling an attempt mid-send of its activation keeps the pairing count in step."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    shown: asyncio.Queue[str] = asyncio.Queue()
+    method = PairMethod.DYNAMIC_PAIRING_CODE
+    send_str = EncryptedWebSocket.send_str
+    sending = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held_activation_send_str(self: EncryptedWebSocket, data: str) -> None:
+        message = json.loads(data)
+        is_pairing_activation = (
+            message["type"] == "server/activate" and "pairing" in message["payload"]
+        )
+        if is_pairing_activation and not release.is_set():
+            sending.set()
+            await release.wait()
+        await send_str(self, data)
+
+    async def provide() -> str:
+        return await shown.get()
+
+    monkeypatch.setattr(EncryptedWebSocket, "send_str", held_activation_send_str)
+    async with _serve(server) as url:
+        client = await _code_pairing_client(client_identity, client_store, method, shown)
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            first = asyncio.create_task(conn.initiate_pairing(_code_attempt(method, provide)))
+            await sending.wait()
+            ending = asyncio.create_task(conn.end_pairing())
+            await asyncio.sleep(0.05)  # the cancel reaches the attempt while its send is held
+            release.set()
+            await ending
+            with suppress(PairingAbortError):
+                await first
+
+            async with asyncio.timeout(5):
+                await conn.initiate_pairing(_code_attempt(method, provide))
+            await _await_long_term_record(client_store, server.id)
+        finally:
+            await client.disconnect()
+
+
 async def test_end_pairing_during_attempt_leaves_pairing() -> None:
     """end_pairing aborts a stalled attempt with user_cancelled, stays connected, re-pairs."""
     server_store = InMemoryServerPairingStore()
