@@ -1215,6 +1215,24 @@ def test_artwork_role_flags_nonpositive_request_dimensions() -> None:
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_artwork_role_flags_request_enabling_none_channel_without_size() -> None:
+    """Enabling a none channel declared without a usable size is flagged, not applied."""
+    client = _make_legacy_client_stub(
+        _ALBUM,
+        ArtworkChannel(source=ArtworkSource.NONE, format=PictureFormat.JPEG, width=0, height=0),
+    )
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(
+            artwork=StreamRequestFormatArtwork(channel=1, source=ArtworkSource.ARTIST)
+        )
+    )
+    client.flag_noncompliance.assert_called_once()
+    assert 1 not in role.get_channel_configs()
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
 # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def test_artwork_role_applies_and_flags_pre_rename_request_dimensions() -> None:
     """A stream/request-format phrased as media_width/media_height resizes, and is flagged."""

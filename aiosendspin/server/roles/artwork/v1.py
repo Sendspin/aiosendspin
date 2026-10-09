@@ -285,8 +285,7 @@ class ArtworkV1Role(Role):
             if value is not None and value <= 0
         ]
         if invalid_dims:
-            # Skip the update: non-positive dims would otherwise raise out of
-            # ArtworkChannel and tear the connection down.
+            # Skip the update, even for a none channel that ArtworkChannel would accept.
             self._client.flag_noncompliance(
                 "stream/request-format artwork dimensions must be positive: "
                 + ", ".join(invalid_dims)
@@ -295,12 +294,22 @@ class ArtworkV1Role(Role):
 
         channels = list(self._channels)
         current = channels[artwork_request.channel]
-        channels[artwork_request.channel] = ArtworkChannel(
-            source=artwork_request.source if artwork_request.source is not None else current.source,
-            format=artwork_request.format if artwork_request.format is not None else current.format,
-            width=artwork_request.width if artwork_request.width is not None else current.width,
-            height=artwork_request.height if artwork_request.height is not None else current.height,
-        )
+        try:
+            channels[artwork_request.channel] = ArtworkChannel(
+                source=artwork_request.source
+                if artwork_request.source is not None
+                else current.source,
+                format=artwork_request.format
+                if artwork_request.format is not None
+                else current.format,
+                width=artwork_request.width if artwork_request.width is not None else current.width,
+                height=artwork_request.height
+                if artwork_request.height is not None
+                else current.height,
+            )
+        except ValueError as err:
+            self._client.flag_noncompliance(f"stream/request-format artwork channel: {err}")
+            return
         self._apply_channels(channels)
 
     # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
