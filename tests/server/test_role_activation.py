@@ -565,28 +565,42 @@ async def test_lenient_server_stops_waiting_once_stateless_roles_send_state() ->
     assert conn._initial_state_timeout_handle is None  # noqa: SLF001
 
 
-@pytest.mark.asyncio
-async def test_strict_server_holds_stateless_roles_until_initial_state() -> None:
-    """A strict server does not connect a controller-only client and drops it without state."""
+def _strict_server() -> _MockServer:
     loop = asyncio.get_running_loop()
-    server = _MockServer(loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False)
-    hello = dataclasses.replace(
-        _hello([Roles.CONTROLLER.value]),
+    return _MockServer(loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False)
+
+
+def _strict_hello(roles: list[str]) -> ClientHelloPayload:
+    return dataclasses.replace(
+        _hello(roles),
         supported_pair_methods=SupportedPairMethods(pairing_psk=PairMethodDescriptor()),
     )
-    conn, _fake = await _connect(hello, send_state=False, server=server)
+
+
+@pytest.mark.asyncio
+async def test_strict_server_waits_for_a_late_initial_state_without_a_deadline() -> None:
+    """A strict server holds a controller-only client until its initial client/state arrives."""
+    conn, _fake = await _connect(
+        _strict_hello([Roles.CONTROLLER.value]), send_state=False, server=_strict_server()
+    )
     client = _client(conn)
     assert not client.is_connected
-    handle = conn._initial_state_timeout_handle  # noqa: SLF001
-    assert handle is not None
-    handle.cancel()
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
 
-    with patch.object(conn, "disconnect", new_callable=AsyncMock) as disconnect:
-        conn._initial_state_timeout_callback()  # noqa: SLF001
-        await asyncio.sleep(0)
+    await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
 
-    disconnect.assert_awaited_once_with(retry_connection=False)
-    assert not client.is_connected
+    assert client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_strict_server_holds_a_reactivated_role_without_a_deadline() -> None:
+    """A strict server keeps a re-added player held until its client/state object arrives."""
+    conn, _fake = await _connect(_strict_hello([Roles.PLAYER.value]), server=_strict_server())
+    await _set_trusted(conn, trusted=False)
+    await _set_trusted(conn, trusted=True)
+
+    assert _client(conn).awaits_role_state("player")
+    assert conn._activation_state_timeout_handle is None  # noqa: SLF001
 
 
 @pytest.mark.asyncio

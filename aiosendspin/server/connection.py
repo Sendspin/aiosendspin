@@ -200,7 +200,7 @@ MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control
 # Bound the wait for the writer to drain when quiescing.
 QUIESCE_TIMEOUT_S: float = 30.0
 
-# How long a client may take to send the client/state an activation requires.
+# How long a lenient server waits for the client/state an activation requires.
 _CLIENT_STATE_TIMEOUT_S = 5.0
 
 # Distinct unknown message types warned about per connection; later ones log at debug.
@@ -451,6 +451,7 @@ class SendspinConnection:
         self._disconnecting = False
 
         self._initial_state_received = False
+        self._initial_state_awaited = False
         self._client_state_received = False
         self._receives_group_updates = False
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
@@ -935,12 +936,7 @@ class SendspinConnection:
 
     def _initial_state_timeout_callback(self) -> None:
         self._initial_state_timeout_handle = None
-        try:
-            self._flag_noncompliance("did not send the required initial client/state in time")
-        except ClientComplianceError:
-            # A timer callback can't propagate into the message loop, so tear down here.
-            create_task(self.disconnect(retry_connection=False))
-            return
+        self._flag_noncompliance("did not send the required initial client/state in time")
         # Lenient: keep the connection and mark the client connected anyway.
         if self._client is not None and not self._initial_state_received:
             self._initial_state_received = True
@@ -1284,9 +1280,12 @@ class SendspinConnection:
         if self.requires_initial_state() or (
             awaits_state and not self._server.allow_noncompliant_clients
         ):
-            self._initial_state_timeout_handle = self._server.loop.call_later(
-                _CLIENT_STATE_TIMEOUT_S, self._initial_state_timeout_callback
-            )
+            self._initial_state_awaited = True
+            # A strict server waits for the state however long it takes.
+            if self._server.allow_noncompliant_clients:
+                self._initial_state_timeout_handle = self._server.loop.call_later(
+                    _CLIENT_STATE_TIMEOUT_S, self._initial_state_timeout_callback
+                )
         else:
             # Nothing to wait for: roles activated later are held until their own state.
             self._initial_state_received = True
@@ -2247,6 +2246,8 @@ class SendspinConnection:
 
     def _arm_activation_state_timeout(self) -> None:
         self._cancel_activation_state_timeout()
+        if not self._server.allow_noncompliant_clients:
+            return  # A strict server holds the roles however long their state takes.
         self._activation_state_timeout_handle = self._server.loop.call_later(
             _CLIENT_STATE_TIMEOUT_S, self._activation_state_timeout_callback
         )
@@ -2264,16 +2265,11 @@ class SendspinConnection:
         held = self._held_roles()
         if not held:
             return
-        try:
-            for role in held:
-                self._flag_noncompliance(
-                    f"did not send the {role.role_family} client/state object "
-                    "after server/activate in time"
-                )
-        except ClientComplianceError:
-            # A timer callback can't propagate into the message loop, so tear down here.
-            create_task(self.disconnect(retry_connection=False))
-            return
+        for role in held:
+            self._flag_noncompliance(
+                f"did not send the {role.role_family} client/state object "
+                "after server/activate in time"
+            )
         # Lenient: start the roles without their state.
         self._release_roles(held)
 
@@ -2888,9 +2884,9 @@ class SendspinConnection:
             return
 
         # Validate before applying initial state.
-        # Still initial once its timeout runs, even if the roles that needed it were removed.
+        # Still initial once awaited, even if the roles that needed it were removed.
         is_initial = not self._initial_state_received and (
-            self.requires_initial_state() or self._initial_state_timeout_handle is not None
+            self.requires_initial_state() or self._initial_state_awaited
         )
         if is_initial:
             self._flag_initial_state_deviations(payload)
