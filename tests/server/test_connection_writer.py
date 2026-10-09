@@ -27,6 +27,8 @@ from aiosendspin.models.core import (
     ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
+    StreamClearMessage,
+    StreamClearPayload,
     StreamEndMessage,
     StreamEndPayload,
     StreamStartMessage,
@@ -665,6 +667,7 @@ async def test_role_stream_lifecycle_json_is_sent_before_older_binary() -> None:
     conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
     conn._writer_task = asyncio.create_task(conn._writer())  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
 
     conn.send_role_message("player", StreamEndMessage(payload=StreamEndPayload(roles=None)))
     conn.send_role_message(
@@ -904,6 +907,80 @@ def _json_recording_connection() -> tuple[SendspinConnection, MagicMock, list[st
     wsock.closed = False
     wsock.send_str = AsyncMock(side_effect=sent.append)
     return SendspinConnection(server, wsock_client=wsock), wsock, sent
+
+
+def _player_stream_start() -> StreamStartMessage:
+    return StreamStartMessage(
+        payload=StreamStartPayload(
+            player=StreamStartPlayer(
+                codec=AudioCodec.PCM, sample_rate=48_000, channels=2, bit_depth=16
+            )
+        )
+    )
+
+
+async def _drain_role_queues(conn: SendspinConnection, wsock: MagicMock) -> None:
+    while ready := conn._peek_ready_entry():  # noqa: SLF001
+        await conn._process_role_messages(wsock, ready, 0)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_stream_end_supersedes_queued_stream_start_and_clear() -> None:
+    """A stream/start or stream/clear queued ahead in time does not follow the stream/end."""
+    conn, wsock, sent = _json_recording_connection()
+    conn._streaming_roles.add("player")  # noqa: SLF001
+    conn.send_binary(
+        b"audio",
+        role="player",
+        timestamp_us=5_000_000,
+        message_type=BinaryMessageType.AUDIO_CHUNK.value,
+    )
+    conn.send_role_message("player", _player_stream_start())
+    conn.send_role_message(
+        "player", StreamClearMessage(payload=StreamClearPayload(roles=["player"]))
+    )
+    conn.send_role_message("player", StreamEndMessage(payload=StreamEndPayload(roles=["player"])))
+
+    await _drain_role_queues(conn, wsock)
+
+    assert [json.loads(message)["type"] for message in sent] == ["stream/end"]
+
+
+@pytest.mark.asyncio
+async def test_stream_end_queued_while_stream_start_is_sending_is_kept() -> None:
+    """A stream/start already being written counts as sent for a following stream/end."""
+    conn, wsock, sent = _json_recording_connection()
+    release = asyncio.Event()
+
+    async def _blocking_send(data: str) -> None:
+        await release.wait()
+        sent.append(data)
+
+    wsock.send_str = AsyncMock(side_effect=_blocking_send)
+    conn.send_role_message("player", _player_stream_start())
+    ready = conn._peek_ready_entry()  # noqa: SLF001
+    assert ready is not None
+    sending = asyncio.create_task(conn._process_role_messages(wsock, ready, 0))  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    conn.send_role_message("player", StreamEndMessage(payload=StreamEndPayload(roles=["player"])))
+    release.set()
+    await sending
+    await _drain_role_queues(conn, wsock)
+
+    assert [json.loads(message)["type"] for message in sent] == ["stream/start", "stream/end"]
+
+
+@pytest.mark.asyncio
+async def test_stream_end_for_an_unsent_stream_start_sends_neither() -> None:
+    """Ending a stream whose opening stream/start is still queued puts nothing on the wire."""
+    conn, wsock, sent = _json_recording_connection()
+    conn.send_role_message("player", _player_stream_start())
+    conn.send_role_message("player", StreamEndMessage(payload=StreamEndPayload(roles=["player"])))
+
+    await _drain_role_queues(conn, wsock)
+
+    assert sent == []
 
 
 # DEPRECATED(spec-pr-175): remove in aiosendspin <version>
@@ -1557,6 +1634,7 @@ async def test_epoch_exempt_binary_survives_stream_end() -> None:
     )
     conn._transport = wsock  # noqa: SLF001
     await conn._setup_connection()  # noqa: SLF001
+    conn._streaming_roles.add("artwork")  # noqa: SLF001
     message_type = BinaryMessageType.ARTWORK_CHANNEL_0.value
 
     conn.send_binary(
