@@ -1325,6 +1325,105 @@ async def test_non_main_pcm_catchup_does_not_anchor_to_far_channel_tail() -> Non
     assert role2.received[0].timestamp_us - now_us < 500_000
 
 
+@pytest.mark.asyncio
+async def test_non_main_pcm_catchup_first_chunk_meets_send_ahead() -> None:
+    """Encoder warm-up output before the joiner's send-ahead is not delivered."""
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, 25_000)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    class TransformerB(TransformerA):
+        pass
+
+    channel_id = UUID("77777777-7777-7777-7777-777777777777")
+    group = _DummyGroup(clients=[])
+    role1 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerA(),
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role1]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock()
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    stream.enable_pcm_cache_for_channel(channel_id)
+
+    now_us = clock.now_us()
+    pcm_chunks = deque[CachedPCMChunk]()
+    for i in range(80):
+        pcm_chunks.append(
+            CachedPCMChunk(
+                timestamp_us=now_us - 90_000 + i * 25_000,
+                duration_us=25_000,
+                pcm_data=bytes(4800),
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+            )
+        )
+    stream._pcm_chunk_cache[channel_id.int] = pcm_chunks  # noqa: SLF001
+    stream._channel_timing[channel_id] = now_us + 30_000_000  # noqa: SLF001
+
+    role2 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        ),
+        output_delay_us=100_000,
+        required_lead_time_us=0,
+        min_buffer_us=200_000,
+    )
+    role3 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        ),
+        output_delay_us=100_000,
+        required_lead_time_us=0,
+        min_buffer_us=500_000,
+    )
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+    group.clients.append(_DummyClient([role3]))
+    stream.on_role_join(role3)
+    await _drain_catchup_tasks(stream)
+
+    assert role2.received
+    assert role2.received[0].timestamp_us >= now_us + 300_000
+    assert role3.received
+    assert role3.received[0].timestamp_us >= now_us + 600_000
+
+
 async def _setup_deep_buffer_catchup_join() -> tuple[PushStream, _DummyRole, int]:
     """Build a deep-buffer main-channel catch-up join and return (stream, joiner, tail).
 
