@@ -796,11 +796,13 @@ class PlayerV1Role(Role):
             channels=preferred_supported.channels,
         )
         base_codec = self.preferred_codec or preferred_supported.codec
+        # Opus ignores bit_depth and encodes from 16-bit PCM.
+        base_bit_depth = 16 if base_codec == AudioCodec.OPUS else base_format.bit_depth
 
         requested = SupportedAudioFormat(
             codec=player_req.codec or base_codec,
             sample_rate=player_req.sample_rate or base_format.sample_rate,
-            bit_depth=player_req.bit_depth or base_format.bit_depth,
+            bit_depth=player_req.bit_depth or base_bit_depth,
             channels=player_req.channels or base_format.channels,
         )
         if not any(requested.matches(fmt) for fmt in supported):

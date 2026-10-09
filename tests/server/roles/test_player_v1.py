@@ -237,6 +237,28 @@ def test_player_role_no_flag_for_declared_format_request() -> None:
     client.flag_noncompliance.assert_not_called()
 
 
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_player_role_codec_only_request_from_opus_falls_back_to_16_bit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A codec-only request away from opus does not carry over opus's ignored bit_depth."""
+    monkeypatch.setattr("aiosendspin.server.roles.player.capabilities.opus_available", lambda: True)
+    client = _make_client_stub()
+    pcm = SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16)
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.OPUS, channels=2, sample_rate=48000, bit_depth=0),
+        pcm,
+    )
+    role = PlayerV1Role(client=client)
+    role._ensure_preferred_format()  # noqa: SLF001
+
+    role.on_stream_request_format(
+        StreamRequestFormatPayload(player=StreamRequestFormatPlayer(codec=AudioCodec.PCM))
+    )
+
+    assert role._client_format == pcm  # noqa: SLF001
+
+
 def test_player_role_accepts_read_only_volume() -> None:
     """A volume reported without the volume command is applied and surfaced, not flagged."""
     client = _make_client_stub()
