@@ -267,6 +267,10 @@ class SourceV1Role(Role):
             self._client.flag_noncompliance(
                 "sent a pcm source audio chunk that is not a whole number of frames"
             )
+        if self._pcm_frame_bytes is None and not data:
+            # An empty packet flushes the decoder and ends decoding for the stream.
+            self._client.flag_noncompliance("sent an empty flac or opus source audio chunk")
+            return
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
         except Exception as err:
