@@ -410,7 +410,10 @@ class ArtworkV1Role(Role):
         if self.uses_single_message_framing():
             self._send_single_message(channel, b"", timestamp_us)
             return
-        self._send_transfer_message(channel, pack_artwork_announce(channel, timestamp_us, 0))
+        # Must survive a later cancel dropping the role's queued binary.
+        self._send_transfer_message(
+            channel, pack_artwork_announce(channel, timestamp_us, 0), epoch_exempt=True
+        )
 
     def _send_transfer_message(
         self, channel: int, data: bytes, *, epoch_exempt: bool = False

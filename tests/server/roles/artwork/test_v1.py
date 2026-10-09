@@ -333,7 +333,7 @@ def test_artwork_state_change_drops_clears_restarts_and_resends(
 
     assert events == [
         ("drop", ["artwork"]),
-        ("announce", 0, _NOW_US, 0),
+        ("exempt", ("announce", 0, _NOW_US, 0)),
         ("start", [_NONE_WIRE, _ARTIST_WIRE, _ARTIST_WIRE]),
         ("image", 1),
         ("image", 2),
@@ -378,7 +378,7 @@ def test_artwork_all_none_state_keeps_stream_active(monkeypatch: pytest.MonkeyPa
 
     assert events == [
         ("drop", ["artwork"]),
-        ("announce", 0, _NOW_US, 0),
+        ("exempt", ("announce", 0, _NOW_US, 0)),
         ("start", [_NONE_WIRE]),
         ("drop", ["artwork"]),
         ("start", [_ALBUM_WIRE]),
@@ -596,7 +596,7 @@ async def test_artwork_in_flight_transfer_cancelled_before_reconfiguring_stream_
     assert events == [
         ("drop", ["artwork"]),
         ("exempt", ("cancel", 1)),
-        ("announce", 0, _NOW_US, 0),
+        ("exempt", ("announce", 0, _NOW_US, 0)),
         ("start", [_NONE_WIRE, _ARTIST_WIRE]),
         ("image", 1),
     ]
