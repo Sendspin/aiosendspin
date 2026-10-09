@@ -303,6 +303,23 @@ def test_unrecognized_pair_method_is_ignored_not_rejected() -> None:
     assert methods.ignored_methods == ["telepathy"]
 
 
+def test_unrecognized_descriptor_values_are_recorded() -> None:
+    """Identifiers dropped from formats, out_channels and locations are recorded for logging."""
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":{"pairing_psk":{"locations":["device","sticker",7]},'
+        '"dynamic_pairing_code":{"formats":["digits","hologram"],'
+        '"out_channels":["display","vibration"]}}}'
+    )
+    methods = ClientHelloPayload.from_json(raw).supported_pair_methods
+    assert methods is not None
+    assert methods.ignored_values == [
+        "pairing_psk.locations=sticker",
+        "dynamic_pairing_code.formats=hologram",
+        "dynamic_pairing_code.out_channels=vibration",
+    ]
+
+
 def test_both_pairing_code_methods_prefer_dynamic() -> None:
     """Offering both code methods is recorded, and the dynamic one is preferred."""
     raw = (
@@ -400,10 +417,12 @@ def test_pair_method_records_cannot_be_spoofed_over_the_wire() -> None:
     raw = (
         '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
         '"supported_pair_methods":{"pairing_psk":{},"ignored_methods":["invented"],'
-        '"unusable_methods":["invented"],"offered_both_pairing_code_methods":true}}'
+        '"ignored_values":["invented"],"unusable_methods":["invented"],'
+        '"offered_both_pairing_code_methods":true}}'
     )
     methods = ClientHelloPayload.from_json(raw).supported_pair_methods
     assert methods is not None
     assert methods.ignored_methods is None
+    assert methods.ignored_values is None
     assert methods.unusable_methods is None
     assert methods.offered_both_pairing_code_methods is None

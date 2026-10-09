@@ -1596,6 +1596,11 @@ class SendspinConnection:
                 "client/hello offered unrecognized pairing methods: %s",
                 ", ".join(methods.ignored_methods),
             )
+        if methods.ignored_values:
+            self._logger.info(
+                "client/hello offered unrecognized pair-method values: %s",
+                ", ".join(methods.ignored_values),
+            )
         if methods.unusable_methods:
             self._logger.info(
                 "client/hello offered pairing methods with no usable values: %s",
