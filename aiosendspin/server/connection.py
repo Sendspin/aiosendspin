@@ -138,6 +138,7 @@ from aiosendspin.noise.constants import (
 from aiosendspin.noise.driver import (
     HandshakeAbortedError,
     HandshakeNoncomplianceError,
+    receive_client_init_frame,
     receive_text_frame,
     run_handshake_server,
     run_rehandshake_server,
@@ -1140,17 +1141,16 @@ class SendspinConnection:
     ) -> Transport:
         """Dispatch on the first frame: accept a legacy client or run the Noise handshake.
 
-        A ``client/hello`` first frame closes a pairing dial without a reply; otherwise,
-        in transition mode, it is accepted unencrypted (the raw socket is the transport,
+        Outside a pairing dial, in transition mode, a ``client/hello`` first frame
+        is accepted unencrypted (the raw socket is the transport,
         and the frame is held for the message loop). Every other TEXT first frame runs
         the Noise initiator handshake and yields an encrypted transport; one that is not
-        a valid ``client/init`` is answered with ``server/error``. Handshake failures, and a
-        pairing dial the client lacks the Pairing PSK for, raise ``HandshakeAbortedError``.
+        a valid ``client/init`` is answered with ``server/error``, as is a BINARY first frame.
+        Handshake failures, and a pairing dial the client lacks the Pairing PSK for, raise
+        ``HandshakeAbortedError``.
         """
-        first_text = await receive_text_frame(raw, what="first frame")
-        if _peek_message_type(first_text) == "client/hello":
-            if self._pairing_attempt is not None:
-                raise HandshakeAbortedError("pairing requires an encrypted connection")
+        first_text = await receive_client_init_frame(raw)
+        if _peek_message_type(first_text) == "client/hello" and self._pairing_attempt is None:
             if self._server.allow_unencrypted:
                 self._pending_first_text = first_text
                 return raw

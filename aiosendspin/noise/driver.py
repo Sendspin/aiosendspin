@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Final, Protocol, cast
 
 import orjson
-from aiohttp import WSMsgType
+from aiohttp import WSMessage, WSMsgType
 from noise.exceptions import (
     NoiseHandshakeError,
     NoiseInvalidMessage,
@@ -140,7 +141,7 @@ async def run_handshake_server(
     """Run the server-side (Noise initiator) handshake, rejecting spec violations if ``strict``."""
     compliance = _ServerCompliance(strict)
     if client_init_text is None:
-        client_init_text = await receive_text_frame(ws, what="client/init", timeout_s=timeout_s)
+        client_init_text = await receive_client_init_frame(ws, timeout_s=timeout_s)
     try:
         client_id, suite, client_static_pub = _parse_client_init(client_init_text)
     except InitRejectedError as exc:
@@ -345,14 +346,33 @@ async def receive_text_frame(
     timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
 ) -> str:
     """Receive one TEXT frame within ``timeout_s``, or abort the handshake."""
-    try:
-        async with asyncio.timeout(timeout_s):
-            msg = await ws.receive()
-    except TimeoutError as exc:
-        raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
+    msg = await _receive_frame(ws, what=what, timeout_s=timeout_s)
     if msg.type is not WSMsgType.TEXT:
         raise HandshakeAbortedError(f"expected {what} (TEXT), got {msg.type.name}")
     return cast("str", msg.data)
+
+
+async def receive_client_init_frame(
+    ws: HandshakeWebSocket,
+    *,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+) -> str:
+    """Receive the ``client/init`` TEXT frame, answering a BINARY one with ``server/error``."""
+    msg = await _receive_frame(ws, what="client/init", timeout_s=timeout_s)
+    if msg.type is WSMsgType.BINARY:
+        await _send_server_error(ws, ServerErrorReason.MALFORMED)
+        raise InitRejectedError(ServerErrorReason.MALFORMED, "malformed client/init: BINARY frame")
+    if msg.type is not WSMsgType.TEXT:
+        raise HandshakeAbortedError(f"expected client/init (TEXT), got {msg.type.name}")
+    return cast("str", msg.data)
+
+
+async def _receive_frame(ws: HandshakeWebSocket, *, what: str, timeout_s: float) -> WSMessage:
+    try:
+        async with asyncio.timeout(timeout_s):
+            return await ws.receive()
+    except TimeoutError as exc:
+        raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
 
 
 async def _receive_handshake_discarding_application(
@@ -497,6 +517,10 @@ def _parse_client_init(text: str) -> tuple[str, NoiseCipherSuite, bytes]:
     if not isinstance(payload, dict) or decoded.get("type") != INIT_TYPE_CLIENT:
         raise InitRejectedError(malformed, "malformed client/init: not a client/init envelope")
     version = payload.get("version")
+    if type(version) is float:
+        # orjson turns integers beyond 64 bits into floats. Reparse with json for completeness,
+        # so even those versions get unsupported_version.
+        version = json.loads(text)["payload"]["version"]
     # type() rather than isinstance(): a JSON true must not pass as version 1.
     if type(version) is not int:
         raise InitRejectedError(malformed, f"malformed client/init version {version!r}")

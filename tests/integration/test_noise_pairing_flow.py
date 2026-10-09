@@ -346,8 +346,8 @@ async def test_default_server_warns_once_per_peer_about_unencrypted_client(
     assert len(warnings) == 1
 
 
-async def test_server_closes_silently_on_binary_first_frame() -> None:
-    """A non-TEXT first frame closes the connection without a server/error."""
+async def test_server_answers_binary_first_frame_with_server_error() -> None:
+    """A BINARY first frame gets malformed, then the connection closes."""
     server = _make_server(InMemoryServerPairingStore(), allow_unencrypted=True)
     async with (
         _serve(server) as url,
@@ -355,6 +355,9 @@ async def test_server_closes_silently_on_binary_first_frame() -> None:
         session.ws_connect(url) as ws,
     ):
         await ws.send_bytes(b"\x00")
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type is WSMsgType.TEXT
+        assert ServerErrorMessage.from_json(msg.data).payload.reason is ServerErrorReason.MALFORMED
         msg = await asyncio.wait_for(ws.receive(), timeout=5)
         assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
 
@@ -477,7 +480,7 @@ async def _serve_legacy_peer() -> AsyncIterator[tuple[str, asyncio.Event, list[s
 
 @pytest.mark.parametrize("allow_unencrypted", [True, False])
 async def test_pairing_dial_refuses_legacy_client(allow_unencrypted: bool) -> None:  # noqa: FBT001
-    """A pairing dial answered with a legacy hello closes without a reply."""
+    """A pairing dial answered with a legacy hello gets malformed, then closes."""
     server = _make_server(InMemoryServerPairingStore(), allow_unencrypted=allow_unencrypted)
     try:
         async with _serve_legacy_peer() as (url, closed, frames):
@@ -494,7 +497,11 @@ async def test_pairing_dial_refuses_legacy_client(allow_unencrypted: bool) -> No
                 )
                 await asyncio.wait_for(conn.handle_client(), timeout=5)
             await asyncio.wait_for(closed.wait(), timeout=5)
-            assert frames == []
+            assert frames == [
+                ServerErrorMessage(
+                    payload=ServerErrorPayload(reason=ServerErrorReason.MALFORMED)
+                ).to_json()
+            ]
             assert server.get_client("legacy-client") is None
     finally:
         await server.close()
