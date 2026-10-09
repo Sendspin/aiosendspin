@@ -45,7 +45,7 @@ class SourceV1Role(Role):
         self._group_role = None
         self._decoder: object | None = None
         self._pcm_frame_bytes: int | None = None
-        self._pcm_max_chunk_bytes = 0
+        self._max_chunk_bytes = 0
         self._stream: SourceStream | None = None
         self._stream_active = False
         # The source object of the client/state this activation requires.
@@ -243,10 +243,11 @@ class SourceV1Role(Role):
 
         if source.codec is AudioCodec.PCM:
             self._pcm_frame_bytes = source.bit_depth // 8 * source.channels
-            # The longest chunk allowed is 150 ms of frames.
-            self._pcm_max_chunk_bytes = source.sample_rate * 3 // 20 * self._pcm_frame_bytes
         else:
             self._pcm_frame_bytes = None
+        # The longest chunk allowed is 150 ms of frames, measured on the decoded PCM.
+        decoded_frame_bytes = audio_format.bit_depth // 8 * audio_format.channels
+        self._max_chunk_bytes = source.sample_rate * 3 // 20 * decoded_frame_bytes
         self._stream = SourceStream(audio_format)
         self._stream_active = True
         self._client._signal_event(  # noqa: SLF001
@@ -262,13 +263,10 @@ class SourceV1Role(Role):
             or self._decoder is None
         ):
             return
-        if self._pcm_frame_bytes is not None:
-            if len(data) % self._pcm_frame_bytes:
-                self._client.flag_noncompliance(
-                    "sent a pcm source audio chunk that is not a whole number of frames"
-                )
-            if len(data) > self._pcm_max_chunk_bytes:
-                self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
+        if self._pcm_frame_bytes is not None and len(data) % self._pcm_frame_bytes:
+            self._client.flag_noncompliance(
+                "sent a pcm source audio chunk that is not a whole number of frames"
+            )
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
         except Exception as err:
@@ -286,6 +284,8 @@ class SourceV1Role(Role):
                 self._decode_error_count = 0
                 self._last_decode_error_log_s = now_s
             return
+        if len(pcm) > self._max_chunk_bytes:
+            self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
         # Keep the flush-tail stamp monotonic even if a chunk arrives out of order.
         self._last_timestamp_us = max(self._last_timestamp_us, timestamp_us)
         self._stream._push(pcm, timestamp_us)  # noqa: SLF001

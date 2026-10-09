@@ -418,6 +418,29 @@ def test_chunk_that_fails_to_decode_is_flagged(monkeypatch: pytest.MonkeyPatch) 
     assert client.noncompliance == ["sent a source audio chunk that failed to decode"]
 
 
+class _PassthroughDecoder:
+    def decode(self, data: bytes) -> bytes:
+        return data
+
+    def flush(self) -> bytes:
+        return b""
+
+
+def test_flac_chunk_longer_than_150_ms_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A FLAC chunk decoding to exactly 150 ms is allowed, one frame more is flagged."""
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder",
+        lambda *_a, **_k: _PassthroughDecoder(),
+    )
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC, bit_depth=24))
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7200 * 6))
+    assert client.noncompliance == []
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7201 * 6))
+    assert client.noncompliance == ["sent a source audio chunk longer than 150 ms"]
+
+
 def test_start_request_does_not_survive_disconnect() -> None:
     """Streaming state is per-connection, so a reconnect needs a fresh start."""
     role, client = _make_role()
