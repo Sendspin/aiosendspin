@@ -134,6 +134,23 @@ def test_spectrum_db_mapping_is_linear_near_floor() -> None:
     assert abs(int(binned[0]) - round(0.05 * 65535)) <= 1
 
 
+def test_spectrum_bins_span_requested_range_above_nyquist() -> None:
+    """With f_max above Nyquist, bins keep the requested spacing and the top bins stay empty."""
+    extractor = VisualizerFeatureExtractor(
+        sample_rate=48_000, channels=2, config=_spectrum_config()
+    )
+    freqs = np.fft.rfftfreq(2048, d=1.0 / 48_000).astype(np.float32)
+    magnitude = np.zeros(freqs.size, dtype=np.float32)
+    magnitude[int(np.argmin(np.abs(freqs - 16_000.0)))] = (freqs.size * 2 - 1) / 4.0
+
+    binned = extractor._compute_binned_spectrum(  # noqa: SLF001
+        freqs=freqs, magnitude=magnitude, n_bins=2, f_min=0, f_max=48_000, scale="lin"
+    )
+
+    assert binned[0] > 0
+    assert binned[1] == 0
+
+
 # ---------------------------------------------------------------------------
 # Hop scheduling: rate_max drives multi-frame emission
 # ---------------------------------------------------------------------------

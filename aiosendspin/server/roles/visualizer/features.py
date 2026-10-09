@@ -630,7 +630,7 @@ class VisualizerFeatureExtractor:
             return np.zeros(n_bins, dtype=np.uint16)
 
         lo = max(0, f_min)
-        hi = min(int(self._sample_rate / 2), f_max)
+        hi = f_max
         if hi <= lo:
             return np.zeros(n_bins, dtype=np.uint16)
 
