@@ -994,20 +994,22 @@ def test_ensure_preferred_format_noop_when_no_player_support() -> None:
     assert role._preferred_format == AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
 
 
-def test_ensure_preferred_format_noop_when_no_compatible_formats() -> None:
-    """_ensure_preferred_format() does nothing when all formats are unsupported by server."""
+def test_player_role_reconnect_without_encodable_format_clears_format() -> None:
+    """A reconnect listing no encodable format drops the previous connection's format."""
     client = _make_client_stub()
-    # 999-channel format is not encodable by the server
+    client.info.player_support = _make_player_support(
+        SupportedAudioFormat(codec=AudioCodec.PCM, channels=2, sample_rate=48000, bit_depth=16),
+    )
+    role = PlayerV1Role(client=client)
+    role.on_connect()
+    assert role.get_audio_requirements() is not None
+
     client.info.player_support = _make_player_support(
         SupportedAudioFormat(codec=AudioCodec.FLAC, channels=2, sample_rate=48000, bit_depth=8),
     )
-    role = PlayerV1Role(client=client)
-    role._preferred_format = AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
+    role.on_connect()
 
-    role._ensure_preferred_format()  # noqa: SLF001
-
-    # Unchanged — no compatible formats found; warning logged
-    assert role._preferred_format == AudioFormat(sample_rate=44100, bit_depth=16, channels=2)  # noqa: SLF001
+    assert role.get_audio_requirements() is None
 
 
 def test_preferred_format_override_used_as_fallback_when_no_client_support() -> None:

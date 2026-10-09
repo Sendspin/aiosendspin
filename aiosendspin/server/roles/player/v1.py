@@ -965,6 +965,8 @@ class PlayerV1Role(Role):
                 "Client %s has no server-compatible formats",
                 self._client.client_id,
             )
+            self._preferred_format = None
+            self._preferred_codec = None
             return
 
         # Selection order: the operator override, then the client/state format, then the
