@@ -783,11 +783,17 @@ async def _commit_finalize(
                 existing.with_method(method), psk_id=psk_id_for(psk), psk=psk, owner=owner
             )
         await store.store_record(record)  # persist before acking
-        # The new record supersedes the client's lesser grants.
-        await store.unstage_pairing_psk(client_id)
-        await store.remove_trusted_unpaired(client_id)
-        await ws.send_str(ServerPairFinalizeMessage().to_json())
-        return record
+    # Ack the stored record first, and never time out as PairingTimeoutError past this point:
+    # the cancelling server/activate that follows one leaves the client without the record.
+    try:
+        async with asyncio.timeout(_SERVER_FINALIZE_TIMEOUT_S):
+            await ws.send_str(ServerPairFinalizeMessage().to_json())
+            # The new record supersedes the client's lesser grants.
+            await store.unstage_pairing_psk(client_id)
+            await store.remove_trusted_unpaired(client_id)
+    except TimeoutError as exc:
+        raise PairingError("completing the stored pairing record timed out") from exc
+    return record
 
 
 def _unwrap_psk(
