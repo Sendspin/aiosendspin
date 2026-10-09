@@ -2703,6 +2703,7 @@ class PushStream:
             return
         self._is_stopped = True
         self._stream_generation += 1
+        self._pending_join_roles.clear()
 
         # Reset transformers so any internal encoder state is discarded.
         transformers_by_key: dict[TransformKey, AudioTransformer] = {}
@@ -2723,7 +2724,6 @@ class PushStream:
 
         # Clear role tracking state
         self._started_roles.clear()
-        self._pending_join_roles.clear()
         self._resume_at_us.clear()
         self._cancel_catchup_tasks()
         self._pcm_chunk_cache.clear()

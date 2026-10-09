@@ -663,6 +663,51 @@ async def test_stop_during_inflight_commit_suppresses_audio_delivery(mock_loop: 
 
 
 @pytest.mark.asyncio
+async def test_stop_ends_stream_of_role_rejoining_after_format_change(mock_loop: Any) -> None:
+    """A role deferred to the join path by a mid-commit format change still gets stream/end."""
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    pcm_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), pcm_format)
+    await stream.commit_audio()
+    assert any(isinstance(m, StreamStartMessage) for m in conn.sent_json)
+
+    entered_delivery = asyncio.Event()
+    release_delivery = asyncio.Event()
+    original_deliver = stream._deliver_audio_to_roles  # noqa: SLF001
+
+    async def _gated_deliver(
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        channel_play_start: dict[UUID, int],
+        *,
+        commit_generation: int | None = None,
+    ) -> dict[object, list[CachedChunk]]:
+        entered_delivery.set()
+        await release_delivery.wait()
+        return await original_deliver(
+            prepared,
+            channel_play_start,
+            commit_generation=commit_generation,
+        )
+
+    stream._deliver_audio_to_roles = _gated_deliver  # type: ignore[method-assign]  # noqa: SLF001
+
+    stream.prepare_audio(bytes(4800), pcm_format)
+    commit_task = asyncio.create_task(stream.commit_audio())
+    await asyncio.wait_for(entered_delivery.wait(), timeout=1.0)
+
+    role = client.role("player@v1")
+    assert role is not None
+    stream.on_role_format_changed(role, resume_at_us=0)
+    stream.stop()
+    release_delivery.set()
+    await commit_task
+
+    assert any(isinstance(m, StreamEndMessage) for m in conn.sent_json)
+
+
+@pytest.mark.asyncio
 async def test_role_leave_during_inflight_commit_suppresses_stale_audio(mock_loop: Any) -> None:
     """A role ended/removed during commit must not receive stale audio."""
     group = _DummyGroup(clients=[])
