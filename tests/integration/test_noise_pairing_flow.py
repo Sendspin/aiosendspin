@@ -2351,6 +2351,48 @@ async def test_strict_server_rejects_a_pairing_frame_before_any_pairing_activate
             await client.disconnect()
 
 
+_send_client_hello = SdkConnection._send_client_hello  # noqa: SLF001
+
+
+async def _send_hello_then_state(self: SdkConnection) -> None:
+    """Send client/hello and, without awaiting server/activate, a client/state."""
+    await _send_client_hello(self)
+    assert self._ws is not None
+    await self._ws.send_str(
+        ClientStateMessage(payload=ClientStatePayload(available=True)).to_json()
+    )
+
+
+async def test_strict_server_rejects_a_message_before_the_connect_time_pairing_activate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A client/state sent before connect-time pairing's first activate closes the connection."""
+    client_identity = Identity.generate()
+    server_store, client_store = await _staged_pairing_psk_stores(client_identity)
+    server = _make_server(server_store, allow_noncompliant_clients=False)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            with (
+                patch.object(SdkConnection, "_send_client_hello", _send_hello_then_state),
+                suppress(RuntimeError),
+            ):
+                await client.connect(url)
+            await _wait_until(lambda: not client.connected)
+        finally:
+            await client.disconnect()
+    assert (
+        "rejecting non-compliant client c: sent a message before the first server/activate"
+        in caplog.messages
+    )
+
+
 async def test_strict_server_rejects_a_pairing_frame_before_the_attempts_activate() -> None:
     """A pairing frame reaching a starting attempt before its activate closes the connection."""
     server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
