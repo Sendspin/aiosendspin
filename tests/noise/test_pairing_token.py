@@ -72,6 +72,7 @@ def test_decode_leniency(value: str) -> None:
         ("SP:2" + REFERENCE_TOKEN[4:], "unsupported"),
         ("SP:0NOT!VALID", "malformed"),
         ("SP:0" + REFERENCE_TOKEN[4:40], "malformed"),  # truncated payload
+        ("\N{LATIN SMALL LETTER LONG S}P:0" + REFERENCE_TOKEN[4:], "malformed"),
     ],
 )
 def test_decode_rejects_malformed(value: str, match: str) -> None:
