@@ -405,6 +405,19 @@ def test_next_stream_reports_its_first_decode_failure(
     assert [(r.args[0], bool(r.exc_info)) for r in caplog.records] == [(1, True)]
 
 
+def test_chunk_that_fails_to_decode_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chunk the decoder rejects, such as a FLAC frame split across chunks, is flagged."""
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _FailingDecoder()
+    )
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC))
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00")
+
+    assert client.noncompliance == ["sent a source audio chunk that failed to decode"]
+
+
 def test_start_request_does_not_survive_disconnect() -> None:
     """Streaming state is per-connection, so a reconnect needs a fresh start."""
     role, client = _make_role()

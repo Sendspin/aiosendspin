@@ -272,6 +272,7 @@ class SourceV1Role(Role):
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
         except Exception as err:
+            self._client.flag_noncompliance("sent a source audio chunk that failed to decode")
             self._decode_error_count += 1
             now_s = time.monotonic()
             last_log_s = self._last_decode_error_log_s
