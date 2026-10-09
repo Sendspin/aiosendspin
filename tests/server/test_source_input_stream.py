@@ -25,6 +25,7 @@ from tests.server.test_role_activation import _PLAYER_STATE, _client, _connect, 
 
 if TYPE_CHECKING:
     from aiosendspin.server.connection import SendspinConnection
+    from tests.server.test_role_activation import _FakeTransport
 
 _ROLES = [Roles.PLAYER.value, "source@v1"]
 _PCM_START = ClientStreamStartMessage(
@@ -53,8 +54,9 @@ def _state(*, available: bool = True) -> ClientStatePayload:
 class _Source:
     """A connected player+source client and the source events it emits."""
 
-    def __init__(self, conn: SendspinConnection) -> None:
+    def __init__(self, conn: SendspinConnection, transport: _FakeTransport) -> None:
         self.conn = conn
+        self.transport = transport
         self.client = _client(conn)
         self.events: list[Any] = []
         self.client.add_event_listener(lambda _client, event: self.events.append(event))
@@ -75,6 +77,13 @@ class _Source:
     def strict(self) -> None:
         self.conn._server.allow_noncompliant_clients = False  # type: ignore[misc]  # noqa: SLF001
 
+    async def send_start(self) -> None:
+        self.role.request_start()
+        ready_entry = self.conn._peek_ready_entry()  # noqa: SLF001
+        assert ready_entry is not None
+        await self.conn._send_role_entry(self.transport, ready_entry, 0)  # type: ignore[arg-type]  # noqa: SLF001
+        assert self.transport.sent_payloads()[-1]["payload"] == {"source": {"command": "start"}}
+
     async def stream_start(self, message: ClientStreamStartMessage = _PCM_START) -> None:
         await self.conn._handle_message(message, timestamp_us=0)  # noqa: SLF001
 
@@ -94,8 +103,8 @@ class _Source:
 
 
 async def _source() -> _Source:
-    conn, _fake = await _connect(_hello(_ROLES), send_state=False, category=PskCategory.LONG_TERM)
-    source = _Source(conn)
+    conn, fake = await _connect(_hello(_ROLES), send_state=False, category=PskCategory.LONG_TERM)
+    source = _Source(conn, fake)
     await source.state()
     return source
 
@@ -139,7 +148,7 @@ async def test_start_crossing_an_availability_round_trip_opens_the_stream() -> N
 async def test_start_crossing_role_removal_is_tolerated_until_its_end() -> None:
     """After removing the role, its outstanding start's stream is dropped until it ends."""
     source = await _source()
-    source.role.request_start()
+    await source.send_start()
     await source.activate([Roles.PLAYER.value])
     source.strict()
 
@@ -150,6 +159,32 @@ async def test_start_crossing_role_removal_is_tolerated_until_its_end() -> None:
 
     with pytest.raises(ClientComplianceError):
         source.chunk()
+
+
+@pytest.mark.asyncio
+async def test_unsent_start_dropped_by_role_removal_authorizes_nothing() -> None:
+    """A start still queued when the role is removed never reaches the client."""
+    source = await _source()
+    source.role.request_start()
+    await source.activate([Roles.PLAYER.value])
+    source.strict()
+
+    with pytest.raises(ClientComplianceError):
+        await source.stream_start()
+
+
+@pytest.mark.asyncio
+async def test_answered_start_dropped_by_role_removal_is_not_spent_twice() -> None:
+    """A queued start answered early and then dropped leaves no authorization behind."""
+    source = await _source()
+    source.role.request_start()
+    await source.stream_start()
+    await source.stream_end()
+    await source.activate([Roles.PLAYER.value])
+    source.strict()
+
+    with pytest.raises(ClientComplianceError):
+        await source.stream_start()
 
 
 @pytest.mark.asyncio
@@ -167,7 +202,7 @@ async def test_start_without_authorization_after_role_removal_is_rejected() -> N
 async def test_invalid_start_after_role_removal_is_rejected() -> None:
     """Role removal tolerates only otherwise valid in-flight starts."""
     source = await _source()
-    source.role.request_start()
+    await source.send_start()
     await source.activate([Roles.PLAYER.value])
     source.strict()
 
@@ -192,7 +227,7 @@ async def test_invalid_replacing_start_is_rejected_before_the_stream_ends() -> N
 async def test_reactivated_role_ignores_the_previous_roles_stream() -> None:
     """A stream left open by the removed role neither reaches nor ends the new role's stream."""
     source = await _source()
-    source.role.request_start()
+    await source.send_start()
     await source.stream_start()
     await source.activate([Roles.PLAYER.value])
     assert source.stream_events() == [SourceStreamStartedEvent, SourceStreamEndedEvent]
@@ -219,7 +254,7 @@ async def test_reactivated_role_ignores_the_previous_roles_stream() -> None:
 async def test_reactivated_role_discards_the_previous_roles_outstanding_start() -> None:
     """The removed role's start opens only a discard stream in the reactivated role."""
     source = await _source()
-    source.role.request_start()
+    await source.send_start()
     await source.activate([Roles.PLAYER.value])
     await source.activate(_ROLES)
 
