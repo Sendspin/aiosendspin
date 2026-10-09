@@ -989,21 +989,6 @@ class SendspinConnection:
                 supported_roles, family=family, skip=missing_support_roles
             )
             if selected_role is None:
-                # Restrict the fallback to spec-custom versions (those starting
-                # with `_`). Unknown spec-versioned IDs like `v2` may carry a
-                # schema-incompatible support payload, so parsing against the
-                # family's registered schema would crash on field drift.
-                selected_role = next(
-                    (
-                        r
-                        for r in supported_roles
-                        if role_family(r) == family
-                        and r.partition("@")[2].startswith("_")
-                        and r not in missing_support_roles
-                    ),
-                    None,
-                )
-            if selected_role is None:
                 # Skip support parsing for unknown roles.
                 continue
             primary_role_id = cls._primary_role_id_for_family(family)
