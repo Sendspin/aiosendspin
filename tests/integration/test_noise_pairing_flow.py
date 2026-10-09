@@ -64,6 +64,7 @@ from aiosendspin.noise.models import (
 )
 from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
+    LocalPairingAbortError,
     PairingAbortError,
     PairingAttempt,
     PairingError,
@@ -907,6 +908,74 @@ async def test_live_pairing_method_enabled_after_hello_still_pairs() -> None:
             await client.disconnect()
 
 
+async def test_strict_server_refuses_a_method_enabled_after_hello() -> None:
+    """A strict server picks only methods the client/hello advertised."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(
+                pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+            ),
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await client_store.store_pairing_config(
+                replace(config, dynamic_pairing_code_enabled=True)
+            )
+            with pytest.raises(LocalPairingAbortError, match="method_not_supported"):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=lambda: asyncio.sleep(0),
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    )
+                )
+        finally:
+            await client.disconnect()
+
+
+async def test_strict_pairing_dial_never_activates_an_unadvertised_method() -> None:
+    """A strict server never activates an unadvertised method on a pairing dial."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    config = await client_store.get_pairing_config()
+    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
+    sdk = make_sdk_client(
+        identity=identity,
+        pairing_store=client_store,
+        client_name="c",
+        roles=[Roles.CONTROLLER],
+        pairing_support=PairingSupport(
+            pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+        ),
+    )
+    client_aborts: list[PairAbortReason] = []
+    sdk.add_pairing_abort_listener(client_aborts.append)
+    attempt = PairingAttempt(
+        method=PairMethod.DYNAMIC_PAIRING_CODE,
+        pairing_code_provider=lambda: asyncio.sleep(0),
+        pairing_format=PairingCodeFormat.DIGITS,
+    )
+    try:
+        async with _host_incoming_client(sdk) as url, _dial(server, url, pairing_attempt=attempt):
+            await _await_connected_client(server, identity.peer_id)
+        assert client_aborts == []
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
 async def test_live_pairing_qr_code() -> None:
     """Operator pairs by scanning the client-rendered token; digits channels stay silent."""
     server_store = InMemoryServerPairingStore()
@@ -1047,7 +1116,7 @@ async def test_live_pairing_unusable_advertised_formats() -> None:
             assert descriptor is not None
             descriptor.formats = ["holographic"]
 
-            with pytest.raises(PairingError, match="does not offer the digits"):
+            with pytest.raises(LocalPairingAbortError, match="method_not_supported"):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.DYNAMIC_PAIRING_CODE,
@@ -1088,7 +1157,7 @@ async def test_live_pairing_dropped_unusable_descriptor_is_refused() -> None:
             methods.dynamic_pairing_code = None
             methods.unusable_methods = [PairMethod.DYNAMIC_PAIRING_CODE.value]
 
-            with pytest.raises(PairingError, match="no usable dynamic_pairing_code"):
+            with pytest.raises(LocalPairingAbortError, match="method_not_supported"):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.DYNAMIC_PAIRING_CODE,
@@ -1120,7 +1189,7 @@ async def test_live_pairing_unoffered_format_fails_before_activation() -> None:
         try:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            with pytest.raises(PairingError, match="does not offer the qr_code"):
+            with pytest.raises(LocalPairingAbortError, match="method_not_supported"):
                 await conn.initiate_pairing(
                     PairingAttempt(
                         method=PairMethod.DYNAMIC_PAIRING_CODE,
