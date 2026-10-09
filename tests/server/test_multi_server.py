@@ -2184,7 +2184,8 @@ class TestCustomRoleSupportParsing:
         """Roles/versions the server does not implement are tracked, excluding `_` custom ones."""
         assert SendspinConnection._unimplemented_roles(supported_roles) == expected  # noqa: SLF001
 
-    def test_hello_with_brand_new_family_does_not_crash(self) -> None:
+    @pytest.mark.parametrize("role_id", ["crystalball@v1", "_crystalball@v1"])
+    def test_hello_with_brand_new_family_does_not_crash(self, role_id: str) -> None:
         """A family the server has never heard of is silently ignored end-to-end.
 
         Guards against future role additions on the client side that the server
@@ -2197,8 +2198,8 @@ class TestCustomRoleSupportParsing:
                     "client_id": "c1",
                     "name": "Client",
                     "version": 1,
-                    "supported_roles": ["crystalball@v1"],
-                    "crystalball@v1_support": {"forecast": "cloudy"},
+                    "supported_roles": [role_id],
+                    f"{role_id}_support": {"forecast": "cloudy"},
                 },
             }
         ).decode()
