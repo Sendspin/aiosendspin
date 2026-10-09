@@ -151,7 +151,7 @@ class VisualizerV1Role(Role):
         # the current stream. Gates `beat` in the negotiated types.
         self._has_beats_landed: bool = False
         # Server-side capability metadata for downbeat tracking, set via
-        # `set_tracks_downbeats()` before `stream/start` is sent.
+        # `set_tracks_downbeats()`.
         self._tracks_downbeats: bool = False
         # Last-emitted timestamp across all visualizer binaries. The spec
         # requires non-decreasing timestamp order within the role; beats
@@ -235,6 +235,12 @@ class VisualizerV1Role(Role):
     def set_tracks_downbeats(self, *, tracks: bool) -> None:
         """Mark whether the upstream beat detector identifies bar starts."""
         self._tracks_downbeats = bool(tracks)
+        if (
+            self._stream_started
+            and self._request is not None
+            and self._build_stream_config() != self._stream_config
+        ):
+            self._reissue_stream_start()
 
     def set_beat_availability(self, availability: BeatAvailability) -> None:
         """Declare whether beats will arrive for the current source.
@@ -246,7 +252,6 @@ class VisualizerV1Role(Role):
         """
         if self._beat_availability is availability:
             return
-        previous_beat_in_types = self._beat_in_negotiated_types()
         self._beat_availability = availability
         if availability is BeatAvailability.UNAVAILABLE:
             self._pending_beats.clear()
@@ -265,7 +270,7 @@ class VisualizerV1Role(Role):
             or not self._stream_started
         ):
             return
-        if previous_beat_in_types != self._beat_in_negotiated_types():
+        if self._build_stream_config() != self._stream_config:
             self._reissue_stream_start()
 
     def _ensure_buffer_tracker(self) -> None:
@@ -384,6 +389,7 @@ class VisualizerV1Role(Role):
             sample_rate=req.sample_rate,
             channels=req.channels,
             config=self._stream_config,
+            last_emit_ts_us=None if self._extractor is None else self._extractor.last_emit_ts_us,
         )
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
@@ -947,12 +953,15 @@ class VisualizerV1Role(Role):
         render a `peak`-based fallback without flicker.
 
         Exception: beat-only clients (`types == ["beat"]`) get `beat`
-        from the start — there is no FFT-driven type to fall back to.
+        from the start unless beats are UNAVAILABLE, as there is no
+        FFT-driven type to fall back to.
         """
         if self._request is None:
             raise ValueError("request must be known before building stream config")
         client_types = list(self._request.types)
-        beat_only = client_types == ["beat"]
+        beat_only = (
+            client_types == ["beat"] and self._beat_availability is not BeatAvailability.UNAVAILABLE
+        )
         if beat_only or self._beat_in_negotiated_types():
             exposed_types = client_types
         else:

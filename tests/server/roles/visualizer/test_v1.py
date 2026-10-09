@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import struct
 from unittest.mock import MagicMock
@@ -557,6 +558,22 @@ def test_downbeat_flag_set_when_tracking_downbeats() -> None:
     assert calls[0].args[0][-1] & FLAG_DOWNBEAT == FLAG_DOWNBEAT
 
 
+def test_tracks_downbeats_change_mid_stream_resends_stream_start() -> None:
+    """A downbeat bit set mid-stream follows a stream/start announcing `tracks_downbeats`."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000, is_downbeat=True)])
+    assert _last_stream_start(client).payload.visualizer.tracks_downbeats is False
+
+    role.set_tracks_downbeats(tracks=True)
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    assert _last_stream_start(client).payload.visualizer.tracks_downbeats is True
+    assert _beat_calls(client)[0].args[0][-1] & FLAG_DOWNBEAT == FLAG_DOWNBEAT
+
+
 def test_beats_interleave_with_periodic_frames_in_ts_order() -> None:
     """All wire timestamps stay non-decreasing across periodic + beat frames."""
     client = _make_beat_client_stub()
@@ -855,6 +872,18 @@ def test_beat_only_stream_initial_includes_beat() -> None:
 
     initial = _last_stream_start(client).payload.visualizer
     assert list(initial.types) == ["beat"]
+
+
+def test_beat_only_stream_drops_beat_when_unavailable() -> None:
+    """Declaring beats unavailable re-sends a beat-only stream/start without `beat`."""
+    role, client = _beat_only_role()
+    _connect(role)
+    role.on_stream_start()
+
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+
+    assert _stream_start_count(client) == 2
+    assert list(_last_stream_start(client).payload.visualizer.types) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1242,6 +1271,31 @@ def test_changed_state_without_stream_applies_to_next_stream() -> None:
     config = _last_stream_start(client).payload.visualizer
     assert config.types == ("loudness",)
     assert config.rate_max == 15
+
+
+def test_periodic_frames_stay_within_rate_max_across_config_change() -> None:
+    """Rebuilding the extractor mid-stream keeps periodic frames at least 1/rate_max apart."""
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["loudness"], "rate_max": 32}
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    for timestamp_us in range(1_000_000, 1_400_000, 25_000):
+        role.on_audio_chunk(_audio_chunk(timestamp_us))
+    # The rebuilt extractor's first chunk ends less than one hop after the last frame.
+    assert 1_425_000 - client.send_binary.call_args_list[-1].kwargs["timestamp_us"] < 31_250
+    role.on_client_state(_state(types=["loudness", "f_peak"], rate_max=32))
+    for timestamp_us in range(1_400_000, 2_000_000, 25_000):
+        role.on_audio_chunk(_audio_chunk(timestamp_us))
+
+    loudness_ts = [
+        call.kwargs["timestamp_us"]
+        for call in client.send_binary.call_args_list
+        if call.kwargs["message_type"] == BinaryMessageType.VISUALIZATION_LOUDNESS.value
+    ]
+    assert len(loudness_ts) > 20
+    gaps = [b - a for a, b in itertools.pairwise(loudness_ts)]
+    assert min(gaps) * 32 >= 1_000_000, gaps
 
 
 def test_state_change_not_affecting_config_sends_no_stream_start() -> None:

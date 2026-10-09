@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import struct
 
@@ -117,6 +118,40 @@ def test_peak_frequency_uses_compensated_magnitude() -> None:
     assert abs(frame.f_peak_freq - 2_000) < 400
 
 
+def test_spectrum_db_mapping_is_linear_near_floor() -> None:
+    """A bin at -57 dB encodes at 5% of full scale."""
+    extractor = VisualizerFeatureExtractor(
+        sample_rate=48_000, channels=2, config=_spectrum_config()
+    )
+    freqs = np.fft.rfftfreq(2048, d=1.0 / 48_000).astype(np.float32)
+    magnitude = np.zeros(freqs.size, dtype=np.float32)
+    ref = (freqs.size * 2 - 1) / 4.0
+    magnitude[100] = ref * 10.0 ** (-57.0 / 20.0)
+
+    binned = extractor._compute_binned_spectrum(  # noqa: SLF001
+        freqs=freqs, magnitude=magnitude, n_bins=1, f_min=0, f_max=24_000, scale="lin"
+    )
+
+    assert abs(int(binned[0]) - round(0.05 * 65535)) <= 1
+
+
+def test_spectrum_bins_span_requested_range_above_nyquist() -> None:
+    """With f_max above Nyquist, bins keep the requested spacing and the top bins stay empty."""
+    extractor = VisualizerFeatureExtractor(
+        sample_rate=48_000, channels=2, config=_spectrum_config()
+    )
+    freqs = np.fft.rfftfreq(2048, d=1.0 / 48_000).astype(np.float32)
+    magnitude = np.zeros(freqs.size, dtype=np.float32)
+    magnitude[int(np.argmin(np.abs(freqs - 16_000.0)))] = (freqs.size * 2 - 1) / 4.0
+
+    binned = extractor._compute_binned_spectrum(  # noqa: SLF001
+        freqs=freqs, magnitude=magnitude, n_bins=2, f_min=0, f_max=48_000, scale="lin"
+    )
+
+    assert binned[0] > 0
+    assert binned[1] == 0
+
+
 # ---------------------------------------------------------------------------
 # Hop scheduling: rate_max drives multi-frame emission
 # ---------------------------------------------------------------------------
@@ -166,6 +201,17 @@ def test_hop_matches_rate_max_30_over_one_second() -> None:
     assert 28 <= len(frames) <= 32
 
 
+def test_hop_never_exceeds_rate_max() -> None:
+    """Consecutive frames are at least 1/rate_max apart when the hop does not divide 1 s."""
+    config = _spectrum_config(rate_max=30)
+    extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
+
+    frames = _feed_steady_chunks(extractor, sample_rate=48_000, channels=2, hz=1000.0, chunks=40)
+
+    gaps = [b.timestamp_us - a.timestamp_us for a, b in itertools.pairwise(frames)]
+    assert min(gaps) * 30 >= 1_000_000, gaps
+
+
 def test_one_frame_per_chunk_with_rate_max_equal_chunk_rate() -> None:
     """At rate_max=40 (chunk cadence) every chunk yields exactly one frame."""
     config = _spectrum_config(rate_max=40)
@@ -197,6 +243,21 @@ def test_reset_clears_emit_cursor_and_buffer() -> None:
     pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
     frames = extractor.process_chunk(pcm, 9_000_000)
     assert frames[0].timestamp_us == 9_025_000
+
+
+def test_reset_lets_frames_restart_at_earlier_timestamps() -> None:
+    """After reset() the first frame anchors at the new chunk end, even before earlier frames."""
+    config = _spectrum_config(rate_max=30)
+    extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
+
+    _feed_steady_chunks(
+        extractor, sample_rate=48_000, channels=2, hz=1000.0, chunks=5, start_ts_us=9_000_000
+    )
+    extractor.reset()
+
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    frames = extractor.process_chunk(pcm, 1_000_000)
+    assert frames[0].timestamp_us == 1_025_000
 
 
 # ---------------------------------------------------------------------------
