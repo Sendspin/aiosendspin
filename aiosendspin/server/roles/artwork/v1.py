@@ -363,9 +363,9 @@ class ArtworkV1Role(Role):
         streamed = [
             i for i, config in enumerate(configs) if config.source is not ArtworkSource.NONE
         ]
-        # With no channel streamed, keep one entry: the stream stays active so a later
-        # client/state can enable a channel, which it could not do after a stream/end.
-        stream_channels = configs[: streamed[-1] + 1] if streamed else configs[:1]
+        # With no channel streamed, the stream stays active so a later client/state can
+        # enable a channel, which it could not do after a stream/end.
+        stream_channels = configs[: streamed[-1] + 1] if streamed else []
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
         if self._client.info.artwork_support is not None:
             # A hello-wire client requires every declared channel, with format and size.

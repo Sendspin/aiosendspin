@@ -261,8 +261,8 @@ async def test_artwork_encoded_for_old_configuration_is_discarded(
         ([_ALBUM], [_ALBUM_WIRE]),
         ([_ALBUM, _NONE, _ARTIST, _NONE], [_ALBUM_WIRE, _NONE_WIRE, _ARTIST_WIRE]),
         ([_NONE, _ARTIST], [_NONE_WIRE, _ARTIST_WIRE]),
-        ([_NONE], [_NONE_WIRE]),
-        ([_NONE, _NONE, _NONE, _NONE], [_NONE_WIRE]),
+        ([_NONE], []),
+        ([_NONE, _NONE, _NONE, _NONE], []),
     ],
 )
 def test_artwork_state_starts_truncated_stream(
@@ -379,7 +379,7 @@ def test_artwork_all_none_state_keeps_stream_active(monkeypatch: pytest.MonkeyPa
     assert events == [
         ("drop", ["artwork"]),
         ("exempt", ("announce", 0, _NOW_US, 0)),
-        ("start", [_NONE_WIRE]),
+        ("start", []),
         ("drop", ["artwork"]),
         ("start", [_ALBUM_WIRE]),
         ("image", 0),
