@@ -183,6 +183,7 @@ async def test_removed_roles_are_torn_down_before_server_activate() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     # Anything still queued for a removed role must not follow the activation.
     conn.send_role_message("player", _volume_command())
 
@@ -203,6 +204,7 @@ async def test_long_term_pairing_ends_streams_before_rehandshake() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     transport = _FakePairingTransport()
     # The attempt's queued view shares the base transport's socket and Noise session.
     transport._ws = transport  # noqa: SLF001
@@ -242,6 +244,7 @@ async def test_removed_roles_send_legacy_null_state_before_server_activate() -> 
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
 
     await _set_trusted(conn, trusted=False)
 
@@ -257,6 +260,7 @@ async def test_activate_tears_down_removed_roles_first() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     conn._trusted_unpaired = False  # noqa: SLF001
 
     await conn._activate()  # noqa: SLF001
@@ -289,6 +293,7 @@ async def test_removed_artwork_role_cancels_its_transfer_before_stream_end() -> 
     artwork = _client(conn).roles_by_family("artwork")[0]
     assert isinstance(artwork, ArtworkV1Role)
     artwork._in_flight = 0  # noqa: SLF001
+    conn._streaming_roles.add("artwork")  # noqa: SLF001
     recorder = _RecordingTransport()
     conn._transport = recorder  # type: ignore[assignment]  # noqa: SLF001
 
@@ -867,11 +872,26 @@ async def test_unsent_stream_end_still_precedes_server_activate() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     player.on_stream_end()
 
     await _set_trusted(conn, trusted=False)
 
     assert await _drain_priority(conn, fake) == ["stream/end", "server/activate"]
+
+
+@pytest.mark.asyncio
+async def test_removed_role_sends_no_stream_end_for_an_unsent_stream_start() -> None:
+    """A removed role whose stream/start never left the queue gets no stream/end."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value]))
+    player = _client(conn).role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._send_stream_start_message()  # noqa: SLF001
+    assert player.stream_started
+
+    await _set_trusted(conn, trusted=False)
+
+    assert await _drain_priority(conn, fake) == ["server/activate"]
 
 
 @pytest.mark.asyncio

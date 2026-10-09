@@ -49,6 +49,7 @@ from mashumaro.exceptions import SuitableVariantNotFoundError
 from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw, unpack_binary_header
 from aiosendspin.models.base import parse_noting_wire_deviations
 from aiosendspin.models.core import (
+    STREAM_END_ROLE_FAMILIES,
     ActivatePairing,
     ClientCommandMessage,
     ClientGoodbyeMessage,
@@ -465,6 +466,8 @@ class SendspinConnection:
         # Role families being removed by the activation in progress; their teardown
         # goes out ahead of that server/activate.
         self._retiring_roles: set[str] = set()
+        # Role families whose stream/start was sent with no stream/end since.
+        self._streaming_roles: set[str] = set()
 
         self._last_goodbye_reason: GoodbyeReason | None = None
         self._warned_unknown_types: set[str] = set()
@@ -806,10 +809,15 @@ class SendspinConnection:
 
         Exception: StreamEnd and StreamStart use current time instead of inheriting,
         ensuring they are ordered correctly across stream boundaries. A StreamStart
-        never sorts ahead of the role's already queued messages.
+        never sorts ahead of the role's already queued messages. A StreamEnd drops the
+        role's unsent StreamStart and StreamClear, and is skipped when the client has
+        no active stream for the role or one is already queued.
         """
         if isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
+
+        if isinstance(message, StreamEndMessage) and not self._supersede_queued_stream(role):
+            return
 
         if role in self._retiring_roles:
             # A removed role's teardown reaches the wire before the server/activate.
@@ -843,6 +851,26 @@ class SendspinConnection:
 
         if not isinstance(message, ServerTimeMessage):
             self._logger.debug("Enqueueing role message: %s", type(message).__name__)
+
+    def _supersede_queued_stream(self, role: str) -> bool:
+        """Drop queued stream/start and stream/clear, and return whether a stream/end is owed."""
+        if role_queue := self._role_queues.get(role):
+            kept = [
+                item
+                for item in role_queue
+                if not isinstance(item[2].json_message, StreamStartMessage | StreamClearMessage)
+            ]
+            self._queue_size = max(self._queue_size - (len(role_queue) - len(kept)), 0)
+            if kept:
+                heapq.heapify(kept)
+                self._role_queues[role] = kept
+            else:
+                del self._role_queues[role]
+                if drained := self._role_drained.pop(role, None):
+                    drained.set()
+            if any(isinstance(item[2].json_message, StreamEndMessage) for item in kept):
+                return False
+        return role in self._streaming_roles
 
     def send_message(self, message: ServerMessage) -> None:
         """Enqueue a non-role JSON message (sent in FIFO order, not tied to any role)."""
@@ -3105,6 +3133,17 @@ class SendspinConnection:
             and message.payload.source.command == "start"
         ):
             self.record_source_start()
+        if isinstance(message, StreamStartMessage):
+            payload = message.payload
+            self._streaming_roles.update(
+                {name for name in STREAM_END_ROLE_FAMILIES if getattr(payload, name) is not None},
+                payload.application_objects,
+            )
+        elif isinstance(message, StreamEndMessage):
+            if message.payload.roles is None:
+                self._streaming_roles.clear()
+            else:
+                self._streaming_roles.difference_update(message.payload.roles)
         await wsock.send_str(message.to_json())
 
     async def _send_binary_data(
