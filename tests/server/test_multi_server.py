@@ -11,7 +11,6 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 import orjson
 import pytest
 from aiohttp import WSMessage, WSMsgType, web
-from mashumaro.exceptions import MissingField
 
 from aiosendspin.models.core import (
     ClientHelloMessage,
@@ -363,6 +362,30 @@ class TestEncryptedActivities:
 
         assert await conn._exchange_hellos() is True  # noqa: SLF001
         assert "player@v1" in conn._negotiated_roles  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_strict_server_ignores_unregistered_custom_version_without_support(
+        self,
+    ) -> None:
+        """A strict server admits a hello whose only player version it does not implement."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        hello = orjson.dumps(
+            {
+                "type": "client/hello",
+                "payload": {
+                    "name": "client-1",
+                    "supported_roles": ["player@_experimental", "controller@v1"],
+                    **_PAIRING_HELLO_FIELDS,
+                },
+            }
+        ).decode()
+        conn = self._long_term_connection(strict_server, hello)
+
+        assert await conn._exchange_hellos() is True  # noqa: SLF001
+        assert conn._negotiated_roles == ["controller@v1"]  # noqa: SLF001
 
     # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
     @pytest.mark.asyncio
@@ -1516,12 +1539,14 @@ class TestCustomRoleSupportParsing:
     )
     def test_deserialize_client_hello_maps_custom_support(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         role_id: str,
         support_key: str,
         expected_attr: str,
         support_payload: dict[str, object],
     ) -> None:
-        """Custom role support keys are mapped into existing support fields."""
+        """Registered custom role support keys are mapped into existing support fields."""
+        monkeypatch.setitem(ROLE_FACTORIES, role_id, lambda _client: None)  # type: ignore[arg-type]
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -1548,9 +1573,10 @@ class TestCustomRoleSupportParsing:
         ],
     )
     def test_deserialize_client_hello_records_missing_custom_support_key(
-        self, role_id: str, missing_support_key: str
+        self, monkeypatch: pytest.MonkeyPatch, role_id: str, missing_support_key: str
     ) -> None:
-        """A custom role ID without its matching support key is recorded as missing it."""
+        """A registered custom role ID without its support key is recorded as missing it."""
+        monkeypatch.setitem(ROLE_FACTORIES, role_id, lambda _client: None)  # type: ignore[arg-type]
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -1753,8 +1779,12 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert msg.payload.unlisted_support_roles is None
 
-    def test_legacy_visualizer_support_key_is_not_normalized_to_v1(self) -> None:
+    def test_legacy_visualizer_support_key_is_not_normalized_to_v1(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Legacy visualizer_support must not be rewritten to visualizer@v1_support."""
+        monkeypatch.setitem(ROLE_FACTORIES, "visualizer@_custom_r1", lambda _client: None)  # type: ignore[arg-type]
+
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -1903,8 +1933,13 @@ class TestCustomRoleSupportParsing:
         assert msg.payload.player_support is not None
         assert negotiate_roles(msg.payload.activatable_roles) == ["player@_b"]
 
-    def test_unregistered_custom_versions_without_support_are_each_recorded_once(self) -> None:
+    def test_registered_custom_versions_without_support_are_each_recorded_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Every listed custom version lacking support is recorded once, then selection stops."""
+        monkeypatch.setitem(ROLE_FACTORIES, "player@_x", lambda _client: None)  # type: ignore[arg-type]
+        monkeypatch.setitem(ROLE_FACTORIES, "player@_y", lambda _client: None)  # type: ignore[arg-type]
+
         raw = orjson.dumps(
             {
                 "type": "client/hello",
@@ -2149,7 +2184,8 @@ class TestCustomRoleSupportParsing:
         """Roles/versions the server does not implement are tracked, excluding `_` custom ones."""
         assert SendspinConnection._unimplemented_roles(supported_roles) == expected  # noqa: SLF001
 
-    def test_hello_with_brand_new_family_does_not_crash(self) -> None:
+    @pytest.mark.parametrize("role_id", ["crystalball@v1", "_crystalball@v1"])
+    def test_hello_with_brand_new_family_does_not_crash(self, role_id: str) -> None:
         """A family the server has never heard of is silently ignored end-to-end.
 
         Guards against future role additions on the client side that the server
@@ -2162,8 +2198,8 @@ class TestCustomRoleSupportParsing:
                     "client_id": "c1",
                     "name": "Client",
                     "version": 1,
-                    "supported_roles": ["crystalball@v1"],
-                    "crystalball@v1_support": {"forecast": "cloudy"},
+                    "supported_roles": [role_id],
+                    f"{role_id}_support": {"forecast": "cloudy"},
                 },
             }
         ).decode()
@@ -2172,66 +2208,36 @@ class TestCustomRoleSupportParsing:
         assert isinstance(msg, ClientHelloMessage)
         assert negotiate_roles(msg.payload.supported_roles) == []
 
-    def test_custom_underscore_player_version_with_v1_compatible_support_parses(self) -> None:
-        """`player@_experimental` (no registered factory) parses against v1 schema.
-
-        PairingCodes the implicit contract: an underscore-prefixed custom version of a
-        spec family keeps its support payload v1-compatible since the family's
-        registered schema is what the deserializer uses. The custom role
-        implementer owns both ends, so this trade-off is intentional.
-        """
+    @pytest.mark.parametrize(
+        "support",
+        [
+            {
+                "supported_formats": [
+                    {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+                ],
+                "buffer_capacity": 100_000,
+            },
+            {"only": "garbage"},
+        ],
+    )
+    def test_unregistered_custom_version_support_is_ignored(
+        self, support: dict[str, object]
+    ) -> None:
+        """An unregistered custom version's support object is not parsed as the family's."""
         raw = orjson.dumps(
             {
                 "type": "client/hello",
                 "payload": {
-                    "client_id": "c1",
                     "name": "Client",
-                    "version": 1,
                     "supported_roles": ["player@_experimental"],
-                    "player@_experimental_support": {
-                        "supported_formats": [
-                            {
-                                "codec": "pcm",
-                                "channels": 2,
-                                "sample_rate": 48000,
-                                "bit_depth": 16,
-                            },
-                        ],
-                        "buffer_capacity": 100_000,
-                        "supported_commands": [],
-                    },
+                    "player@_experimental_support": support,
                 },
             }
         ).decode()
 
         msg = SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
         assert isinstance(msg, ClientHelloMessage)
-        assert msg.payload.player_support is not None
-        assert msg.payload.player_support.buffer_capacity == 100_000
-
-    def test_custom_underscore_player_version_with_incompatible_support_raises(self) -> None:
-        """`player@_experimental` with schema-incompatible support raises.
-
-        Documents the implicit contract from the previous test: when an
-        underscore-prefixed custom version is the only role in its family, the
-        family's registered schema gets applied. Diverging from that schema is
-        the implementer's responsibility — the server cannot guess otherwise.
-        """
-        raw = orjson.dumps(
-            {
-                "type": "client/hello",
-                "payload": {
-                    "client_id": "c1",
-                    "name": "Client",
-                    "version": 1,
-                    "supported_roles": ["player@_experimental"],
-                    "player@_experimental_support": {"only": "garbage"},
-                },
-            }
-        ).decode()
-
-        with pytest.raises(MissingField):
-            SendspinConnection._deserialize_client_message(raw)  # noqa: SLF001
+        assert msg.payload.player_support is None
 
 
 class TestClientUrlRegistration:
