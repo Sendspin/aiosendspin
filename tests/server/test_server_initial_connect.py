@@ -775,6 +775,35 @@ async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
 
 
 @pytest.mark.asyncio
+async def test_playback_request_skips_client_that_required_pairing() -> None:
+    """A playback request does not redial a client whose last goodbye was ``pairing_required``."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://10.0.0.2:9999/sendspin"
+    client = server.get_or_create_client("speaker")
+    server.register_client_url("speaker", url)
+    client.detach_connection(GoodbyeReason.PAIRING_REQUIRED)
+
+    assert not server.request_client_playback_connection("speaker")
+    assert url not in server._connection_tasks  # noqa: SLF001
+    client._cancel_cleanup()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_playback_request_redials_client_that_switched_servers() -> None:
+    """A playback request redials a client whose last goodbye was ``another_server``."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://10.0.0.2:9999/sendspin"
+    client = server.get_or_create_client("speaker")
+    server.register_client_url("speaker", url)
+    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+
+    assert server.request_client_playback_connection("speaker")
+    assert server.get_connection_reason(url) is ConnectionReason.PLAYBACK
+    server.disconnect_from_client(url)
+    server._cancel_reclaim_timeout("speaker")  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_mdns_reannounce_keeps_pending_playback_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

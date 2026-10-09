@@ -142,6 +142,7 @@ class SendspinClient:
         self._cleanup_handle: asyncio.Handle | None = None
         # True when we intentionally retain a disconnected client after ANOTHER_SERVER goodbye.
         self._cleanup_on_mdns_removal: bool = False
+        self._last_goodbye_reason: GoodbyeReason | None = None
 
     def flag_noncompliance(self, reason: str) -> None:
         """Log a tolerated spec violation once, or reject it when the server is strict."""
@@ -489,6 +490,7 @@ class SendspinClient:
         self._connected = False  # set True once initial state is received (spec)
         self._roles_awaiting_state.clear()
         self._cleanup_on_mdns_removal = False
+        self._last_goodbye_reason = None
         on_transport_attached = getattr(self._server, "on_client_transport_attached", None)
         if callable(on_transport_attached):
             on_transport_attached(self._client_id)
@@ -685,6 +687,7 @@ class SendspinClient:
     def detach_connection(self, goodbye_reason: GoodbyeReason | None) -> None:
         """Detach the current connection and apply BufferTracker reset policy."""
         self._connected = False
+        self._last_goodbye_reason = goodbye_reason
 
         warm_disconnect = goodbye_reason in {None, GoodbyeReason.RESTART}
         if warm_disconnect:

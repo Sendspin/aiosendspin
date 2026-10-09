@@ -64,6 +64,13 @@ _NO_REDIAL_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
         GoodbyeReason.UNPAIRED,
     }
 )
+_NO_PLAYBACK_RECLAIM_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
+    {
+        GoodbyeReason.UNAUTHORIZED,
+        GoodbyeReason.PAIRING_REQUIRED,
+        GoodbyeReason.UNPAIRED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -787,6 +794,13 @@ class SendspinServer:
         """Request that a disconnected client connect for playback."""
         external_cb = self._external_stream_start_cbs.get(client_id)
         if external_cb is None:
+            client = self._clients.get(client_id)
+            if (
+                client is not None
+                and client._last_goodbye_reason  # noqa: SLF001
+                in _NO_PLAYBACK_RECLAIM_GOODBYE_REASONS
+            ):
+                return False
             return self.reclaim_client_for_playback(client_id)
 
         request = ExternalStreamStartRequest(
