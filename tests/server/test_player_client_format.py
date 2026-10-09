@@ -35,6 +35,8 @@ OPUS_48K_24 = SupportedAudioFormat(
 
 
 class _FakeConnection:
+    receives_group_updates = True
+
     def __init__(self) -> None:
         self.sent: list[object] = []
 

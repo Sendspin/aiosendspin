@@ -27,6 +27,8 @@ from aiosendspin.server.roles.player.v1 import PlayerV1Role
 
 
 class _FakeConnection:
+    receives_group_updates = True
+
     def __init__(self) -> None:
         self.sent: list[object] = []
         self.dropped_pending_binary: list[list[str] | None] = []

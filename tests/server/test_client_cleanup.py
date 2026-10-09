@@ -38,6 +38,8 @@ class _MockServer:
 
 
 class _DummyConnection:
+    receives_group_updates = True
+
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
         return
 

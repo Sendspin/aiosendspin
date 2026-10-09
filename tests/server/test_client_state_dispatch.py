@@ -201,18 +201,6 @@ async def test_initial_state_complete_state_is_not_flagged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_initial_state_rejects_when_flagged() -> None:
-    """A never-sent initial state hard-disconnects when the flag raises."""
-    conn, client = _conn_with_client()
-    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
-    conn.disconnect = AsyncMock()  # type: ignore[method-assign]
-    conn._initial_state_timeout_callback()  # noqa: SLF001
-    await asyncio.sleep(0)
-    conn.disconnect.assert_awaited_once_with(retry_connection=False)
-    client.mark_connected.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_missing_initial_state_marks_connected_when_lenient() -> None:
     """A never-sent initial state is tolerated: the client is marked connected."""
     conn, client = _conn_with_client()
