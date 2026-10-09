@@ -357,8 +357,6 @@ class SourceV1Role(Role):
             return
         self._start_queued = False
         self._stream_wanted = True
-        if (connection := self._client.connection) is not None:
-            connection.record_source_start()
         self.send_message(
             ServerCommandMessage(
                 payload=ServerCommandPayload(source=SourceCommandServerPayload(command="start"))

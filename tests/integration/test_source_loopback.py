@@ -27,8 +27,7 @@ from tests.conftest import sine_pcm_16bit
 
 
 class _ServerSideConnection:
-    def record_source_start(self) -> None:
-        pass
+    pass
 
 
 class _ServerSideClient:

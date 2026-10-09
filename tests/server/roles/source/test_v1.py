@@ -37,11 +37,7 @@ class _FakeInfo:
 
 
 class _FakeConnection:
-    def __init__(self) -> None:
-        self.starts_recorded = 0
-
-    def record_source_start(self) -> None:
-        self.starts_recorded += 1
+    pass
 
 
 class _FakeClient:
@@ -311,17 +307,6 @@ def test_invalid_stream_start_after_stop_is_flagged() -> None:
     )
 
     assert len(client.noncompliance) == 1
-
-
-def test_start_sent_records_an_authorization_on_the_connection() -> None:
-    """Every start put on the wire is recorded, including one sent after a stop."""
-    role, client = _connected_role()
-    role.request_start()
-    role.request_stop()
-    role.request_start()
-
-    assert _commands(client) == ["start", "stop", "start"]
-    assert client.connection.starts_recorded == 2
 
 
 def test_stream_start_after_restart_opens_a_stream() -> None:

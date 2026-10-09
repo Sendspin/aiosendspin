@@ -3069,6 +3069,12 @@ class SendspinConnection:
                 if isinstance(controller, ControllerGroupRole):
                     message.metadata_repeat = controller.repeat
                     message.metadata_shuffle = controller.shuffle
+        elif (
+            isinstance(message, ServerCommandMessage)
+            and message.payload.source is not None
+            and message.payload.source.command == "start"
+        ):
+            self.record_source_start()
         await wsock.send_str(message.to_json())
 
     async def _send_binary_data(
@@ -3161,14 +3167,6 @@ class SendspinConnection:
         """Drop everything still queued or held for a role, except a stream/end it still owes."""
         if role_queue := self._role_queues.pop(role, None):
             self._queue_size = max(self._queue_size - len(role_queue), 0)
-            # A start the client never receives authorizes no input stream.
-            unsent_starts = sum(
-                isinstance(entry.json_message, ServerCommandMessage)
-                and entry.json_message.payload.source is not None
-                and entry.json_message.payload.source.command == "start"
-                for _, _, entry in role_queue
-            )
-            self._source_starts_pending = max(self._source_starts_pending - unsent_starts, 0)
             lifecycle = [
                 entry.json_message
                 for _, _, entry in sorted(role_queue)
