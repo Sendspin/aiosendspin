@@ -143,7 +143,13 @@ from aiosendspin.noise.driver import (
     run_rehandshake_server,
 )
 from aiosendspin.noise.keys import b64url_encode, psk_id_for
-from aiosendspin.noise.models import PairAbortMessage, PairAbortPayload, PairingMessage
+from aiosendspin.noise.models import (
+    ClientPairInitMessage,
+    ClientPairPendingMessage,
+    PairAbortMessage,
+    PairAbortPayload,
+    PairingMessage,
+)
 from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
     LocalPairingAbortError,
@@ -1948,6 +1954,8 @@ class SendspinConnection:
                 if self._legacy_hello
                 else ServerActivateMessage(activation_payload)
             )
+            # Counted before the send, since a cancel during it may still deliver the activation.
+            self._pairing_index += 1
             await transport.send_str(activation.to_json())
             self._pairing_activities = activation_payload.activities
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
@@ -2011,7 +2019,6 @@ class SendspinConnection:
     ) -> ServerPairingRecord:
         """Run ``method``'s exchange, returning the record."""
         assert self._client_id is not None
-        self._pairing_index += 1
         pairing_index = self._pairing_index
         if method is PairMethod.PAIRING_PSK:
             # The attempt is absent when the client dialed in with a staged Pairing PSK.
@@ -2516,6 +2523,20 @@ class SendspinConnection:
         if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
             self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
 
+    def _flag_pairing_index_ahead(self, text: str, message_type: str) -> None:
+        """Flag a ``pairing_index`` above the pairing activations sent since the handshake."""
+        try:
+            message = PairingMessage.from_json(text)
+        except (LookupError, ValueError):
+            return
+        if (
+            isinstance(message, (ClientPairInitMessage, ClientPairPendingMessage))
+            and message.payload.pairing_index > self._pairing_index
+        ):
+            self._flag_noncompliance(
+                f"sent {message_type} with a pairing_index ahead of the server's count"
+            )
+
     def _flag_pairing_frame_deviations(self, text: str, message_type: str) -> None:
         """Flag the tolerated deviations in a pairing frame before the pairing task parses it."""
         try:
@@ -2606,6 +2627,7 @@ class SendspinConnection:
         self._note_pairing_frame(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
             self._flag_pairing_frame_before_activate(message_type)
+            self._flag_pairing_index_ahead(text, message_type)
             # In flight from before the client observed the leave activate.
             self._logger.debug("Discarding pairing message: not in pairing")
             return True

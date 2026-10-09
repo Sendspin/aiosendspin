@@ -2429,6 +2429,52 @@ async def test_strict_server_discards_a_pairing_frame_after_a_pairing() -> None:
             await client.disconnect()
 
 
+@pytest.mark.parametrize(("pairing_index", "closes"), [(1, True), (0, False)])
+async def test_strict_server_rejects_a_pair_init_ahead_of_its_count_outside_an_attempt(
+    pairing_index: int, *, closes: bool
+) -> None:
+    """Outside an attempt only a pair-init ahead of the server's count is a protocol error."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.PAIRING_PSK,
+                    pairing_psk=pairing,
+                    client_id=client_identity.peer_id,
+                )
+            )
+            # The re-handshake to the new record reset the server's count to zero.
+            await _await_paired_session(client)
+            assert client._admitted_connection is not None  # noqa: SLF001
+            await client._admitted_connection._send_message(  # noqa: SLF001
+                ClientPairInitMessage(
+                    payload=ClientPairInitPayload(pairing_index=pairing_index)
+                ).to_json(),
+                force=True,
+            )
+            if closes:
+                await _wait_until(lambda: not client.connected)
+            else:
+                await asyncio.sleep(0.1)  # a fatal frame would have torn the connection down
+                assert client.connected
+        finally:
+            await client.disconnect()
+
+
 async def test_end_pairing_during_attempt_leaves_pairing() -> None:
     """end_pairing aborts a stalled attempt with user_cancelled, stays connected, re-pairs."""
     server_store = InMemoryServerPairingStore()
