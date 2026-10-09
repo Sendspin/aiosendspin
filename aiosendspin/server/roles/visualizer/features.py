@@ -99,8 +99,9 @@ class VisualizerFeatureExtractor:
         sample_rate: int,
         channels: int,
         config: StreamStartVisualizer,
+        last_emit_ts_us: int | None = None,
     ) -> None:
-        """Create a feature extractor for negotiated stream config."""
+        """Create a feature extractor, keeping its first frame one hop after `last_emit_ts_us`."""
         self._sample_rate = sample_rate
         self._channels = channels
         self._config = config
@@ -115,6 +116,7 @@ class VisualizerFeatureExtractor:
         self._buffer_start_ts_us: int | None = None
         # Cursor: ts of the NEXT frame to emit. Set on first chunk.
         self._next_emit_ts_us: int | None = None
+        self._last_emit_ts_us = last_emit_ts_us
 
         # Per-FFT-size caches for values that are constant once the window
         # size settles (recomputing them every frame is pure overhead on
@@ -140,6 +142,11 @@ class VisualizerFeatureExtractor:
         self._pitch_register: float | None = None
         self._pitch_last_ts_us: int | None = None
 
+    @property
+    def last_emit_ts_us(self) -> int | None:
+        """Timestamp of the last periodic frame, None before the first."""
+        return self._last_emit_ts_us
+
     @staticmethod
     def _window_samples_for_rate(sample_rate: int) -> int:
         """Scale the FFT window with sample rate, rounded to the next power of two.
@@ -159,6 +166,7 @@ class VisualizerFeatureExtractor:
         self._buffer = np.zeros(0, dtype=np.float32)
         self._buffer_start_ts_us = None
         self._next_emit_ts_us = None
+        self._last_emit_ts_us = None
         self._spectrum_ema = None
         self._loudness_ema = None
         self._f_peak_last_idx = None
@@ -196,8 +204,10 @@ class VisualizerFeatureExtractor:
             self._buffer = mono.copy()
             self._buffer_start_ts_us = timestamp_us
             # Anchor first emit at chunk end so the first frame's window
-            # covers the whole chunk.
+            # covers the whole chunk, and at least one hop after the last frame.
             self._next_emit_ts_us = chunk_end_ts_us
+            if self._last_emit_ts_us is not None:
+                self._next_emit_ts_us = max(chunk_end_ts_us, self._last_emit_ts_us + self._hop_us)
         else:
             self._buffer = np.concatenate([self._buffer, mono])
 
@@ -216,6 +226,7 @@ class VisualizerFeatureExtractor:
                 self._next_emit_ts_us += self._hop_us
                 continue
             frames.append(self._compute_frame(window, emit_ts))
+            self._last_emit_ts_us = emit_ts
             if self._hop_us <= 0:
                 self._next_emit_ts_us = chunk_end_ts_us + 1
                 break

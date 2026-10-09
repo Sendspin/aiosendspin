@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import struct
 from unittest.mock import MagicMock
@@ -1270,6 +1271,31 @@ def test_changed_state_without_stream_applies_to_next_stream() -> None:
     config = _last_stream_start(client).payload.visualizer
     assert config.types == ("loudness",)
     assert config.rate_max == 15
+
+
+def test_periodic_frames_stay_within_rate_max_across_config_change() -> None:
+    """Rebuilding the extractor mid-stream keeps periodic frames at least 1/rate_max apart."""
+    client = _make_client_stub()
+    client.visualizer_state = {"types": ["loudness"], "rate_max": 32}
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    for timestamp_us in range(1_000_000, 1_400_000, 25_000):
+        role.on_audio_chunk(_audio_chunk(timestamp_us))
+    # The rebuilt extractor's first chunk ends less than one hop after the last frame.
+    assert 1_425_000 - client.send_binary.call_args_list[-1].kwargs["timestamp_us"] < 31_250
+    role.on_client_state(_state(types=["loudness", "f_peak"], rate_max=32))
+    for timestamp_us in range(1_400_000, 2_000_000, 25_000):
+        role.on_audio_chunk(_audio_chunk(timestamp_us))
+
+    loudness_ts = [
+        call.kwargs["timestamp_us"]
+        for call in client.send_binary.call_args_list
+        if call.kwargs["message_type"] == BinaryMessageType.VISUALIZATION_LOUDNESS.value
+    ]
+    assert len(loudness_ts) > 20
+    gaps = [b - a for a, b in itertools.pairwise(loudness_ts)]
+    assert min(gaps) * 32 >= 1_000_000, gaps
 
 
 def test_state_change_not_affecting_config_sends_no_stream_start() -> None:

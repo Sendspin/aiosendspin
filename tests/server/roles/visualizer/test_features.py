@@ -245,6 +245,21 @@ def test_reset_clears_emit_cursor_and_buffer() -> None:
     assert frames[0].timestamp_us == 9_025_000
 
 
+def test_reset_lets_frames_restart_at_earlier_timestamps() -> None:
+    """After reset() the first frame anchors at the new chunk end, even before earlier frames."""
+    config = _spectrum_config(rate_max=30)
+    extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
+
+    _feed_steady_chunks(
+        extractor, sample_rate=48_000, channels=2, hz=1000.0, chunks=5, start_ts_us=9_000_000
+    )
+    extractor.reset()
+
+    pcm = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
+    frames = extractor.process_chunk(pcm, 1_000_000)
+    assert frames[0].timestamp_us == 1_025_000
+
+
 # ---------------------------------------------------------------------------
 # Steady-state stability (Problem 2: spectrum flicker)
 # ---------------------------------------------------------------------------

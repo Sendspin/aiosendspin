@@ -389,6 +389,7 @@ class VisualizerV1Role(Role):
             sample_rate=req.sample_rate,
             channels=req.channels,
             config=self._stream_config,
+            last_emit_ts_us=None if self._extractor is None else self._extractor.last_emit_ts_us,
         )
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
