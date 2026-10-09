@@ -1235,6 +1235,59 @@ async def test_pairing_psk_server_discards_a_superseded_attempts_pair_retry() ->
     assert server_record.psk == client_record.psk
 
 
+@pytest.mark.parametrize(("pairing_index", "flagged"), [(1, True), (2, False)])
+async def test_pairing_psk_server_flags_a_pre_init_frame_only_on_the_first_activation(
+    pairing_index: int, *, flagged: bool
+) -> None:
+    """Only an earlier pairing activation since the handshake can leave a frame in flight."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    reasons: list[str] = []
+    await client_ews.send_str(ClientPairRetryMessage().to_json())
+
+    await asyncio.gather(
+        run_pairing_psk_client(
+            client_ews,
+            pairing_index=pairing_index,
+            server_id="server-X",
+            store=InMemoryClientPairingStore(),
+        ),
+        run_pairing_psk_server(
+            server_ews,
+            pairing_index=pairing_index,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            on_noncompliance=reasons.append,
+        ),
+    )
+    assert reasons == (["sent client/pair-retry before client/pair-init"] if flagged else [])
+
+
+async def test_code_server_flags_a_pre_init_frame_on_the_first_activation() -> None:
+    """A code flow flags a frame ahead of client/pair-init that no earlier attempt left."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    reasons: list[str] = []
+    await client_ews.send_str(
+        ClientPairAuthMessage(
+            payload=ClientPairAuthPayload(pake_msg_2=b64url_encode(bytes(32)))
+        ).to_json()
+    )
+    await client_ews.send_str(
+        PairAbortMessage(payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED)).to_json()
+    )
+
+    with pytest.raises(RemotePairingAbortError):
+        await run_static_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=1,
+            pairing_code_provider=_code,
+            client_id="client-A",
+            store=InMemoryServerPairingStore(),
+            on_noncompliance=reasons.append,
+        )
+    assert reasons == ["sent client/pair-auth before client/pair-init"]
+
+
 async def test_dynamic_pairing_code_server_discards_stale_pair_init() -> None:
     """A pair-init left over from a superseded activate is discarded; the fresh one pairs."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
