@@ -414,6 +414,20 @@ async def test_server_receives_client_init_before_rejecting_it() -> None:
     assert ServerErrorMessage.from_json(reply.data).payload.reason is _UNSUPPORTED_VERSION
 
 
+async def test_server_answers_binary_client_init_with_malformed() -> None:
+    """A BINARY frame in place of client/init is answered with server/error."""
+    server_ws = FakeWebSocket()
+    await server_ws.push(WSMessage(WSMsgType.BINARY, b"\x00", ""))
+    with pytest.raises(InitRejectedError) as exc_info:
+        await run_handshake_server(
+            server_ws, local_identity=Identity.generate(), psk_provider=_provider(None)
+        )
+    assert exc_info.value.reason is _MALFORMED
+    assert server_ws.sent == [
+        ServerErrorMessage(payload=ServerErrorPayload(reason=_MALFORMED)).to_json(),
+    ]
+
+
 async def test_server_rejection_survives_a_dropped_peer() -> None:
     """A peer gone before server/error is sent still yields the typed rejection."""
     server_ws = FakeWebSocket()
@@ -432,13 +446,6 @@ async def test_server_rejection_survives_a_dropped_peer() -> None:
             client_init_text=_client_init(version=2),
         )
     assert exc_info.value.reason is _UNSUPPORTED_VERSION
-
-
-async def _abort_non_text_first(server_ws: FakeWebSocket) -> None:
-    await server_ws.push(WSMessage(WSMsgType.BINARY, b"\x00", ""))
-    await run_handshake_server(
-        server_ws, local_identity=Identity.generate(), psk_provider=_provider(None)
-    )
 
 
 async def _abort_closed_first(server_ws: FakeWebSocket) -> None:
@@ -479,7 +486,6 @@ async def _abort_psk_miss(server_ws: FakeWebSocket) -> None:
 @pytest.mark.parametrize(
     "abort",
     [
-        _abort_non_text_first,
         _abort_closed_first,
         _abort_timeout,
         _abort_client_id_mismatch,

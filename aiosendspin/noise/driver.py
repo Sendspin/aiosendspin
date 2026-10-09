@@ -141,7 +141,7 @@ async def run_handshake_server(
     """Run the server-side (Noise initiator) handshake, rejecting spec violations if ``strict``."""
     compliance = _ServerCompliance(strict)
     if client_init_text is None:
-        client_init_text = await receive_text_frame(ws, what="client/init", timeout_s=timeout_s)
+        client_init_text = await receive_client_init_frame(ws, timeout_s=timeout_s)
     try:
         client_id, suite, client_static_pub = _parse_client_init(client_init_text)
     except InitRejectedError as exc:
@@ -349,6 +349,21 @@ async def receive_text_frame(
     msg = await _receive_frame(ws, what=what, timeout_s=timeout_s)
     if msg.type is not WSMsgType.TEXT:
         raise HandshakeAbortedError(f"expected {what} (TEXT), got {msg.type.name}")
+    return cast("str", msg.data)
+
+
+async def receive_client_init_frame(
+    ws: HandshakeWebSocket,
+    *,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+) -> str:
+    """Receive the ``client/init`` TEXT frame, answering a BINARY one with ``server/error``."""
+    msg = await _receive_frame(ws, what="client/init", timeout_s=timeout_s)
+    if msg.type is WSMsgType.BINARY:
+        await _send_server_error(ws, ServerErrorReason.MALFORMED)
+        raise InitRejectedError(ServerErrorReason.MALFORMED, "malformed client/init: BINARY frame")
+    if msg.type is not WSMsgType.TEXT:
+        raise HandshakeAbortedError(f"expected client/init (TEXT), got {msg.type.name}")
     return cast("str", msg.data)
 
 
