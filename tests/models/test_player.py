@@ -175,6 +175,18 @@ def test_hello_player_support_parses_without_supported_commands() -> None:
     assert "supported_commands" not in support.to_dict()
 
 
+def test_supported_format_requires_positive_bit_depth_except_for_opus() -> None:
+    """Opus ignores bit_depth, so any integer parses, while PCM still needs a positive one."""
+    opus = SupportedAudioFormat.from_dict(
+        {"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth": 0}
+    )
+    assert opus.bit_depth == 0
+    with pytest.raises(ValueError, match="bit_depth must be positive"):
+        SupportedAudioFormat.from_dict(
+            {"codec": "pcm", "channels": 2, "sample_rate": 48000, "bit_depth": 0}
+        )
+
+
 # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
 def test_hello_player_support_accepts_legacy_supported_commands() -> None:
     """A pre-#177 hello-level supported_commands list is still parsed."""

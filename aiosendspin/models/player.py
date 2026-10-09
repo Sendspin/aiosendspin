@@ -112,7 +112,7 @@ class SupportedAudioFormat(SendspinModel):
             raise ValueError(f"channels must be positive, got {self.channels}")
         if self.sample_rate <= 0:
             raise ValueError(f"sample_rate must be positive, got {self.sample_rate}")
-        if self.bit_depth <= 0:
+        if self.codec != AudioCodec.OPUS and self.bit_depth <= 0:
             raise ValueError(f"bit_depth must be positive, got {self.bit_depth}")
 
     def matches(self, other: SupportedAudioFormat) -> bool:
