@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -501,6 +502,10 @@ def _parse_client_init(text: str) -> tuple[str, NoiseCipherSuite, bytes]:
     if not isinstance(payload, dict) or decoded.get("type") != INIT_TYPE_CLIENT:
         raise InitRejectedError(malformed, "malformed client/init: not a client/init envelope")
     version = payload.get("version")
+    if type(version) is float:
+        # orjson turns integers beyond 64 bits into floats. Reparse with json for completeness,
+        # so even those versions get unsupported_version.
+        version = json.loads(text)["payload"]["version"]
     # type() rather than isinstance(): a JSON true must not pass as version 1.
     if type(version) is not int:
         raise InitRejectedError(malformed, f"malformed client/init version {version!r}")

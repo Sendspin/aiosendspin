@@ -333,6 +333,11 @@ _UNSUPPORTED_SUITE = ServerErrorReason.UNSUPPORTED_SUITE
         ),
         pytest.param(_client_init(version=2), _UNSUPPORTED_VERSION, id="future-version-bare"),
         pytest.param(
+            '{"type":"client/init","payload":{"version":18446744073709551616}}',
+            _UNSUPPORTED_VERSION,
+            id="version-beyond-64-bits",
+        ),
+        pytest.param(
             _client_init(client_id=5, version=0, suite=5),
             _UNSUPPORTED_VERSION,
             id="other-version-bad-fields",
