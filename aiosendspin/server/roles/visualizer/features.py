@@ -661,12 +661,7 @@ class VisualizerFeatureExtractor:
         db = 20.0 * np.log10(ratio)
         db_floor = -60.0
         t = (db - db_floor) / -db_floor
-        t = np.maximum(t, 0.0)
-        # Soft floor: bottom 10% (≈6 dB) folds into a quadratic fade so bins
-        # crossing the floor don't snap between 0 and a positive value.
-        soft = 10.0 * t * t
-        t = np.where(t < 0.1, soft, t)
-        t = np.minimum(t, 1.0)
+        t = np.clip(t, 0.0, 1.0)
         return (t * 65535.0).astype(np.uint16)
 
     def _frequency_bin_edges(

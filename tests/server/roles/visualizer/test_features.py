@@ -117,6 +117,23 @@ def test_peak_frequency_uses_compensated_magnitude() -> None:
     assert abs(frame.f_peak_freq - 2_000) < 400
 
 
+def test_spectrum_db_mapping_is_linear_near_floor() -> None:
+    """A bin at -57 dB encodes at 5% of full scale."""
+    extractor = VisualizerFeatureExtractor(
+        sample_rate=48_000, channels=2, config=_spectrum_config()
+    )
+    freqs = np.fft.rfftfreq(2048, d=1.0 / 48_000).astype(np.float32)
+    magnitude = np.zeros(freqs.size, dtype=np.float32)
+    ref = (freqs.size * 2 - 1) / 4.0
+    magnitude[100] = ref * 10.0 ** (-57.0 / 20.0)
+
+    binned = extractor._compute_binned_spectrum(  # noqa: SLF001
+        freqs=freqs, magnitude=magnitude, n_bins=1, f_min=0, f_max=24_000, scale="lin"
+    )
+
+    assert abs(int(binned[0]) - round(0.05 * 65535)) <= 1
+
+
 # ---------------------------------------------------------------------------
 # Hop scheduling: rate_max drives multi-frame emission
 # ---------------------------------------------------------------------------
