@@ -37,11 +37,7 @@ class _FakeInfo:
 
 
 class _FakeConnection:
-    def __init__(self) -> None:
-        self.starts_recorded = 0
-
-    def record_source_start(self) -> None:
-        self.starts_recorded += 1
+    pass
 
 
 class _FakeClient:
@@ -313,17 +309,6 @@ def test_invalid_stream_start_after_stop_is_flagged() -> None:
     assert len(client.noncompliance) == 1
 
 
-def test_start_sent_records_an_authorization_on_the_connection() -> None:
-    """Every start put on the wire is recorded, including one sent after a stop."""
-    role, client = _connected_role()
-    role.request_start()
-    role.request_stop()
-    role.request_start()
-
-    assert _commands(client) == ["start", "stop", "start"]
-    assert client.connection.starts_recorded == 2
-
-
 def test_stream_start_after_restart_opens_a_stream() -> None:
     """A start requested again after a stop wants the stream, whichever start it answers."""
     role, client = _make_role()
@@ -403,6 +388,42 @@ def test_next_stream_reports_its_first_decode_failure(
         role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00")
 
     assert [(r.args[0], bool(r.exc_info)) for r in caplog.records] == [(1, True)]
+
+
+def test_chunk_that_fails_to_decode_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chunk the decoder rejects, such as a FLAC frame split across chunks, is flagged."""
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _FailingDecoder()
+    )
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC))
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00")
+
+    assert client.noncompliance == ["sent a source audio chunk that failed to decode"]
+
+
+class _PassthroughDecoder:
+    def decode(self, data: bytes) -> bytes:
+        return data
+
+    def flush(self) -> bytes:
+        return b""
+
+
+def test_flac_chunk_longer_than_150_ms_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A FLAC chunk decoding to exactly 150 ms is allowed, one frame more is flagged."""
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder",
+        lambda *_a, **_k: _PassthroughDecoder(),
+    )
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC, bit_depth=24))
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7200 * 6))
+    assert client.noncompliance == []
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7201 * 6))
+    assert client.noncompliance == ["sent a source audio chunk longer than 150 ms"]
 
 
 def test_start_request_does_not_survive_disconnect() -> None:

@@ -3053,6 +3053,12 @@ class SendspinConnection:
                 if isinstance(controller, ControllerGroupRole):
                     message.metadata_repeat = controller.repeat
                     message.metadata_shuffle = controller.shuffle
+        elif (
+            isinstance(message, ServerCommandMessage)
+            and message.payload.source is not None
+            and message.payload.source.command == "start"
+        ):
+            self.record_source_start()
         await wsock.send_str(message.to_json())
 
     async def _send_binary_data(
