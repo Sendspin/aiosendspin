@@ -426,6 +426,38 @@ def test_flac_chunk_longer_than_150_ms_is_flagged(monkeypatch: pytest.MonkeyPatc
     assert client.noncompliance == ["sent a source audio chunk longer than 150 ms"]
 
 
+def test_empty_flac_chunk_is_flagged_and_not_decoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty FLAC chunk never reaches the decoder, where it would end decoding."""
+    decoded: list[bytes] = []
+
+    class _RecordingDecoder(_PassthroughDecoder):
+        def decode(self, data: bytes) -> bytes:
+            decoded.append(data)
+            return data
+
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _RecordingDecoder()
+    )
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC))
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"")
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(4))
+
+    assert client.noncompliance == ["sent an empty flac or opus source audio chunk"]
+    assert decoded == [bytes(4)]
+
+
+def test_empty_pcm_chunk_is_accepted() -> None:
+    """An empty pcm chunk is zero whole frames, so it is not flagged."""
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"")
+
+    assert client.noncompliance == []
+
+
 def test_start_request_does_not_survive_disconnect() -> None:
     """Streaming state is per-connection, so a reconnect needs a fresh start."""
     role, client = _make_role()
