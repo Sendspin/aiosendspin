@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Final, Protocol, cast
 
 import orjson
-from aiohttp import WSMsgType
+from aiohttp import WSMessage, WSMsgType
 from noise.exceptions import (
     NoiseHandshakeError,
     NoiseInvalidMessage,
@@ -345,14 +345,18 @@ async def receive_text_frame(
     timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
 ) -> str:
     """Receive one TEXT frame within ``timeout_s``, or abort the handshake."""
-    try:
-        async with asyncio.timeout(timeout_s):
-            msg = await ws.receive()
-    except TimeoutError as exc:
-        raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
+    msg = await _receive_frame(ws, what=what, timeout_s=timeout_s)
     if msg.type is not WSMsgType.TEXT:
         raise HandshakeAbortedError(f"expected {what} (TEXT), got {msg.type.name}")
     return cast("str", msg.data)
+
+
+async def _receive_frame(ws: HandshakeWebSocket, *, what: str, timeout_s: float) -> WSMessage:
+    try:
+        async with asyncio.timeout(timeout_s):
+            return await ws.receive()
+    except TimeoutError as exc:
+        raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
 
 
 async def _receive_handshake_discarding_application(
