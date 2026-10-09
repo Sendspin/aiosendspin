@@ -803,7 +803,8 @@ class PushStream:
         self._pcm_cache_enabled_channels: set[int] = {MAIN_CHANNEL.int}
         # Catch-up encoding state per TransformKey
         self._catchup_state: dict[TransformKey, Literal["catching_up", "live"]] = {}
-        self._catchup_roles: dict[TransformKey, set[Role]] = {}
+        # Roles waiting on each catch-up, with the late-join target of roles that joined it mid-run.
+        self._catchup_roles: dict[TransformKey, dict[Role, int | None]] = {}
         self._catchup_tasks: dict[TransformKey, asyncio.Task[None]] = {}
         # Set whenever a new PCM chunk lands in `_pcm_chunk_cache`. Catch-up tasks
         # await this so they keep up with quick commits.
@@ -1976,7 +1977,7 @@ class PushStream:
                         self._resamplers.pop(rkey, None)
         for tkey in list(self._catchup_roles.keys()):
             roles = self._catchup_roles[tkey]
-            roles.discard(role)
+            roles.pop(role, None)
             if not roles:
                 self._catchup_roles.pop(tkey, None)
                 self._catchup_state.pop(tkey, None)
@@ -2023,7 +2024,7 @@ class PushStream:
         # Clean up any catchup state referencing this role
         for tkey in list(self._catchup_roles.keys()):
             roles = self._catchup_roles[tkey]
-            roles.discard(role)
+            roles.pop(role, None)
             if not roles:
                 self._catchup_roles.pop(tkey, None)
                 self._catchup_state.pop(tkey, None)
@@ -2081,7 +2082,9 @@ class PushStream:
 
         if not cached:
             if cache_key in self._catchup_state:
-                self._catchup_roles.setdefault(cache_key, set()).add(role)
+                self._catchup_roles.setdefault(cache_key, {})[role] = (
+                    self.get_late_join_target_timestamp_us(role=role, channel_id=channel_id)
+                )
                 return
 
             if self._has_pcm_cache(channel_id) and not self._other_roles_use_transform_key(
@@ -2122,7 +2125,7 @@ class PushStream:
                     return
 
                 self._catchup_state[cache_key] = "catching_up"
-                self._catchup_roles[cache_key] = {role}
+                self._catchup_roles[cache_key] = {role: None}
                 task = create_task(self._start_catchup_encoding(role, req, channel_id, cache_key))
                 # An eager task can finish inside create_task, after its own
                 # cleanup already removed the map entry. Don't re-add it.
@@ -2551,7 +2554,7 @@ class PushStream:
 
             if not eligible:
                 if self._channel_timing:
-                    for r in self._catchup_roles.get(cache_key, {role}):
+                    for r in self._catchup_roles.get(cache_key, {role: None}):
                         self._ensure_role_started(r)
                 return
 
@@ -2657,10 +2660,15 @@ class PushStream:
             now_us = self._clock.now_us()
             encoded_cache: deque[CachedChunk] = self._role_chunk_cache.get(cache_key, deque())
             chunks_to_send = list(encoded_cache)
-            for r in self._catchup_roles.get(cache_key, {role}):
+            catchup_roles = self._catchup_roles.get(cache_key, {role: None})
+            for r, joined_target_us in catchup_roles.items():
                 # Encoder warm-up and the chunk straddling target_ts start short of the send-ahead.
+                not_before_us = target_ts if joined_target_us is None else joined_target_us
                 self._send_cached_chunks_to_role(
-                    r, chunks_to_send, now_us, not_before_us=self._resume_at_us.get(r, target_ts)
+                    r,
+                    chunks_to_send,
+                    now_us,
+                    not_before_us=self._resume_at_us.get(r, not_before_us),
                 )
 
             self._catchup_state[cache_key] = "live"

@@ -1354,13 +1354,29 @@ async def test_non_main_pcm_catchup_first_chunk_meets_send_ahead() -> None:
         required_lead_time_us=0,
         min_buffer_us=200_000,
     )
+    role3 = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=TransformerB(),
+            channel_id=channel_id,
+            frame_duration_us=25_000,
+        ),
+        output_delay_us=100_000,
+        required_lead_time_us=0,
+        min_buffer_us=500_000,
+    )
     group.clients.append(_DummyClient([role2]))
-
     stream.on_role_join(role2)
+    group.clients.append(_DummyClient([role3]))
+    stream.on_role_join(role3)
     await _drain_catchup_tasks(stream)
 
     assert role2.received
     assert role2.received[0].timestamp_us >= now_us + 300_000
+    assert role3.received
+    assert role3.received[0].timestamp_us >= now_us + 600_000
 
 
 async def _setup_deep_buffer_catchup_join() -> tuple[PushStream, _DummyRole, int]:
