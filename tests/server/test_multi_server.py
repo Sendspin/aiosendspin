@@ -95,6 +95,7 @@ class _MockServer:
     _client_urls: dict[str, str] = field(default_factory=dict)
     _clients: dict[str, SendspinClient] = field(default_factory=dict)
     _connection_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _mdns_client_urls: dict[str, str] = field(default_factory=dict)
 
     def is_external_player(self, client_id: str) -> bool:  # noqa: ARG002
         return False
@@ -338,8 +339,17 @@ class TestEncryptedActivities:
         ).decode()
 
     @staticmethod
-    def _long_term_connection(server: _MockServer, raw_hello: str) -> SendspinConnection:
-        conn = SendspinConnection(server, wsock_client=AsyncMock())
+    def _long_term_connection(
+        server: _MockServer,
+        raw_hello: str,
+        *,
+        request: web.Request | None = None,
+        url: str | None = None,
+    ) -> SendspinConnection:
+        if request is not None:
+            conn = SendspinConnection(server, request=request)
+        else:
+            conn = SendspinConnection(server, wsock_client=AsyncMock(), url=url)
         psk = generate_psk()
         conn._client_id = "client-1"  # noqa: SLF001
         conn._noise_psk = ResolvedPsk(  # noqa: SLF001
@@ -386,6 +396,29 @@ class TestEncryptedActivities:
 
         assert await conn._exchange_hellos() is True  # noqa: SLF001
         assert conn._negotiated_roles == ["controller@v1"]  # noqa: SLF001
+
+    @pytest.mark.parametrize("dialed_first", [True, False])
+    @pytest.mark.asyncio
+    async def test_strict_server_keeps_mdns_dial_over_client_dial(
+        self,
+        dialed_first: bool,  # noqa: FBT001
+    ) -> None:
+        """A strict server keeps its mDNS dial over a connection the client opened itself."""
+        loop = asyncio.get_running_loop()
+        strict_server = _MockServer(
+            loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False
+        )
+        url = "ws://192.168.1.100:8927/sendspin"
+        strict_server._mdns_client_urls = {"client-1._sendspin._tcp.local.": url}  # noqa: SLF001
+        request = MagicMock(spec=web.Request)
+        request.remote = "192.168.1.100"
+        dialed = self._long_term_connection(strict_server, self._player_hello(), url=url)
+        incoming = self._long_term_connection(strict_server, self._player_hello(), request=request)
+        first, second = (dialed, incoming) if dialed_first else (incoming, dialed)
+
+        assert await first._exchange_hellos() is True  # noqa: SLF001
+        await second._exchange_hellos()  # noqa: SLF001
+        assert strict_server._clients["client-1"].connection is dialed  # noqa: SLF001
 
     # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
     @pytest.mark.asyncio
