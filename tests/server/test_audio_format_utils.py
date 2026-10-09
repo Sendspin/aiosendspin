@@ -2,6 +2,7 @@
 
 import sys
 
+import av
 import pytest
 
 # The conversion helpers live in aiosendspin.audio.format and look up _get_numpy
@@ -73,6 +74,20 @@ def test_resolve_audio_format_uses_unnamed_layout_without_a_named_one(channels: 
         sample_rate=48_000, bit_depth=16, channels=channels
     ).resolve_av_format()
     assert layout == f"{channels} channels"
+
+
+def test_resolve_audio_format_ten_channel_layout_extends_7_1() -> None:
+    """Ten channels use a layout PyAV can open whose first eight channels are 7.1."""
+    _, _, layout_10, _ = AudioFormat(
+        sample_rate=48_000, bit_depth=16, channels=10
+    ).resolve_av_format()
+    _, _, layout_8, _ = AudioFormat(
+        sample_rate=48_000, bit_depth=16, channels=8
+    ).resolve_av_format()
+    channels_10 = [channel.name for channel in av.AudioLayout(layout_10).channels]
+    channels_8 = [channel.name for channel in av.AudioLayout(layout_8).channels]
+    assert len(channels_10) == 10
+    assert channels_10[:8] == channels_8
 
 
 def test_resolve_audio_format_rejects_no_channels() -> None:
