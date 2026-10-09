@@ -1211,6 +1211,9 @@ class TestMidConnectionPairingAbort:
         """A closing abort reason closes the connection even if the client keeps it open."""
         conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
         conn._client_id = "client-1"  # noqa: SLF001
+        conn._client_info = ClientHelloPayload.from_dict(  # noqa: SLF001
+            {"name": "client-1", "supported_roles": [], **_PAIRING_HELLO_FIELDS}
+        )
         transport = _FakePairingTransport()
         raw = AsyncMock()
         transport._ws = raw  # noqa: SLF001
