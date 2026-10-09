@@ -2658,8 +2658,9 @@ class PushStream:
             encoded_cache: deque[CachedChunk] = self._role_chunk_cache.get(cache_key, deque())
             chunks_to_send = list(encoded_cache)
             for r in self._catchup_roles.get(cache_key, {role}):
+                # Encoder warm-up and the chunk straddling target_ts start short of the send-ahead.
                 self._send_cached_chunks_to_role(
-                    r, chunks_to_send, now_us, not_before_us=self._resume_at_us.get(r)
+                    r, chunks_to_send, now_us, not_before_us=self._resume_at_us.get(r, target_ts)
                 )
 
             self._catchup_state[cache_key] = "live"
