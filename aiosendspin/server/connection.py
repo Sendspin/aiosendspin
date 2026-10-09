@@ -1358,6 +1358,8 @@ class SendspinConnection:
             await self.disconnect(retry_connection=False)
             return False
         if isinstance(message, ClientGoodbyeMessage):
+            for reason in deviations:
+                self._flag_noncompliance(f"{message.type} {reason}")
             await self._handle_goodbye(message.payload)
             return False
         if not isinstance(message, ClientHelloMessage):
@@ -2818,8 +2820,6 @@ class SendspinConnection:
             role.on_stream_request_format(fmt)
 
     async def _handle_goodbye(self, payload: ClientGoodbyePayload) -> None:
-        if payload.reason is None and payload.unrecognized_reason is None:
-            self._flag_noncompliance("sent client/goodbye with a null reason")
         if payload.unrecognized_reason is not None:
             self._logger.info(
                 "Received client/goodbye with unrecognized reason %r; not reconnecting",

@@ -131,6 +131,31 @@ def test_reason_names_the_nested_field_by_its_wire_key() -> None:
     ]
 
 
+@dataclass
+class _OptionalField(SendspinModel):
+    note: str | None = None
+
+
+@pytest.mark.parametrize(
+    ("model", "data", "reason"),
+    [
+        (_OptionalField, {"note": None}, "sent null for 'note' instead of a value"),
+        (
+            ClientMessage,
+            {"type": "client/state", "payload": {"available": True, "player": None}},
+            "sent null for 'player' instead of a value",
+        ),
+    ],
+)
+def test_explicit_null_in_optional_field_is_recorded(
+    model: type[SendspinModel], data: object, reason: str
+) -> None:
+    """A null the wire never allows is recorded, though the field reads as omitted."""
+    _, reasons = _parse(model, data)
+
+    assert reasons == [reason]
+
+
 @pytest.mark.parametrize(
     ("message", "reasons"),
     [
