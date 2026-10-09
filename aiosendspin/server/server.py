@@ -55,6 +55,15 @@ MAX_RECONNECT_BACKOFF_S = 300.0
 # Only consider a connection stable if it lasts at least this long, otherwise
 # a successful but broken session may cause a reconnection every second.
 STABLE_SERVER_INITIATED_SESSION_S = 10.0
+_NO_REDIAL_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
+    {
+        GoodbyeReason.ANOTHER_SERVER,
+        GoodbyeReason.USER_REQUEST,
+        GoodbyeReason.UNAUTHORIZED,
+        GoodbyeReason.PAIRING_REQUIRED,
+        GoodbyeReason.UNPAIRED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +271,8 @@ class SendspinServer:
         self._pending_connections = set()
 
         self._mdns_client_urls: dict[str, str] = {}
+        # mDNS URLs whose client said goodbye with a no-reconnect reason.
+        self._mdns_goodbye_urls: set[str] = set()
         self._app: web.Application | None = None
         self._app_runner: web.AppRunner | None = None
         self._tcp_site: web.TCPSite | None = None
@@ -549,6 +560,7 @@ class SendspinServer:
         A ``PLAYBACK`` reason applies to the next connection only. Later reconnects use
         ``DISCOVERY``.
         """
+        self._mdns_goodbye_urls.discard(url)
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if connection_reason is ConnectionReason.MANAGEMENT:
@@ -592,6 +604,7 @@ class SendspinServer:
             TimeoutError: If the initial connection attempt times out.
             Exception: Other unexpected errors during the initial connection attempt.
         """
+        self._mdns_goodbye_urls.discard(url)
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if connection_reason is ConnectionReason.MANAGEMENT:
@@ -927,6 +940,11 @@ class SendspinServer:
 
                     if not conn.should_retry_server_initiated_connection:
                         reason = conn.goodbye_reason
+                        if (
+                            reason in _NO_REDIAL_GOODBYE_REASONS
+                            and url in self._mdns_client_urls.values()
+                        ):
+                            self._mdns_goodbye_urls.add(url)
                         logger.debug(
                             "Not reconnecting to %s (goodbye reason: %s)",
                             url,
@@ -1164,13 +1182,19 @@ class SendspinServer:
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
 
             def _schedule_add() -> None:
-                create_task(self._handle_service_added(zeroconf, service_type, name))
+                create_task(self._handle_service_added(zeroconf, service_type, name, state_change))
 
             self._loop.call_soon_threadsafe(_schedule_add)
         elif state_change is ServiceStateChange.Removed:
             self._loop.call_soon_threadsafe(lambda: self._handle_service_removed(name))
 
-    async def _handle_service_added(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
+    async def _handle_service_added(
+        self,
+        zeroconf: Zeroconf,
+        service_type: str,
+        name: str,
+        state_change: ServiceStateChange,
+    ) -> None:
         info = AsyncServiceInfo(service_type, name)
         if not info.load_from_cache(zeroconf):
             await info.async_request(zeroconf, 3000)
@@ -1200,6 +1224,9 @@ class SendspinServer:
         host = f"[{address}]" if ip_address(address).version == 6 else address
         url = f"ws://{host}:{port}{path}"
         old_url = self._mdns_client_urls.get(name)
+        if state_change is ServiceStateChange.Updated and old_url in self._mdns_goodbye_urls:
+            logger.debug("Not redialing %s after its goodbye on an mDNS update", name)
+            return
         if old_url is not None and old_url != url and old_url in self._connection_tasks:
             old_parts = urlsplit(old_url)
             if (
@@ -1228,6 +1255,7 @@ class SendspinServer:
         url = self._mdns_client_urls.pop(name, None)
         if url is None:
             return
+        self._mdns_goodbye_urls.discard(url)
         # Keep the retry loop alive if a normal client still wants to be reached.
         # mDNS can drop ahead of the device coming back, and the device may not
         # re-announce until something else nudges it (router-side delay, ESP
