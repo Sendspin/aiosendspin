@@ -815,7 +815,7 @@ class ServerActivatePayload(SendspinModel):
     """Parameters of the admitted pairing attempt. Required when 'pairing' is in activities."""
     ignored_activities: list[str] | None = None
     """Activities this implementation does not recognize, dropped during parse and
-    recorded for the client to log. Not part of the wire schema (omitted when None)."""
+    recorded for the client to reject. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
