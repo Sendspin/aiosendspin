@@ -3,6 +3,7 @@
 The protocol types `int`-annotated wire fields as integers, but Python does not enforce
 annotations at runtime. This module keeps those fields integer-typed during serialization,
 and checks the JSON type of integer, boolean, string and array fields during parsing.
+The spec allows no null value, so parsing also records each null an optional field receives.
 It also provides the parse helpers that set aside unrecognized enum identifiers, and the
 hooks that carry application-specific role objects between the wire and the models.
 """
@@ -17,7 +18,7 @@ import types
 from collections.abc import Callable
 from contextvars import ContextVar
 from enum import Enum
-from functools import cache
+from functools import cache, wraps
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from mashumaro.config import BaseConfig
@@ -298,6 +299,48 @@ def str_from_wire(value: Any) -> str:
 
 
 @cache
+def _optional_fields(model: type) -> tuple[tuple[str, str, Any], ...]:
+    """Return the name, wire key and type of each field of a dataclass model that admits None."""
+    hints = get_type_hints(model, include_extras=True)
+    fields = []
+    for field in dataclasses.fields(model):
+        hint = hints[field.name]
+        inner = get_args(hint)[0] if get_origin(hint) is Annotated else hint
+        if get_origin(inner) in (Union, types.UnionType) and type(None) in get_args(inner):
+            fields.append((field.name, _wire_field_name(model, field.name), hint))
+    return tuple(fields)
+
+
+_normalizing_model: ContextVar[type | None] = ContextVar("normalizing_model", default=None)
+
+
+def _noting_explicit_nulls(
+    normalize: Callable[[Any, dict[str, Any]], dict[str, Any]],
+) -> Callable[[Any, dict[str, Any]], dict[str, Any]]:
+    """Wrap a ``__pre_deserialize__`` function to record each wire null it leaves in a field."""
+
+    @wraps(normalize)
+    def pre_deserialize(cls: Any, d: dict[str, Any]) -> dict[str, Any]:
+        # A subclass hook calling ``super()`` reaches here again for the same model.
+        if _normalizing_model.get() is cls:
+            return normalize(cls, d)
+        token = _normalizing_model.set(cls)
+        try:
+            normalized = normalize(cls, d)
+        finally:
+            _normalizing_model.reset(token)
+        for name, key, hint in _optional_fields(cls):
+            if key in d and d[key] is None and key in normalized and normalized[key] is None:
+                try:
+                    _note_type_mismatch(None, "a value")
+                except _WireTypeMismatchError as exc:
+                    raise InvalidFieldValue(name, hint, None, cls) from exc
+        return normalized
+
+    return pre_deserialize
+
+
+@cache
 def _array_fields(model: type) -> tuple[tuple[str, str, Any], ...]:
     """Return the name, wire key and type of each list and tuple field of a dataclass model."""
     hints = get_type_hints(model, include_extras=True)
@@ -328,7 +371,16 @@ class SendspinConfig(BaseConfig):
 class SendspinModel(DataClassORJSONMixin):
     """Base class for Sendspin protocol models. Applies `SendspinConfig` by default."""
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Record the explicit nulls a model's own ``__pre_deserialize__`` leaves in its fields."""
+        if (normalize := cls.__dict__.get("__pre_deserialize__")) is not None:
+            cls.__pre_deserialize__ = classmethod(  # type: ignore[assignment,method-assign]
+                _noting_explicit_nulls(normalize.__func__)
+            )
+        super().__init_subclass__(**kwargs)
+
     @classmethod
+    @_noting_explicit_nulls
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Check list and tuple fields, which mashumaro would otherwise iterate whatever they hold.
 

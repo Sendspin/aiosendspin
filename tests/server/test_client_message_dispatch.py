@@ -257,7 +257,7 @@ async def test_undecodable_message_is_flagged_and_ends_the_loop(
 
 @pytest.mark.parametrize(
     ("reason", "noncompliance"),
-    [("moving_house", []), (None, ["sent client/goodbye with a null reason"])],
+    [("moving_house", []), (None, ["client/goodbye sent null for 'reason' instead of a value"])],
 )
 async def test_unrecognized_or_null_goodbye_reason_disconnects_without_retry(
     reason: str | None, noncompliance: list[str]

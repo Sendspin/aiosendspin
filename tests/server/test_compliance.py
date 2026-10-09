@@ -482,6 +482,8 @@ async def test_strict_server_rejects_hello_deviation_before_attach(
         "unpaired_access": {"enabled": False},
         **overrides,
     }
+    # A None override omits the key.
+    payload = {key: value for key, value in payload.items() if value is not None}
     conn = SendspinConnection(server, wsock_client=AsyncMock())
     psk = generate_psk()
     conn._client_id = "dev"  # noqa: SLF001

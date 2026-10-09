@@ -50,3 +50,20 @@ async def test_restart_goodbye_in_place_of_hello_keeps_reconnecting() -> None:
 
     assert conn.goodbye_reason is GoodbyeReason.RESTART
     assert conn.should_retry_server_initiated_connection
+
+
+@pytest.mark.asyncio
+async def test_null_reason_goodbye_in_place_of_hello_is_flagged() -> None:
+    """A client/goodbye sent instead of the hello has its deviations flagged."""
+    loop = asyncio.get_running_loop()
+    conn = SendspinConnection(
+        _DummyServer(loop=loop, clock=LoopClock(loop)), wsock_client=MagicMock()
+    )
+    conn._flag_noncompliance = MagicMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+    goodbye = '{"type": "client/goodbye", "payload": {"reason": null}}'
+    assert await conn._ingest_client_hello(goodbye) is False  # noqa: SLF001
+
+    conn._flag_noncompliance.assert_called_once_with(  # noqa: SLF001
+        "client/goodbye sent null for 'reason' instead of a value"
+    )
