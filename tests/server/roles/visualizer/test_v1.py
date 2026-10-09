@@ -857,6 +857,18 @@ def test_beat_only_stream_initial_includes_beat() -> None:
     assert list(initial.types) == ["beat"]
 
 
+def test_beat_only_stream_drops_beat_when_unavailable() -> None:
+    """Declaring beats unavailable re-sends a beat-only stream/start without `beat`."""
+    role, client = _beat_only_role()
+    _connect(role)
+    role.on_stream_start()
+
+    role.set_beat_availability(BeatAvailability.UNAVAILABLE)
+
+    assert _stream_start_count(client) == 2
+    assert list(_last_stream_start(client).payload.visualizer.types) == []
+
+
 # ---------------------------------------------------------------------------
 # stream/request-format renegotiation
 # ---------------------------------------------------------------------------

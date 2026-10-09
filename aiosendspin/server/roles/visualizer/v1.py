@@ -246,7 +246,6 @@ class VisualizerV1Role(Role):
         """
         if self._beat_availability is availability:
             return
-        previous_beat_in_types = self._beat_in_negotiated_types()
         self._beat_availability = availability
         if availability is BeatAvailability.UNAVAILABLE:
             self._pending_beats.clear()
@@ -265,7 +264,7 @@ class VisualizerV1Role(Role):
             or not self._stream_started
         ):
             return
-        if previous_beat_in_types != self._beat_in_negotiated_types():
+        if self._build_stream_config() != self._stream_config:
             self._reissue_stream_start()
 
     def _ensure_buffer_tracker(self) -> None:
@@ -947,12 +946,15 @@ class VisualizerV1Role(Role):
         render a `peak`-based fallback without flicker.
 
         Exception: beat-only clients (`types == ["beat"]`) get `beat`
-        from the start — there is no FFT-driven type to fall back to.
+        from the start unless beats are UNAVAILABLE, as there is no
+        FFT-driven type to fall back to.
         """
         if self._request is None:
             raise ValueError("request must be known before building stream config")
         client_types = list(self._request.types)
-        beat_only = client_types == ["beat"]
+        beat_only = (
+            client_types == ["beat"] and self._beat_availability is not BeatAvailability.UNAVAILABLE
+        )
         if beat_only or self._beat_in_negotiated_types():
             exposed_types = client_types
         else:
