@@ -1430,6 +1430,14 @@ class SendspinConnection:
     def _attach_new_client(self, client_id: str, client_info: ClientHelloPayload) -> None:
         """Bind this connection to its persistent client and announce what it arrived as."""
         client = self._server.get_or_create_client(client_id)
+        existing = client.connection
+        if (
+            not self.is_server_initiated
+            and existing is not None
+            and existing.is_server_initiated
+            and existing._url in self._server._mdns_client_urls.values()  # noqa: SLF001
+        ):
+            client.flag_noncompliance("client dialed the server while advertising _sendspin._tcp")
         if not self.is_encrypted:
             # Legacy unencrypted is never paired, so drop pairing-required roles.
             initial_active = self._filter_pairing_roles(self._negotiated_roles)
