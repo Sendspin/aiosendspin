@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import replace
@@ -22,6 +23,8 @@ from aiosendspin.client.connection import SendspinConnection as SdkConnection
 from aiosendspin.client.models import PairingSupport
 from aiosendspin.models.core import (
     ActivatePairing,
+    ClientGoodbyeMessage,
+    ClientGoodbyePayload,
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
@@ -37,6 +40,7 @@ from aiosendspin.models.types import (
     Activity,
     AudioCodec,
     ClientMessage,
+    GoodbyeReason,
     PairAbortReason,
     PairingCodeFormat,
     PairMethod,
@@ -2356,6 +2360,93 @@ async def test_strict_server_rejects_a_pairing_frame_before_any_pairing_activate
             await _wait_until(lambda: not client.connected)
         finally:
             await client.disconnect()
+
+
+_send_client_hello = SdkConnection._send_client_hello  # noqa: SLF001
+
+
+def _send_hello_then(message: ClientMessage) -> Callable[[SdkConnection], Awaitable[None]]:
+    """Return a hello sender that follows client/hello with ``message`` before server/activate."""
+
+    async def send(self: SdkConnection) -> None:
+        await _send_client_hello(self)
+        assert self._ws is not None
+        await self._ws.send_str(message.to_json())
+
+    return send
+
+
+async def test_strict_server_rejects_a_message_before_the_connect_time_pairing_activate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A client/state sent before connect-time pairing's first activate closes the connection."""
+    client_identity = Identity.generate()
+    server_store, client_store = await _staged_pairing_psk_stores(client_identity)
+    server = _make_server(server_store, allow_noncompliant_clients=False)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            with (
+                patch.object(
+                    SdkConnection,
+                    "_send_client_hello",
+                    _send_hello_then(
+                        ClientStateMessage(payload=ClientStatePayload(available=True))
+                    ),
+                ),
+                suppress(RuntimeError),
+            ):
+                await client.connect(url)
+            await _wait_until(lambda: not client.connected)
+        finally:
+            await client.disconnect()
+    assert (
+        "rejecting non-compliant client c: sent a message before the first server/activate"
+        in caplog.messages
+    )
+
+
+async def test_strict_server_accepts_a_goodbye_before_the_connect_time_pairing_activate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A client/goodbye before connect-time pairing's first activate is handled, not flagged."""
+    caplog.set_level(logging.DEBUG, logger="aiosendspin.server")
+    client_identity = Identity.generate()
+    server_store, client_store = await _staged_pairing_psk_stores(client_identity)
+    server = _make_server(server_store, allow_noncompliant_clients=False)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            with (
+                patch.object(
+                    SdkConnection,
+                    "_send_client_hello",
+                    _send_hello_then(
+                        ClientGoodbyeMessage(
+                            payload=ClientGoodbyePayload(reason=GoodbyeReason.SHUTDOWN)
+                        )
+                    ),
+                ),
+                suppress(RuntimeError),
+            ):
+                await client.connect(url)
+            await _wait_until(lambda: not client.connected)
+        finally:
+            await client.disconnect()
+    assert "Received client/goodbye with reason: GoodbyeReason.SHUTDOWN" in caplog.messages
+    assert not any("rejecting non-compliant client" in m for m in caplog.messages)
 
 
 async def test_strict_server_rejects_a_pairing_frame_before_the_attempts_activate() -> None:

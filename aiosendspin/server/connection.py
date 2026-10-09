@@ -2563,6 +2563,20 @@ class SendspinConnection:
         self._pairing_message_queue.put_nowait(msg)
         return True
 
+    def _flag_message_before_first_activate(self, msg: WSMessage) -> None:
+        """Flag a message other than ``client/goodbye`` read by connect-time pairing's reader."""
+        if (
+            self._pairing_message_queue is None
+            or self._declared_activities is not None
+            or self._activated_pairing_method is not None
+        ):
+            return
+        if msg.type is WSMsgType.BINARY or (
+            msg.type is WSMsgType.TEXT
+            and _peek_message_type(cast("str", msg.data)) != "client/goodbye"
+        ):
+            self._flag_noncompliance("sent a message before the first server/activate")
+
     def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
         if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
             self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
@@ -2608,6 +2622,7 @@ class SendspinConnection:
 
                 if self._try_route_to_pairing_queue(msg):
                     continue
+                self._flag_message_before_first_activate(msg)
 
                 if msg.type == WSMsgType.ERROR:
                     self._logger.warning("WebSocket error: %s", transport.exception() or "unknown")
