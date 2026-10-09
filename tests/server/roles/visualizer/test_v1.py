@@ -557,6 +557,22 @@ def test_downbeat_flag_set_when_tracking_downbeats() -> None:
     assert calls[0].args[0][-1] & FLAG_DOWNBEAT == FLAG_DOWNBEAT
 
 
+def test_tracks_downbeats_change_mid_stream_resends_stream_start() -> None:
+    """A downbeat bit set mid-stream follows a stream/start announcing `tracks_downbeats`."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(500_000, is_downbeat=True)])
+    assert _last_stream_start(client).payload.visualizer.tracks_downbeats is False
+
+    role.set_tracks_downbeats(tracks=True)
+    role.on_audio_chunk(_audio_chunk(1_000_000))
+
+    assert _last_stream_start(client).payload.visualizer.tracks_downbeats is True
+    assert _beat_calls(client)[0].args[0][-1] & FLAG_DOWNBEAT == FLAG_DOWNBEAT
+
+
 def test_beats_interleave_with_periodic_frames_in_ts_order() -> None:
     """All wire timestamps stay non-decreasing across periodic + beat frames."""
     client = _make_beat_client_stub()
