@@ -171,3 +171,26 @@ def make_player(
         )
 
     return client, group, conn
+
+
+def make_pool_player(
+    server: DummyServer,
+    client_id: str,
+    *,
+    codec: AudioCodec,
+    sample_rate: int,
+) -> tuple[SendspinClient, CaptureConnection]:
+    """Build a connected player that takes its encoder from the group transformer pool."""
+    client, _group, conn = make_player(
+        server,
+        client_id,
+        supported_formats=[
+            SupportedAudioFormat(codec=codec, channels=2, sample_rate=sample_rate, bit_depth=16)
+        ],
+        buffer_capacity=50_000_000,
+    )
+    role = client.role("player@v1")
+    assert role is not None
+    role.get_join_delay_s = lambda: 0.0  # type: ignore[method-assign]
+    role._ensure_audio_requirements(force=True)  # noqa: SLF001
+    return client, conn

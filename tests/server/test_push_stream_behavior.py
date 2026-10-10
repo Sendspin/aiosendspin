@@ -483,75 +483,17 @@ def test_quantize_float_to_s16_uses_triangular_hp_dither(
     assert captured_dither_methods[-1] == "triangular_hp"
 
 
-def test_quantize_float_to_s16_preserves_dither_on_resampler_reset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Drift-triggered graph rebuild must preserve triangular_hp dithering."""
-    captured_dither_methods: list[str | None] = []
-    original_build_resample_graph = push_stream_module._build_resample_graph  # noqa: SLF001
-
-    def _record_build_resample_graph(
-        *,
-        source_av_format: str,
-        source_layout: str,
-        source_sample_rate: int,
-        target_av_format: str,
-        target_layout: str,
-        target_sample_rate: int,
-        dither_method: str | None = None,
-    ) -> object:
-        if source_av_format == "flt" and target_av_format == "s16":
-            captured_dither_methods.append(dither_method)
-        return original_build_resample_graph(
-            source_av_format=source_av_format,
-            source_layout=source_layout,
-            source_sample_rate=source_sample_rate,
-            target_av_format=target_av_format,
-            target_layout=target_layout,
-            target_sample_rate=target_sample_rate,
-            dither_method=dither_method,
-        )
-
-    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _record_build_resample_graph)
-
-    group = _DummyGroup(clients=[])
-    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
-    # First call creates the quantizer graph. Second call with stale timestamp creates >20ms
-    # drift, forcing graph rebuild in _resample_pcm_standalone.
-    push_stream_module._quantize_float_pcm(  # noqa: SLF001
-        channel_id=MAIN_CHANNEL,
-        pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
-        output_ts=0,
-        sample_rate=48_000,
-        channels=2,
-        target_bit_depth=16,
-        resampler_cache=stream._resamplers,  # noqa: SLF001
-    )
-    push_stream_module._quantize_float_pcm(  # noqa: SLF001
-        channel_id=MAIN_CHANNEL,
-        pcm_data=bytes(9600),  # 25ms @ 48kHz stereo f32
-        output_ts=0,
-        sample_rate=48_000,
-        channels=2,
-        target_bit_depth=16,
-        resampler_cache=stream._resamplers,  # noqa: SLF001
-    )
-
-    assert len(captured_dither_methods) >= 2
-    assert captured_dither_methods[0] == "triangular_hp"
-    assert captured_dither_methods[-1] == "triangular_hp"
-
-
-def test_resampler_drift_detection_uses_input_timeline() -> None:
-    """Drift detection must compare against an input-timeline reference.
+def test_resampler_jump_detection_uses_input_timeline() -> None:
+    """Jump detection must compare against an input-timeline reference.
 
     Long-FIR resamplers (e.g. soxr precision=30) emit fewer samples than the
     rate-conversion ratio until warmed up, so the output-side pending_timestamp_us
     naturally lags input_timestamp_us by tens of ms even during steady-state
-    contiguous streaming. If drift detection compares that output-side cursor to
-    the input timestamp, every call exceeds the 20 ms threshold and rebuilds the
-    graph cold — which was the 5.1.0 regression that discarded ~35% of audio for
-    float@48k → flac@44.1k/16 (the MA Sendspin provider's default input path).
+    contiguous streaming. If jump detection compares that output-side cursor to
+    the input timestamp, every call exceeds the jump tolerance and moves the
+    output cursor. In 5.1.0 the same misfire rebuilt the graph cold and discarded
+    ~35% of audio for float@48k → flac@44.1k/16 (the MA Sendspin provider's default
+    input path).
     """
     source = AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float")
     target = AudioFormat(sample_rate=44_100, bit_depth=32, channels=2, sample_type="float")
@@ -591,7 +533,7 @@ def test_resampler_drift_detection_uses_input_timeline() -> None:
     drift_us = abs(state.pending_input_timestamp_us - input_ts)
     assert drift_us == 0, (
         f"Contiguous input stream should produce zero drift; got {drift_us}us. "
-        "This is the invariant that prevents the graph from being rebuilt on "
+        "This is the invariant that keeps the output cursor from moving on "
         "every commit."
     )
 
@@ -3353,61 +3295,6 @@ async def test_late_joiner_after_historical_injection() -> None:
     assert role2.received
 
 
-def test_drift_rebuild_flushes_old_graph_before_replacing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Drift-triggered graph rebuild must flush the old graph before replacing it."""
-    flush_calls: list[bool] = []
-    original_build = push_stream_module._build_resample_graph  # noqa: SLF001
-
-    class _SpyGraph:
-        """Wraps a real graph to detect push(None) flush calls."""
-
-        def __init__(self, real_graph: object) -> None:
-            self._real = real_graph
-
-        def push(self, frame: object) -> None:
-            if frame is None:
-                flush_calls.append(True)
-            self._real.push(frame)  # type: ignore[union-attr]
-
-        def pull(self) -> object:
-            return self._real.pull()  # type: ignore[union-attr]
-
-    def _spy_build(**kwargs: Any) -> object:
-        graph = original_build(**kwargs)
-        return _SpyGraph(graph)
-
-    monkeypatch.setattr(push_stream_module, "_build_resample_graph", _spy_build)
-
-    group = _DummyGroup(clients=[])
-    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=group)
-    pcm_25ms = bytes(9600)  # 25ms @ 48kHz stereo f32
-
-    # First call: creates graph, advances pending_timestamp_us by ~25ms
-    push_stream_module._quantize_float_pcm(  # noqa: SLF001
-        channel_id=MAIN_CHANNEL,
-        pcm_data=pcm_25ms,
-        output_ts=0,
-        sample_rate=48_000,
-        channels=2,
-        target_bit_depth=16,
-        resampler_cache=stream._resamplers,  # noqa: SLF001
-    )
-    # Second call with same output_ts=0: drift > 20ms, triggers rebuild
-    push_stream_module._quantize_float_pcm(  # noqa: SLF001
-        channel_id=MAIN_CHANNEL,
-        pcm_data=pcm_25ms,
-        output_ts=0,
-        sample_rate=48_000,
-        channels=2,
-        target_bit_depth=16,
-        resampler_cache=stream._resamplers,  # noqa: SLF001
-    )
-
-    assert flush_calls, "Old graph should have been flushed with push(None) before rebuild"
-
-
 @pytest.mark.asyncio
 async def test_multi_role_fanout_quantizes_once_per_pcm_key(
     mock_loop: Any,
@@ -3482,20 +3369,12 @@ async def test_catchup_quantizer_does_not_share_live_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catch-up path must use its own quantizer state, not the shared live cache."""
-    # Count real graph rebuilds by observing `state.graph` identity across the call,
-    # not by replaying the drift-condition check. The old output-cursor drift proxy
-    # would flag false positives under soxr (where FIR latency makes the output
-    # cursor lag the input by tens of ms even in steady state).
-    drift_rebuild_count = 0
+    resampled_states: list[Any] = []
     original_resample = push_stream_module._resample_pcm_standalone  # noqa: SLF001
 
     def _tracking_resample(state: Any, pcm: bytes, fmt: Any, ts: int) -> Any:
-        nonlocal drift_rebuild_count
-        graph_before = id(state.graph)
-        result = original_resample(state, pcm, fmt, ts)
-        if state.graph is not None and id(state.graph) != graph_before:
-            drift_rebuild_count += 1
-        return result
+        resampled_states.append(state)
+        return original_resample(state, pcm, fmt, ts)
 
     monkeypatch.setattr(push_stream_module, "_resample_pcm_standalone", _tracking_resample)
 
@@ -3541,19 +3420,18 @@ async def test_catchup_quantizer_does_not_share_live_cache(
     stream = PushStream(loop=loop, clock=clock, group=group)
     stream.enable_pcm_cache_for_channel(MAIN_CHANNEL)
 
-    # Commit several float PCM chunks — builds live quantizer state.
-    # Advance clock by 25ms (matching audio duration) between commits to
-    # keep resampler timestamps monotonic without drift-triggered rebuilds.
+    # Commit several float PCM chunks to build live quantizer state.
+    # The clock stays put so the tail runs ahead of the joiner's target and forces catch-up.
     for _ in range(4):
         stream.prepare_audio(
             bytes(9600),  # 25ms @ 48kHz stereo f32
             AudioFormat(sample_rate=48_000, bit_depth=32, channels=2, sample_type="float"),
         )
         await stream.commit_audio()
-        clock.advance_us(25_000)
 
-    # Count drift rebuilds so far (live path — should be 0 with ManualClock)
-    live_drifts = drift_rebuild_count
+    live_states = list(stream._resamplers.values())  # noqa: SLF001
+    assert any(state.key.target_sample_type == "int" for state in live_states)
+    resampled_states.clear()
 
     # Add a late-joining role with TransformerB — different TransformKey, triggers PCM catch-up
     role2 = _DummyRole(
@@ -3568,22 +3446,11 @@ async def test_catchup_quantizer_does_not_share_live_cache(
     )
     group.clients.append(_DummyClient([role2]))
     stream.on_role_join(role2)
+    await _drain_catchup_tasks(stream)
 
-    # Wait for the async catch-up task to complete
-    for _ in range(50):
-        if role2.received:
-            break
-        await asyncio.sleep(0.01)
-
-    # Catch-up should NOT trigger drift-rebuilds in the shared quantizer cache.
-    # With separate cache: fresh quantizer state, no drift detection.
-    # With shared cache: the jump from live timestamps (~350ms) to historical
-    # timestamps (~250ms) causes drift > 20ms, triggering a graph rebuild.
-    catchup_drifts = drift_rebuild_count - live_drifts
-    assert catchup_drifts == 0, (
-        f"Expected 0 drift-triggered rebuilds during catch-up, got {catchup_drifts} "
-        f"(likely shared quantizer cache causing timestamp jump)"
-    )
+    assert resampled_states, "catch-up should have quantized the cached float PCM"
+    shared = [s for s in resampled_states if any(s is live for live in live_states)]
+    assert not shared, f"catch-up fed {len(shared)} chunks through the live resampler cache"
 
 
 async def test_replay_from_pcm_cache_overrides_established_resampler_skip() -> None:
@@ -4299,15 +4166,15 @@ def test_resampler_passthrough_44100_no_cumulative_drift() -> None:
     )
 
 
-def test_resampler_passthrough_drift_reset_clears_residue() -> None:
-    """Resampler drift-reset path (>20ms input/pending mismatch) must reset residue."""
+def test_resampler_passthrough_jump_clears_residue() -> None:
+    """Resampler jump path (input jump over the tolerance) must reset residue."""
     state = _make_resampler_state_passthrough(sample_rate=44100)
     fmt = AudioFormat(sample_rate=44100, bit_depth=16, channels=2, sample_type="int")
     pcm = bytes(1102 * 4)
     # Prime with a few calls so residue accumulates
     for i in range(5):
         push_stream_module._resample_pcm_standalone(state, pcm, fmt, i * 24988)  # noqa: SLF001
-    # Now jump input forward by 5 seconds — way beyond the 20ms drift threshold
+    # Now jump input forward by 5 seconds, way beyond the jump tolerance
     new_input_ts = 10_000_000
     push_stream_module._resample_pcm_standalone(state, pcm, fmt, new_input_ts)  # noqa: SLF001
     # After the rebase + one fresh call: pending should be new_input_ts + 24988
@@ -4384,7 +4251,7 @@ def test_resampler_pending_input_ts_has_zero_cumulative_drift_at_44100_source() 
     Plain `int(samples * 1e6 / source_rate)` truncation accumulates per-call error
     at rates that don't divide 1e6 evenly (e.g. 44.1k). Left unchecked, the
     input-side cursor would eventually lag the true input timeline past the
-    20 ms drift threshold and cause a spurious graph rebuild. The divmod residue
+    jump tolerance and cause a spurious cursor jump. The divmod residue
     accumulator must match `total_samples * 1e6 // source_sample_rate` exactly.
     """
     source = AudioFormat(sample_rate=44_100, bit_depth=16, channels=2, sample_type="int")
@@ -4403,7 +4270,7 @@ def test_resampler_pending_input_ts_has_zero_cumulative_drift_at_44100_source() 
     # 25 ms @ 44.1k = 1102 samples → 24988.66µs actual, rounds to 24988µs.
     # Plain `int(...)` would drop 0.66µs per call. Over 40_800 calls (17 min)
     # the old code would accumulate ~27 ms of input-side lag — enough to cross
-    # the 20 ms rebuild threshold spuriously.
+    # the jump tolerance spuriously.
     samples_per_call = 1102
     input_pcm = bytes(samples_per_call * 4)
     n_calls = 40_800
@@ -4425,7 +4292,7 @@ def test_resampler_pending_input_ts_has_zero_cumulative_drift_at_44100_source() 
     assert drift == 0, (
         f"pending_input_timestamp_us drifted {drift}µs over {n_calls} calls — "
         "regression of the input-side residue accumulator. This would eventually "
-        "cross the 20ms drift threshold and trigger a spurious graph rebuild."
+        "cross the jump tolerance and trigger a spurious cursor jump."
     )
 
 

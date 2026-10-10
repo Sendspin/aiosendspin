@@ -57,8 +57,11 @@ _PCM_SEQUENCE_YIELD_INTERVAL_US = 500_000
 _DITHER_METHOD_TRIANGULAR_HP = "triangular_hp"
 # Maximum allowed drift between transformer's internal timeline and the expected output
 # timestamp before we discard the transformer's timeline. Normal codec buffering delays are
-# < 100ms; this threshold catches the accumulated drift from timeline rebasing.
+# < 100ms. This threshold catches timeline jumps the transformer did not follow.
 _TRANSFORMER_DRIFT_THRESHOLD_US = 500_000  # 500ms
+# Input timestamp jumps up to this size are rounding and stay contiguous. Larger jumps
+# (timeline rebases, skipped commits) are followed by every resampler and transformer.
+_TIMELINE_JUMP_TOLERANCE_US = 1_000
 
 
 class _AudioFilterGraph(Protocol):
@@ -306,14 +309,14 @@ class _ResamplerState:
     where this isn't a whole number (e.g. 44.1kHz), `int(...)` truncation accumulates
     backward drift over time. We track the unconsumed numerator across calls so
     cumulative pending exactly matches sample-derived elapsed time. Reset to 0
-    whenever pending is rebased onto a fresh anchor (drift_reset, init)."""
+    on init and whenever pending moves by an input jump."""
     pending_input_timestamp_us: int | None = None
     """Expected timestamp of the next input frame. Advances by input duration per call
     and is used to detect genuine input-timeline gaps independent of resampler FIR
     latency, which can make the output-side `pending_timestamp_us` lag the input by
     tens of ms even during steady-state operation (notably with soxr precision=30)."""
     pending_input_ts_residue: int = 0
-    """Input-side counterpart to `pending_ts_residue`. Reset on init and drift rebase."""
+    """Input-side counterpart to `pending_ts_residue`. Reset on init and on an input jump."""
     is_passthrough: bool = False
     """True when source and target formats are identical — skip graph processing."""
 
@@ -389,7 +392,7 @@ def _create_resampler_state(
     )
 
 
-def _resample_pcm_standalone(  # noqa: PLR0915
+def _resample_pcm_standalone(
     resampler_state: _ResamplerState,
     source_pcm: bytes,
     source_format: AudioFormat,
@@ -421,36 +424,20 @@ def _resample_pcm_standalone(  # noqa: PLR0915
         resampler_state.pending_ts_residue = 0
         resampler_state.pending_input_timestamp_us = input_timestamp_us
         resampler_state.pending_input_ts_residue = 0
-    else:
-        drift_us = abs(resampler_state.pending_input_timestamp_us - input_timestamp_us)
-        if drift_us > 20_000:
-            # Flush the old graph to release FIR filter tails cleanly.
-            # Flushed samples are discarded — they belong to the stale timeline.
-            if resampler_state.graph is not None:
-                try:
-                    resampler_state.graph.push(None)
-                    _drain_audio_graph(resampler_state.graph)
-                except (EOFError, OSError):
-                    pass
-                resampler_state.graph = _build_resample_graph(
-                    source_av_format=resampler_state.source_av_format,
-                    source_layout=resampler_state.source_av_layout,
-                    source_sample_rate=resampler_state.source_sample_rate,
-                    target_av_format=resampler_state.target_av_format,
-                    target_layout=resampler_state.target_layout,
-                    target_sample_rate=resampler_state.key.target_sample_rate,
-                    dither_method=resampler_state.key.dither_method,
-                )
-            resampler_state.pending_timestamp_us = input_timestamp_us
-            # Reset the residue accumulator: pending has been rebased onto a fresh
-            # anchor and any carried fractional µs from the prior segment are stale.
-            resampler_state.pending_ts_residue = 0
-            resampler_state.pending_input_timestamp_us = input_timestamp_us
-            resampler_state.pending_input_ts_residue = 0
 
     # Both cursors are guaranteed initialized above — narrow for mypy.
     assert resampler_state.pending_timestamp_us is not None
     assert resampler_state.pending_input_timestamp_us is not None
+
+    jump_us = input_timestamp_us - resampler_state.pending_input_timestamp_us
+    if abs(jump_us) > _TIMELINE_JUMP_TOLERANCE_US:
+        # Keep the graph and its buffered samples, only move both cursors by the jump.
+        resampler_state.pending_timestamp_us += jump_us
+        # Reset the residue accumulator: pending has moved by the input jump
+        # and any carried fractional µs from the prior segment are dropped.
+        resampler_state.pending_ts_residue = 0
+        resampler_state.pending_input_timestamp_us = input_timestamp_us
+        resampler_state.pending_input_ts_residue = 0
 
     # Calculate sample count from input
     bytes_per_sample = source_format.bit_depth // 8
@@ -813,6 +800,8 @@ class PushStream:
         self._transform_key_cache: dict[tuple[int, int], TransformKey] = {}
         # Last encoded input end timestamp per TransformKey for long-gap reset handling.
         self._transform_last_input_end_us: dict[TransformKey, int] = {}
+        # Sum of the input timeline jumps each transformer has followed, per TransformKey.
+        self._transform_ts_offset_us: dict[TransformKey, int] = {}
         # Live encoding runs on a worker thread. Transformer resets from the loop
         # take this lock so a reset never interleaves with an in-progress encode.
         self._transformer_lock = threading.Lock()
@@ -1646,7 +1635,7 @@ class PushStream:
         output_ts: int,
         duration_us: int,
     ) -> list[tuple[bytes, int, int]]:
-        """Encode PCM while resetting transformer state after long production gaps."""
+        """Encode PCM for a TransformKey, following input timeline jumps with a per-key offset."""
         last_input_end_us = self._transform_last_input_end_us.get(tkey)
         if (
             transformer is not None
@@ -1655,15 +1644,23 @@ class PushStream:
         ):
             transformer.reset()
 
+        # The transformer keeps a contiguous timeline, offset from the input by every jump.
+        offset_us = self._transform_ts_offset_us.get(tkey, 0)
+        if (
+            transformer is not None
+            and last_input_end_us is not None
+            and abs(output_ts - last_input_end_us) > _TIMELINE_JUMP_TOLERANCE_US
+        ):
+            offset_us += output_ts - last_input_end_us
+            self._transform_ts_offset_us[tkey] = offset_us
+
         # Reset transformer if its internal timeline has drifted too far from the
-        # expected output position. This catches gradual drift from timeline rebasing
-        # (when audio production is slower than real-time, each commit's rebase shifts
-        # timestamps forward, but the transformer's internal timeline only advances by
-        # the actual audio duration).
+        # expected output position. This catches a timeline jump that was not followed
+        # above, for example right after `_transform_last_input_end_us` was dropped.
         if (
             transformer is not None
             and transformer.pending_timestamp_us is not None
-            and abs(transformer.pending_timestamp_us - (output_ts + duration_us))
+            and abs(transformer.pending_timestamp_us - (output_ts - offset_us + duration_us))
             > _TRANSFORMER_DRIFT_THRESHOLD_US
         ):
             transformer.reset()
@@ -1671,11 +1668,13 @@ class PushStream:
         encoded = _encode_for_transform_key(
             transformer,
             pcm_data,
-            output_ts,
+            output_ts - offset_us,
             duration_us,
         )
         self._transform_last_input_end_us[tkey] = output_ts + duration_us
-        return encoded
+        if not offset_us:
+            return encoded
+        return [(data, ts + offset_us, dur) for data, ts, dur in encoded]
 
     def _encode_transforms(
         self,
@@ -1723,6 +1722,7 @@ class PushStream:
             pcm_data = resampled.pcm_data
             output_ts = resampled.output_start_ts
             duration_us = int(resampled.sample_count * 1_000_000 / rate) if rate > 0 else 0
+            sample_count = resampled.sample_count
             needs_s32_to_s24_conversion = resampled.needs_s32_to_s24_conversion
 
             # Quantize float PCM once per pcm_key — all TransformKeys sharing this
@@ -1749,6 +1749,7 @@ class PushStream:
                 pcm_data = edge_quantized.pcm_data
                 output_ts = edge_quantized.output_start_ts
                 duration_us = int(edge_quantized.sample_count * 1_000_000 / rate) if rate > 0 else 0
+                sample_count = edge_quantized.sample_count
                 needs_s32_to_s24_conversion = edge_quantized.needs_s32_to_s24_conversion
 
             grouped_by_key: defaultdict[
@@ -1762,21 +1763,27 @@ class PushStream:
                 roles_by_transform[tkey].extend(role for _client, role, _req in grouped)
                 if self._catchup_state.get(tkey) == "catching_up":
                     continue
-                # Skip a chunk catch-up already replayed to avoid a duplicate at the seam.
-                key_cache = self._role_chunk_cache.get(tkey)
-                if key_cache and key_cache[-1].timestamp_us + key_cache[-1].duration_us > output_ts:
-                    continue
+                key_pcm, key_ts, key_duration_us = pcm_data, output_ts, duration_us
+                # Drop what this key's encoder already received, for example from catch-up.
+                input_end_us = self._transform_last_input_end_us.get(tkey)
+                if input_end_us is not None and input_end_us > output_ts and sample_count:
+                    skip = ((input_end_us - output_ts) * rate + 500_000) // 1_000_000
+                    if skip >= sample_count:
+                        continue
+                    key_pcm = pcm_data[skip * len(pcm_data) // sample_count :]
+                    key_ts = output_ts + skip * 1_000_000 // rate
+                    key_duration_us = output_ts + duration_us - key_ts
                 if tkey in encode_tasks:
                     continue
                 transformer = grouped[0][2].transformer
-                transformed_pcm = pcm_data
+                transformed_pcm = key_pcm
                 if (
                     needs_s32_to_s24_conversion
                     and depth == 24
                     and isinstance(transformer, PcmPassthrough)
                 ):
                     transformed_pcm = _convert_s32_to_s24(transformed_pcm)
-                encode_tasks[tkey] = (transformer, transformed_pcm, output_ts, duration_us)
+                encode_tasks[tkey] = (transformer, transformed_pcm, key_ts, key_duration_us)
 
         # TransformKey -> list of (data, timestamp_us, duration_us)
         transformed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
@@ -2369,6 +2376,12 @@ class PushStream:
                     target_format,
                 )
                 resamplers[current_resampler_key] = resampler_state
+            elif (
+                resampler_state.pending_input_timestamp_us is not None
+                and resampler_state.pending_input_timestamp_us > chunk.timestamp_us
+            ):
+                # Drop a chunk starting before the input already consumed, like live delivery.
+                continue
             prev_resampler_key = current_resampler_key
 
             resampled = _resample_pcm_standalone(
@@ -2740,6 +2753,7 @@ class PushStream:
         self._historical_buffers.clear()
         self._historical_start_us.clear()
         self._transform_last_input_end_us.clear()
+        self._transform_ts_offset_us.clear()
         self._channels_with_committed_audio.clear()
 
     def clear(self, *, end_roles: AbstractSet[Role] = frozenset()) -> None:
@@ -2788,6 +2802,7 @@ class PushStream:
             for transformer in reset_transformers.values():
                 transformer.reset()
             self._transform_last_input_end_us.clear()
+            self._transform_ts_offset_us.clear()
 
         # Clear role tracking state
         self._started_roles.clear()

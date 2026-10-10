@@ -10,6 +10,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import numpy as np
+
+from aiosendspin.audio.codecs import create_decoder
 from aiosendspin.models.core import StreamClearMessage, StreamEndMessage, StreamStartMessage
 from aiosendspin.models.player import PLAYER_AUDIO_HEADER_SIZE, unpack_player_audio_header
 from aiosendspin.models.types import AudioCodec
@@ -90,8 +93,6 @@ def best_lag_samples(
     """Return lag (samples) with the best normalized correlation."""
     if not received or not expected:
         raise ValueError("signals must be non-empty")
-
-    import numpy as np  # noqa: PLC0415
 
     n = min(len(received), len(expected))
     rec = np.array(received[:n], dtype=np.float64)
@@ -561,3 +562,87 @@ def assert_audible_sync(
 
     spread = max(signed_lag_us_by_player.values()) - min(signed_lag_us_by_player.values())
     assert spread <= max_skew_us, f"player signed lag spread {spread:.2f}us > {max_skew_us}us"
+
+
+def band_limited_noise(frames: int, sample_rate: int) -> np.ndarray:
+    """Stereo band-limited noise: sharp, non-periodic autocorrelation that survives codecs."""
+    rng = np.random.default_rng(1234)
+    spectrum = np.fft.rfft(rng.standard_normal(frames))
+    freqs = np.fft.rfftfreq(frames, 1 / sample_rate)
+    spectrum[(freqs < 100) | (freqs > 3_000)] = 0
+    mono = np.fft.irfft(spectrum, frames)
+    mono *= 0.4 / np.max(np.abs(mono))
+    return np.repeat(mono[:, None], 2, axis=1)
+
+
+@dataclass(slots=True)
+class PlayerTimeline:
+    """Decoded mono audio of one player placed on its wire timestamps."""
+
+    start_us: int
+    sample_rate: int
+    samples: np.ndarray
+
+    def at(self, times_us: np.ndarray) -> np.ndarray:
+        """Interpolated samples at the given wire times, silent outside the audio."""
+        own_times = self.start_us + np.arange(len(self.samples)) * 1e6 / self.sample_rate
+        return np.interp(times_us, own_times, self.samples, left=0.0, right=0.0)
+
+    @property
+    def end_us(self) -> float:
+        """Wire time just past the last sample."""
+        return self.start_us + len(self.samples) * 1e6 / self.sample_rate
+
+
+def player_timeline(events: Sequence[Any]) -> PlayerTimeline:
+    """Decode the last stream segment the player received and place it by timestamp."""
+    segments = encoded_segments_from_events(events)
+    assert segments, "player received no audio"
+    seg = segments[-1]
+    decoder = create_decoder(
+        seg.codec.value,
+        sample_rate=seg.sample_rate,
+        bit_depth=16,
+        channels=seg.channels,
+        codec_header=None,
+    )
+    first_ts = seg.packets[0].timestamp_us
+    pieces: list[tuple[int, np.ndarray]] = []
+    for packet in seg.packets:
+        pcm = np.frombuffer(decoder.decode(packet.payload), dtype=np.int16)
+        left = pcm[0 :: seg.channels].astype(np.float64)
+        offset = round((packet.timestamp_us - first_ts) * seg.sample_rate / 1_000_000)
+        pieces.append((offset, left))
+    total = max(offset + len(left) for offset, left in pieces)
+    samples = np.zeros(total)
+    for offset, left in pieces:
+        samples[offset : offset + len(left)] = left
+    return PlayerTimeline(start_us=first_ts, sample_rate=seg.sample_rate, samples=samples)
+
+
+def content_offset_us(
+    reference: PlayerTimeline,
+    other: PlayerTimeline,
+    *,
+    window_start_us: int,
+    window_us: int = 1_000_000,
+    max_offset_us: int = 400_000,
+) -> float:
+    """How much later `other` plays the same content as `reference` (negative is earlier)."""
+    step_us = 1e6 / 96_000
+    max_lag = int(max_offset_us / step_us)
+    times = window_start_us + np.arange(int(window_us / step_us)) * step_us
+    ref = reference.at(times)
+    padded_times = (
+        window_start_us - max_lag * step_us + np.arange(len(times) + 2 * max_lag) * step_us
+    )
+    oth = other.at(padded_times)
+    size = 1 << (len(oth) + len(ref)).bit_length()
+    full = np.fft.irfft(np.fft.rfft(oth, size) * np.conj(np.fft.rfft(ref, size)), size)
+    corr = full[: 2 * max_lag + 1]
+    best = int(np.argmax(corr))
+    shift = float(best)
+    if 0 < best < len(corr) - 1:
+        y0, y1, y2 = corr[best - 1], corr[best], corr[best + 1]
+        shift += 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2)
+    return (shift - max_lag) * step_us
