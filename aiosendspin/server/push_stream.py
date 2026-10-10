@@ -1992,7 +1992,8 @@ class PushStream:
                 stale_transform_keys.add(self._transform_key_cache[cache_key])
                 self._transform_key_cache.pop(cache_key, None)
         for stale_tkey in stale_transform_keys:
-            self._transform_last_input_end_us.pop(stale_tkey, None)
+            if not self._other_roles_use_transform_key(stale_tkey, role):
+                self._transform_last_input_end_us.pop(stale_tkey, None)
 
     def on_role_format_changed(self, role: Role, *, resume_at_us: int | None = None) -> None:
         """Rejoin a role whose audio format changed mid-stream.
@@ -2011,10 +2012,10 @@ class PushStream:
                 stale_transform_keys.add(self._transform_key_cache[cache_key])
                 self._transform_key_cache.pop(cache_key, None)
         for stale_tkey in stale_transform_keys:
-            self._transform_last_input_end_us.pop(stale_tkey, None)
             if not self._other_roles_use_transform_key(stale_tkey, role):
                 # Sole user of the old format: drop its encoded cache and
                 # reset the encoder so a change back starts clean.
+                self._transform_last_input_end_us.pop(stale_tkey, None)
                 self._role_chunk_cache.pop(stale_tkey, None)
                 transformer = self._group.transformer_pool.get(stale_tkey)
                 if transformer is not None:
