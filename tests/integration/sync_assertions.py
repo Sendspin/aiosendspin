@@ -8,6 +8,7 @@ import math
 from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any, Literal
 
 import numpy as np
@@ -646,3 +647,46 @@ def content_offset_us(
         y0, y1, y2 = corr[best - 1], corr[best], corr[best + 1]
         shift += 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2)
     return (shift - max_lag) * step_us
+
+
+@dataclass(slots=True)
+class WireSpan:
+    """One audio chunk on the wire."""
+
+    segment: int
+    start_us: int
+    end_us: float
+    sent_at_us: int | None = None
+
+
+def _segment_spans(segment: EncodedSegment, index: int) -> list[WireSpan]:
+    decoder = create_decoder(
+        segment.codec.value,
+        sample_rate=segment.sample_rate,
+        bit_depth=16,
+        channels=segment.channels,
+        codec_header=None,
+    )
+    spans: list[WireSpan] = []
+    for packet in segment.packets:
+        frames = len(decoder.decode(packet.payload)) // (2 * segment.channels)
+        end_us = packet.timestamp_us + frames * 1e6 / segment.sample_rate
+        spans.append(WireSpan(index, packet.timestamp_us, end_us))
+    return spans
+
+
+def wire_spans(events: Sequence[Any]) -> list[WireSpan]:
+    """Every audio chunk the player received, in send order, tagged with its stream segment."""
+    spans: list[WireSpan] = []
+    for index, segment in enumerate(encoded_segments_from_events(events)):
+        spans.extend(_segment_spans(segment, index))
+    return spans
+
+
+def jumps_us(spans: Sequence[WireSpan]) -> list[float]:
+    """Gaps between consecutive chunks, negative where a chunk overlaps the previous one."""
+    return [
+        later.start_us - earlier.end_us
+        for earlier, later in pairwise(spans)
+        if abs(later.start_us - earlier.end_us) > 1
+    ]

@@ -10,6 +10,8 @@ from uuid import UUID
 import numpy as np
 import pytest
 
+from aiosendspin.models.core import ClientStatePayload
+from aiosendspin.models.player import PlayerStatePayload, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import MAIN_CHANNEL
@@ -22,7 +24,9 @@ from tests.integration.sync_assertions import (
     PlayerTimeline,
     band_limited_noise,
     content_offset_us,
+    jumps_us,
     player_timeline,
+    wire_spans,
 )
 from tests.integration.sync_harness import (
     CaptureConnection,
@@ -96,6 +100,7 @@ async def _scenario(
     *,
     grouped: Sequence[str],
     channels: dict[str, UUID] | None = None,
+    extra_formats: dict[str, list[SupportedAudioFormat]] | None = None,
 ) -> _Scenario:
     loop = asyncio.get_running_loop()
     clock = ManualClock()
@@ -104,7 +109,11 @@ async def _scenario(
     connections: dict[str, CaptureConnection] = {}
     for name, (codec, rate) in players.items():
         clients[name], connections[name] = make_pool_player(
-            server, name, codec=codec, sample_rate=rate
+            server,
+            name,
+            codec=codec,
+            sample_rate=rate,
+            extra_formats=(extra_formats or {}).get(name),
         )
     group = clients[grouped[0]].group
     for name in grouped[1:]:
@@ -140,7 +149,7 @@ async def test_resampled_member_stays_aligned_across_rebases() -> None:
 
 
 async def test_codecs_stay_aligned_across_accumulated_rebases() -> None:
-    """Encoders with different frame sizes must follow accumulated rebases together."""
+    """Encoders with different frame sizes follow accumulated rebases together and drop no audio."""
     sc = await _scenario(
         {
             "pcm-48k": (AudioCodec.PCM, 48_000),
@@ -159,6 +168,9 @@ async def test_codecs_stay_aligned_across_accumulated_rebases() -> None:
         f"after 30 rebases of 20 ms the codecs disagree: {_report(tail)} "
         f"(before the rebases: {_report(head)}, tolerance {_TOLERANCE_US}us)"
     )
+    for name, conn in sc.connections.items():
+        gaps = jumps_us(wire_spans(conn.events))
+        assert all(abs(gap - 20_000) <= _TOLERANCE_US for gap in gaps), f"{name} gaps: {gaps}"
 
 
 async def test_flac_member_follows_rebase_before_its_first_packet() -> None:
@@ -177,8 +189,12 @@ async def test_flac_member_follows_rebase_before_its_first_packet() -> None:
     )
 
 
-async def test_shared_encoder_follows_rebase_after_a_member_leaves() -> None:
-    """A member leaving between a stall and the next commit must not hide the rebase."""
+@pytest.mark.parametrize("format_change", [False, True], ids=["leave", "format-change"])
+async def test_shared_encoder_follows_rebase_after_a_member_stops_using_it(
+    format_change: bool,  # noqa: FBT001
+) -> None:
+    """A member dropping a shared encoder right after a stall must not hide the rebase."""
+    opus = SupportedAudioFormat(codec=AudioCodec.OPUS, channels=2, sample_rate=48_000, bit_depth=16)
     sc = await _scenario(
         {
             "pcm-48k": (AudioCodec.PCM, 48_000),
@@ -186,9 +202,16 @@ async def test_shared_encoder_follows_rebase_after_a_member_leaves() -> None:
             "flac-b": (AudioCodec.FLAC, 48_000),
         },
         grouped=["pcm-48k", "flac-a", "flac-b"],
+        extra_formats={"flac-b": [opus]},
     )
+    role = sc.clients["flac-b"].role("player@v1")
+    assert role is not None
     for index in range(_TOTAL_SLICES):
-        if index == 31:
+        if index == 31 and format_change:
+            role.on_client_state(ClientStatePayload(player=PlayerStatePayload(format=opus)))
+            for _ in range(5):
+                await asyncio.sleep(0)
+        elif index == 31:
             await sc.group.remove_client(sc.clients["flac-b"])
         await sc.commit(index, stall_us=30_000 if index == 30 else 0)
     del sc.connections["flac-b"]

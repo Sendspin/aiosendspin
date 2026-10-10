@@ -179,13 +179,15 @@ def make_pool_player(
     *,
     codec: AudioCodec,
     sample_rate: int,
+    extra_formats: list[SupportedAudioFormat] | None = None,
 ) -> tuple[SendspinClient, CaptureConnection]:
     """Build a connected player that takes its encoder from the group transformer pool."""
     client, _group, conn = make_player(
         server,
         client_id,
         supported_formats=[
-            SupportedAudioFormat(codec=codec, channels=2, sample_rate=sample_rate, bit_depth=16)
+            SupportedAudioFormat(codec=codec, channels=2, sample_rate=sample_rate, bit_depth=16),
+            *(extra_formats or []),
         ],
         buffer_capacity=50_000_000,
     )
