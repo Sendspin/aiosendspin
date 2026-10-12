@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable
 from contextlib import suppress
 from types import SimpleNamespace
@@ -294,6 +295,7 @@ async def test_connect_to_client_and_wait_retries_initial_failure_past_backoff_c
 @pytest.mark.asyncio
 async def test_connect_to_client_and_wait_returns_on_initial_success(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Waiting connect call should return once first connection succeeds."""
     session = _SuccessfulInitialConnectSession()
@@ -304,6 +306,8 @@ async def test_connect_to_client_and_wait_returns_on_initial_success(
         """Connection double used to bypass full websocket lifecycle."""
 
         closing = False
+        goodbye_reason = None
+        should_retry_server_initiated_connection = False
 
         def __init__(
             self,
@@ -321,9 +325,13 @@ async def test_connect_to_client_and_wait_returns_on_initial_success(
 
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _FakeConnection)
 
-    await server.connect_to_client_and_wait(url)
+    with caplog.at_level(logging.ERROR, logger="aiosendspin.server.server"):
+        await server.connect_to_client_and_wait(url)
+        await _wait_for_connection_task_cleanup(server, url)
 
     assert session.calls == 1
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert not caplog.records
 
 
 @pytest.mark.asyncio
@@ -563,13 +571,18 @@ async def test_register_client_url_keeps_connection_when_url_unchanged() -> None
     server = _make_server(session)
     url = "ws://127.0.0.1:9999/sendspin"
 
+    server.register_client_url("client-1", url)
     server.connect_to_client(url)
     task = server._connection_tasks.get(url)  # noqa: SLF001
     assert task is not None
 
     server.register_client_url("client-1", url)
     assert server._connection_tasks.get(url) is task  # noqa: SLF001
-    assert not task.cancelled()
+    assert task.cancelling() == 0
+
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
