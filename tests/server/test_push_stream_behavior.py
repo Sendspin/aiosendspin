@@ -190,6 +190,7 @@ class _DummyRole:
 class _DummyClient:
     def __init__(self, roles: list[_DummyRole]) -> None:
         self.is_connected = True
+        self.has_warm_reattached_roles = False
         self.active_roles = roles
         self.connection = _FakeConnection()
 

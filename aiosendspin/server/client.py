@@ -107,6 +107,7 @@ class SendspinClient:
         self._connected: bool = False
         self._added_event_fired: bool = False
         self._roles_warm_disconnected: bool = False
+        self._roles_warm_reattached: bool = False
         self._roles_cold_preinitialized: bool = False
         self._roles_attached: bool = False
         # Families of roles activated on the current connection that still wait for
@@ -267,6 +268,11 @@ class SendspinClient:
     def has_warm_disconnected_roles(self) -> bool:
         """Whether role instances are retained while transport is down."""
         return self._roles_warm_disconnected and self._connection is None
+
+    @property
+    def has_warm_reattached_roles(self) -> bool:
+        """Whether retained role instances were reattached and await the initial client/state."""
+        return self._roles_warm_reattached and self._connection is not None and not self._connected
 
     @property
     def has_cold_preinitialized_roles(self) -> bool:
@@ -506,6 +512,7 @@ class SendspinClient:
             self._hard_detach_roles()
         self._connect_active_roles(active_roles)
 
+        self._roles_warm_reattached = self._roles_warm_disconnected
         self._roles_warm_disconnected = False
         self._roles_cold_preinitialized = False
         self._roles_attached = True
