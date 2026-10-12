@@ -173,6 +173,15 @@ def _get_first_valid_ip(addresses: list[str]) -> str | None:
     return None
 
 
+def _ended_without_redial(conn: SendspinConnection) -> bool:
+    """Return whether a dial's session leaves redialing to an explicit call."""
+    reason = conn.goodbye_reason
+    # With no goodbye and no server-side close, a non-playback session dropped.
+    return reason in _NO_REDIAL_GOODBYE_REASONS or (
+        reason is None and not conn._closing  # noqa: SLF001
+    )
+
+
 class SendspinServer:
     """Sendspin Server implementation to connect to and manage many Sendspin clients."""
 
@@ -995,11 +1004,7 @@ class SendspinServer:
                         first_connection_succeeded = False
                     elif not conn.should_retry_server_initiated_connection:
                         reason = conn.goodbye_reason
-                        # With no goodbye and no server-side close, a non-playback session dropped.
-                        if url in self._mdns_client_urls.values() and (
-                            reason in _NO_REDIAL_GOODBYE_REASONS
-                            or (reason is None and not conn._closing)  # noqa: SLF001
-                        ):
+                        if url in self._mdns_client_urls.values() and _ended_without_redial(conn):
                             self._mdns_goodbye_urls.add(url)
                         logger.debug(
                             "Not reconnecting to %s (goodbye reason: %s)",
@@ -1282,7 +1287,9 @@ class SendspinServer:
         host = f"[{address}]" if ip_address(address).version == 6 else address
         url = f"ws://{host}:{port}{path}"
         old_url = self._mdns_client_urls.get(name)
-        if state_change is ServiceStateChange.Updated and old_url in self._mdns_goodbye_urls:
+        if state_change is ServiceStateChange.Updated and (
+            old_url in self._mdns_goodbye_urls or self._is_closing_without_redial(old_url)
+        ):
             logger.debug("Not redialing %s after its goodbye on an mDNS update", name)
             if url != old_url:
                 self._mdns_goodbye_urls.discard(old_url)
@@ -1314,6 +1321,16 @@ class SendspinServer:
             )
         self._mdns_client_urls[name] = url
         self._dial(url, connection_reason=self.get_connection_reason(url))
+
+    def _is_closing_without_redial(self, url: str | None) -> bool:
+        conn = self._dial_connections.get(url) if url is not None else None
+        return (
+            conn is not None
+            and conn._disconnecting  # noqa: SLF001
+            and not conn.should_retry_server_initiated_connection
+            and url not in self._redial_urls
+            and _ended_without_redial(conn)
+        )
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)

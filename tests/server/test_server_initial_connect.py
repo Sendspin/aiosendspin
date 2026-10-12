@@ -855,6 +855,70 @@ async def test_dial_while_connection_closes_after_goodbye(
     assert session.calls == expected_dials
 
 
+@pytest.mark.parametrize(
+    ("goodbye_reason", "expect_dial"),
+    [
+        (GoodbyeReason.USER_REQUEST, False),
+        # A playback session that dropped without goodbye.
+        (None, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mdns_address_change_while_connection_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    goodbye_reason: GoodbyeReason | None,
+    expect_dial: bool,  # noqa: FBT001
+) -> None:
+    """A new mDNS address seen while the connection closes is dialed unless a goodbye forbids it."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+    old_url = "ws://10.0.0.2:9999/sendspin"
+    new_url = "ws://10.0.0.7:9999/sendspin"
+    dialed: list[bool] = []
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+
+    class _ClosingConnection:
+        """Connection double whose address changes while it closes."""
+
+        should_retry_server_initiated_connection = goodbye_reason is None
+        _closing = goodbye_reason is not None
+        _disconnecting = True
+
+        def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
+            self.goodbye_reason = goodbye_reason
+
+        async def handle_client(self) -> None:
+            if session.calls > 1:
+                return
+            _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
+            await server._handle_service_added(  # noqa: SLF001
+                MagicMock(), service_type, service_name, ServiceStateChange.Updated
+            )
+            dialed.append(new_url in server._connection_tasks)  # noqa: SLF001
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _ClosingConnection)
+
+    await server._handle_service_added(  # noqa: SLF001
+        MagicMock(), service_type, service_name, ServiceStateChange.Added
+    )
+    for _ in range(50):
+        if dialed:
+            break
+        await asyncio.sleep(0)
+
+    assert dialed == [expect_dial]
+    assert (new_url in server._mdns_goodbye_urls) is not expect_dial  # noqa: SLF001
+    for url in (old_url, new_url):
+        server.disconnect_from_client(url)
+        await _wait_for_connection_task_cleanup(server, url)
+
+
 @pytest.mark.asyncio
 async def test_failed_redial_while_connection_closes_gives_up(
     monkeypatch: pytest.MonkeyPatch,
