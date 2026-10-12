@@ -2415,6 +2415,8 @@ class SendspinConnection:
     def unpair(self) -> None:
         """Tell the client to drop this server's pairing record (it then closes)."""
         self.send_priority_message(ServerUnpairMessage())
+
+    def _arm_unpair_goodbye_timeout(self) -> None:
         # An unpaired session ignores server/unpair and stays up.
         if self._disconnecting or not self._is_long_term_paired:
             return
@@ -3190,6 +3192,8 @@ class SendspinConnection:
             else:
                 self._streaming_roles.difference_update(message.payload.roles)
         await wsock.send_str(message.to_json())
+        if isinstance(message, ServerUnpairMessage):
+            self._arm_unpair_goodbye_timeout()
 
     async def _send_binary_data(
         self,
