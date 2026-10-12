@@ -570,6 +570,9 @@ class SendspinServer:
         A ``PLAYBACK`` reason applies to the next connection only. Later reconnects use
         ``DISCOVERY``.
         """
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+        if connection_reason is ConnectionReason.MANAGEMENT:
+            warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
         self._redial_if_closing(url)
         self._dial(
             url,
@@ -588,9 +591,6 @@ class SendspinServer:
     ) -> None:
         self._mdns_goodbye_urls.discard(url)
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
-        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-        if connection_reason is ConnectionReason.MANAGEMENT:
-            warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
