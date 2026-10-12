@@ -194,11 +194,7 @@ class PlayerV1Role(Role):
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:
         """Return handling policy for AUDIO_CHUNK messages."""
         if message_type == BinaryMessageType.AUDIO_CHUNK.value:
-            return BinaryHandling(
-                drop_late=True,
-                grace_period_us=2_000_000,  # 2 seconds grace for initial buffering
-                buffer_track=True,
-            )
+            return BinaryHandling(drop_late=True, buffer_track=True)
         return None
 
     def get_buffer_tracker(self) -> BufferTracker | None:
@@ -317,7 +313,7 @@ class PlayerV1Role(Role):
             return
 
         # New stream boundary: clear prior stream timing/log state so
-        # late-drop grace period is measured from this stream's first chunk.
+        # late-drop timing is measured from this stream's first chunk.
         self.reset_binary_timing()
         self._pending_stream_start = True
 

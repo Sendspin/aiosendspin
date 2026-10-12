@@ -552,6 +552,26 @@ def test_check_late_binary_uses_player_effective_timestamp() -> None:
         loop.close()
 
 
+def test_check_late_binary_drops_past_due_player_chunk_at_stream_start() -> None:
+    """A player chunk that aged past its play time is dropped even right after stream start."""
+    loop = asyncio.new_event_loop()
+    try:
+        clock = ManualClock(now_us_value=10_000_000)
+        server = _DummyServer(loop=loop, clock=clock)
+        wsock = MagicMock()
+        wsock.closed = False
+        conn = SendspinConnection(server, wsock_client=wsock)
+        conn._transport = wsock  # noqa: SLF001
+
+        role = PlayerV1Role(client=_make_player_client_stub())
+        handling = role.get_binary_handling(BinaryMessageType.AUDIO_CHUNK.value)
+
+        entry = _RoleQueueEntry(epoch=0, timestamp_us=9_900_000)
+        assert conn._check_late_binary(handling, role, entry) is True  # noqa: SLF001
+    finally:
+        loop.close()
+
+
 @pytest.mark.asyncio
 async def test_server_initiated_connection_starts_writer_task() -> None:
     """Server-initiated connections must start a writer task so enqueued messages are sent."""
