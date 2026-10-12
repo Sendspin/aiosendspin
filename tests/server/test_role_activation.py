@@ -547,6 +547,18 @@ async def test_initial_state_completes_after_its_roles_were_removed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unpair_goodbye_timeout_starts_once_server_unpair_is_sent() -> None:
+    """A server/unpair still queued behind a paused writer does not start the goodbye timeout."""
+    conn, fake = await _connect(_hello([Roles.CONTROLLER.value]), category=PskCategory.LONG_TERM)
+
+    conn.unpair()
+    assert conn._unpair_goodbye_timeout_handle is None  # noqa: SLF001
+
+    assert await _drain_priority(conn, fake) == ["server/unpair"]
+    assert conn._unpair_goodbye_timeout_handle is not None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_lenient_server_flags_a_missing_initial_state_of_stateless_roles() -> None:
     """A controller-only client connects at once, and is flagged when no client/state follows."""
     conn, _fake = await _connect(_hello([Roles.CONTROLLER.value]), send_state=False)

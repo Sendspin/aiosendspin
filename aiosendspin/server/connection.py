@@ -205,6 +205,9 @@ QUIESCE_TIMEOUT_S: float = 30.0
 # How long a lenient server waits for the client/state an activation requires.
 _CLIENT_STATE_TIMEOUT_S = 5.0
 
+# How long a paired client may take to send client/goodbye after server/unpair.
+_UNPAIR_GOODBYE_TIMEOUT_S = 5.0
+
 # Distinct unknown message types warned about per connection; later ones log at debug.
 _MAX_WARNED_UNKNOWN_TYPES = 16
 
@@ -458,6 +461,7 @@ class SendspinConnection:
         self._receives_group_updates = False
         self._initial_state_timeout_handle: asyncio.TimerHandle | None = None
         self._activation_state_timeout_handle: asyncio.TimerHandle | None = None
+        self._unpair_goodbye_timeout_handle: asyncio.TimerHandle | None = None
         # Binary held while a role that receives binary awaits the initial client/state.
         # The spec forbids sending binary before it; flushed once the state arrives.
         # Each entry carries the role's epoch at buffer time so a stream boundary
@@ -932,6 +936,9 @@ class SendspinConnection:
             self._initial_state_timeout_handle.cancel()
             self._initial_state_timeout_handle = None
         self._cancel_activation_state_timeout()
+        if self._unpair_goodbye_timeout_handle is not None:
+            self._unpair_goodbye_timeout_handle.cancel()
+            self._unpair_goodbye_timeout_handle = None
 
         if self._pairing_task and not self._pairing_task.done():
             if self._pairing_message_queue is not None:
@@ -2409,6 +2416,24 @@ class SendspinConnection:
         """Tell the client to drop this server's pairing record (it then closes)."""
         self.send_priority_message(ServerUnpairMessage())
 
+    def _arm_unpair_goodbye_timeout(self) -> None:
+        # An unpaired session ignores server/unpair and stays up.
+        if self._disconnecting or not self._is_long_term_paired:
+            return
+        if self._unpair_goodbye_timeout_handle is not None:
+            self._unpair_goodbye_timeout_handle.cancel()
+        self._unpair_goodbye_timeout_handle = self._server.loop.call_later(
+            _UNPAIR_GOODBYE_TIMEOUT_S, self._unpair_goodbye_timeout_callback
+        )
+
+    def _unpair_goodbye_timeout_callback(self) -> None:
+        self._unpair_goodbye_timeout_handle = None
+        try:
+            self._flag_noncompliance("did not send client/goodbye after server/unpair in time")
+        except ClientComplianceError:
+            # A timer callback can't propagate into the message loop, so tear down here.
+            create_task(self.disconnect(retry_connection=False))
+
     async def _holds_record(self, client_id: str) -> bool:
         """Whether this server still holds a long-term pairing record for ``client_id``."""
         return await self._server.pairing_store.record_by_client_id(client_id) is not None
@@ -3167,6 +3192,8 @@ class SendspinConnection:
             else:
                 self._streaming_roles.difference_update(message.payload.roles)
         await wsock.send_str(message.to_json())
+        if isinstance(message, ServerUnpairMessage):
+            self._arm_unpair_goodbye_timeout()
 
     async def _send_binary_data(
         self,
