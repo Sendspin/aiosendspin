@@ -601,16 +601,6 @@ class TestFlacEncoder:
         assert encoder._initialized is False  # noqa: SLF001
         assert encoder._codec_header is None  # noqa: SLF001
 
-    def test_flac_encoder_frame_duration_us_default(self) -> None:
-        """FlacEncoder has default 25ms frame duration."""
-        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
-        assert encoder.frame_duration_us == 25_000
-
-    def test_flac_encoder_frame_duration_us_configurable(self) -> None:
-        """FlacEncoder frame duration is configurable."""
-        encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2, chunk_duration_us=50_000)
-        assert encoder.frame_duration_us == 50_000
-
     def test_flac_encoder_returns_list_of_frames(self) -> None:
         """FlacEncoder returns list of frames after codec internal buffering fills."""
         encoder = FlacEncoder(sample_rate=48000, bit_depth=16, channels=2)
@@ -693,6 +683,17 @@ class TestFlacEncoder:
                 f"Frame {i}: gap={gap}us, expected {frame_dur}us. "
                 f"Timestamps around gap: {timestamps[max(0, i - 2) : i + 2]}"
             )
+
+
+@pytest.mark.parametrize("encoder_type", [FlacEncoder, OpusEncoder])
+def test_encoder_frame_duration_us_known_before_first_chunk(
+    encoder_type: type[FlacEncoder | OpusEncoder],
+) -> None:
+    """Encoders report the frame duration they encode with before any audio."""
+    encoder = encoder_type(sample_rate=48000, bit_depth=16, channels=2)
+    before_us = encoder.frame_duration_us
+    encoder.process(bytes(4800), timestamp_us=0, duration_us=25_000)
+    assert encoder.frame_duration_us == before_us
 
 
 class TestFlacEncoderStreamInfo:
