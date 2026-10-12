@@ -1177,6 +1177,12 @@ class PushStream:
 
         self._commit_in_flight += 1
         try:
+            if not self._channel_timing:
+                # Load PyAV before the timeline is anchored so its first import costs no lead.
+                await _run_off_loop(_get_av)
+                if not self._is_generation_active(commit_generation):
+                    return self._stopped_commit_return_value()
+
             # Drain historical buffers
             historical = dict(self._historical_buffers)
             self._historical_buffers.clear()

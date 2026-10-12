@@ -13,6 +13,7 @@ import pytest
 from aiosendspin.models.core import ClientStatePayload, StreamClearMessage, StreamEndMessage
 from aiosendspin.models.player import PlayerStatePayload, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec
+from aiosendspin.server import push_stream
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
@@ -278,3 +279,30 @@ async def test_live_rebases_keep_every_member_at_min_buffer() -> None:
         if lacking:
             short[name] = (len(lacking), min(lacking))
     assert short == {}, f"members queued less than min_buffer (count, shortest us): {short}"
+
+
+async def test_first_chunk_lead_covers_loading_pyav(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first chunk leaves at least min_buffer + output_delay ahead when PyAV loads slowly."""
+    sc = await _group({"pcm-48k": (AudioCodec.PCM, 48_000)})
+    role = sc.clients["pcm-48k"].role("player@v1")
+    assert role is not None
+    role.min_buffer_ms = 500
+    role.output_delay_ms = 50
+    sends = _SendTimes(sc.connections["pcm-48k"], sc.clock)
+
+    get_av = push_stream._get_av  # noqa: SLF001
+    loaded = False
+
+    def load_slowly() -> object:
+        nonlocal loaded
+        if not loaded:
+            loaded = True
+            sc.clock.advance_us(100_000)
+        return get_av()
+
+    monkeypatch.setattr(push_stream, "_get_av", load_slowly)
+    await _commit_auto(sc, 0)
+
+    first = sends.spans(sc.connections["pcm-48k"].events)[0]
+    assert first.sent_at_us is not None
+    assert first.start_us - first.sent_at_us >= 550_000
