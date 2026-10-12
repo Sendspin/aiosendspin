@@ -173,6 +173,15 @@ def _get_first_valid_ip(addresses: list[str]) -> str | None:
     return None
 
 
+def _ended_without_redial(conn: SendspinConnection) -> bool:
+    """Return whether a dial's ended session leaves redialing to an explicit call."""
+    reason = conn.goodbye_reason
+    # With no goodbye and no server-side close, a non-playback session dropped.
+    return reason in _NO_REDIAL_GOODBYE_REASONS or (
+        reason is None and not conn._closing  # noqa: SLF001
+    )
+
+
 class SendspinServer:
     """Sendspin Server implementation to connect to and manage many Sendspin clients."""
 
@@ -995,11 +1004,7 @@ class SendspinServer:
                         first_connection_succeeded = False
                     elif not conn.should_retry_server_initiated_connection:
                         reason = conn.goodbye_reason
-                        # With no goodbye and no server-side close, a non-playback session dropped.
-                        if url in self._mdns_client_urls.values() and (
-                            reason in _NO_REDIAL_GOODBYE_REASONS
-                            or (reason is None and not conn._closing)  # noqa: SLF001
-                        ):
+                        if url in self._mdns_client_urls.values() and _ended_without_redial(conn):
                             self._mdns_goodbye_urls.add(url)
                         logger.debug(
                             "Not reconnecting to %s (goodbye reason: %s)",
