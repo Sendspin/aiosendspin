@@ -4185,6 +4185,42 @@ def test_resampler_passthrough_jump_clears_residue() -> None:
     assert state.pending_ts_residue == 1102 * 1_000_000 % 44100
 
 
+@pytest.mark.parametrize(("source_rate", "target_rate"), [(48_000, 44_100), (44_100, 48_000)])
+def test_resampler_jumps_keep_output_on_the_input_timeline(
+    source_rate: int, target_rate: int
+) -> None:
+    """Repeated input jumps must not drift the output cursor away from the input cursor."""
+    source = AudioFormat(sample_rate=source_rate, bit_depth=16, channels=2)
+    target = AudioFormat(sample_rate=target_rate, bit_depth=16, channels=2)
+    key = push_stream_module._ResamplerKey(  # noqa: SLF001
+        channel_id=MAIN_CHANNEL,
+        source_format=source,
+        target_sample_rate=target_rate,
+        target_channels=2,
+        target_bit_depth=16,
+        target_sample_type="int",
+    )
+    contiguous = push_stream_module._create_resampler_state(key, source, target)  # noqa: SLF001
+    jumped = push_stream_module._create_resampler_state(key, source, target)  # noqa: SLF001
+    pcm = bytes(source_rate // 40 * 4)
+    contiguous_ts = jumped_ts = 0
+    for _ in range(500):
+        push_stream_module._resample_pcm_standalone(contiguous, pcm, source, contiguous_ts)  # noqa: SLF001
+        push_stream_module._resample_pcm_standalone(jumped, pcm, source, jumped_ts)  # noqa: SLF001
+        assert contiguous.pending_input_timestamp_us is not None
+        assert jumped.pending_input_timestamp_us is not None
+        contiguous_ts = contiguous.pending_input_timestamp_us
+        jumped_ts = jumped.pending_input_timestamp_us + 2_000
+
+    assert contiguous.pending_timestamp_us is not None
+    assert jumped.pending_timestamp_us is not None
+    contiguous_lag_us = contiguous.pending_input_timestamp_us - contiguous.pending_timestamp_us
+    jumped_lag_us = jumped.pending_input_timestamp_us - jumped.pending_timestamp_us
+    assert abs(jumped_lag_us - contiguous_lag_us) <= 2, (
+        f"output lags the input by {jumped_lag_us}us after 499 jumps, {contiguous_lag_us}us without"
+    )
+
+
 def test_resampler_passthrough_48000_zero_drift() -> None:
     """At 48kHz/25ms (clean rate), drift is zero with old or new code — sanity check."""
     state = _make_resampler_state_passthrough(sample_rate=48000)

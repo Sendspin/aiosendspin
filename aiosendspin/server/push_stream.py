@@ -309,7 +309,7 @@ class _ResamplerState:
     where this isn't a whole number (e.g. 44.1kHz), `int(...)` truncation accumulates
     backward drift over time. We track the unconsumed numerator across calls so
     cumulative pending exactly matches sample-derived elapsed time. Reset to 0
-    on init and whenever pending moves by an input jump."""
+    on init."""
     pending_input_timestamp_us: int | None = None
     """Expected timestamp of the next input frame. Advances by input duration per call
     and is used to detect genuine input-timeline gaps independent of resampler FIR
@@ -432,10 +432,16 @@ def _resample_pcm_standalone(
     jump_us = input_timestamp_us - resampler_state.pending_input_timestamp_us
     if abs(jump_us) > _TIMELINE_JUMP_TOLERANCE_US:
         # Keep the graph and its buffered samples, only move both cursors by the jump.
-        resampler_state.pending_timestamp_us += jump_us
-        # Reset the residue accumulator: pending has moved by the input jump
-        # and any carried fractional µs from the prior segment are dropped.
-        resampler_state.pending_ts_residue = 0
+        # The input cursor's fractional µs is part of the jump, so subtract it from the output.
+        source_rate = source_format.sample_rate
+        target_rate = resampler_state.key.target_sample_rate
+        carry_us, residue = divmod(
+            resampler_state.pending_ts_residue * source_rate
+            - resampler_state.pending_input_ts_residue * target_rate,
+            source_rate * target_rate,
+        )
+        resampler_state.pending_timestamp_us += jump_us + carry_us
+        resampler_state.pending_ts_residue = residue // source_rate
         resampler_state.pending_input_timestamp_us = input_timestamp_us
         resampler_state.pending_input_ts_residue = 0
 
