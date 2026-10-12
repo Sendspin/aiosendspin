@@ -3126,6 +3126,53 @@ async def test_activation_is_first_under_new_keys_despite_queued_replies(
             await client.disconnect()
 
 
+async def test_message_under_new_keys_before_the_activation_is_flagged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A message sent under the new keys before the new server/activate is flagged."""
+    server = _make_server(InMemoryServerPairingStore())
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    client, attempt = await _pairing_psk_client(client_identity, client_store)
+    reason = "sent a message before the server/activate that follows a re-handshake"
+
+    async with _serve(server) as url:
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            client_ws = client._admitted_connection._ws  # noqa: SLF001
+            assert isinstance(client_ws, EncryptedWebSocket)
+            first_hash = conn._handshake_hash  # noqa: SLF001
+            state_handled = asyncio.Event()
+            handle_message = conn._handle_message  # noqa: SLF001
+
+            async def tracking_handle_message(message: ClientMessage, timestamp_us: int) -> None:
+                await handle_message(message, timestamp_us)
+                if isinstance(message, ClientStateMessage):
+                    state_handled.set()
+
+            conn._handle_message = tracking_handle_message  # type: ignore[method-assign]  # noqa: SLF001
+            reload_trusted_unpaired = conn._reload_trusted_unpaired  # noqa: SLF001
+
+            async def reload_after_client_state() -> None:
+                # Runs in the re-handshake after the key swap, before the server/activate.
+                new_hash = conn._handshake_hash  # noqa: SLF001
+                if new_hash != first_hash and not state_handled.is_set():
+                    await _wait_until(lambda: client_ws.session.handshake_hash == new_hash)
+                    await client_ws.send_str(
+                        ClientStateMessage(payload=ClientStatePayload(available=True)).to_json()
+                    )
+                    await state_handled.wait()
+                await reload_trusted_unpaired()
+
+            conn._reload_trusted_unpaired = reload_after_client_state  # type: ignore[method-assign]  # noqa: SLF001
+            await conn.initiate_pairing(attempt)
+
+            assert any(reason in message for message in caplog.messages)
+        finally:
+            await client.disconnect()
+
+
 async def _end_pairing_twice(server: SendspinServer, client_id: str) -> list[asyncio.Future[None]]:
     """Start two end_pairing calls, the second once the attempt has absorbed the first cancel."""
     first = asyncio.ensure_future(server.end_pairing(client_id))
