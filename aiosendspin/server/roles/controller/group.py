@@ -276,8 +276,8 @@ class ControllerGroupRole(GroupRole):
     def _clamp_seek_offset(self, offset_ms: int) -> int:
         """Clamp an offset so its target lands between 0 and `seek_max_ms`.
 
-        From a position already beyond `seek_max_ms` the target is kept between 0 and that
-        position instead, so the seek never moves in the opposite direction.
+        From a position already beyond `seek_max_ms` a forward offset keeps that position
+        instead, so the seek never moves in the opposite direction.
         """
         metadata_group_role = self._group.group_role("metadata")
         if not isinstance(metadata_group_role, MetadataGroupRole):
@@ -287,7 +287,9 @@ class ControllerGroupRole(GroupRole):
             return offset_ms
         target = max(0, position + offset_ms)
         if self._seek_max_ms is not None:
-            target = min(target, max(position, self._seek_max_ms))
+            target = min(
+                target, self._seek_max_ms if offset_ms < 0 else max(position, self._seek_max_ms)
+            )
         return target - position
 
     def _command_to_event(self, cmd: ControllerCommandPayload) -> ControllerEvent | None:

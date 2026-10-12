@@ -688,7 +688,7 @@ def test_handle_seek_relative_clamps_to_start() -> None:
 
 
 def test_handle_seek_relative_past_seek_max_ms_never_reverses() -> None:
-    """From beyond seek_max_ms a forward seek stays put and a backward seek is kept."""
+    """From beyond seek_max_ms a forward seek stays put and a backward seek lands in range."""
     group, cgr = _seek_relative_group(200_000)
     cgr.set_seek_max_ms(150_000)
 
@@ -701,7 +701,7 @@ def test_handle_seek_relative_past_seek_max_ms_never_reverses() -> None:
     cgr.handle_command(
         ControllerCommandPayload(command=MediaCommand.SEEK_RELATIVE, offset_ms=-10_000)
     )
-    assert _emitted_seek_offset(group) == -10_000
+    assert _emitted_seek_offset(group) == -50_000
 
 
 def test_handle_seek_relative_without_seek_max_ms_has_no_upper_bound() -> None:
