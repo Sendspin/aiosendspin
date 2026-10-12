@@ -571,13 +571,18 @@ async def test_register_client_url_keeps_connection_when_url_unchanged() -> None
     server = _make_server(session)
     url = "ws://127.0.0.1:9999/sendspin"
 
+    server.register_client_url("client-1", url)
     server.connect_to_client(url)
     task = server._connection_tasks.get(url)  # noqa: SLF001
     assert task is not None
 
     server.register_client_url("client-1", url)
     assert server._connection_tasks.get(url) is task  # noqa: SLF001
-    assert not task.cancelled()
+    assert task.cancelling() == 0
+
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
