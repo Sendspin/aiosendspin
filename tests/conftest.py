@@ -16,12 +16,19 @@ from aiosendspin import util
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.trust_store import ClientPairingStore, InMemoryClientPairingStore
+from aiosendspin.server import push_stream
 
 
 @pytest.fixture(autouse=True)
 def _reset_deprecation_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give each test a process state in which no deprecation has been reported yet."""
     monkeypatch.setattr(util, "_WARNED_DEPRECATIONS", set())
+
+
+@pytest.fixture(autouse=True)
+def _clear_resampler_hold_back() -> None:
+    """Measure the resampler hold-back afresh, since some tests patch the resample graph."""
+    push_stream._resampler_hold_back_us.cache_clear()  # noqa: SLF001
 
 
 @contextmanager

@@ -232,6 +232,16 @@ async def test_late_joiner_encoder_matches_live_encoder_after_rebases(replay: bo
     stalls = {20: 50_000, 25: 50_000, 30: 50_000, 35: 50_000}
     # Producing faster than realtime builds a lead past the send-ahead, so the join replays.
     bursts = {40, 41, 42, 43, 44} if replay else set()
+    if not replay:
+        # The member's lead covers its PCM frame, so the joiner's start must too to land on it.
+        member = sc.clients["pcm-48k"].role("player@v1")
+        joiner = sc.clients["opus-joiner"].role("player@v1")
+        assert member is not None
+        assert joiner is not None
+        member_req = member.get_audio_requirements()
+        assert member_req is not None
+        assert member_req.transformer is not None
+        joiner.min_buffer_ms += member_req.transformer.frame_duration_us // 1_000
     for index in range(_TOTAL_SLICES):
         if index == 50:
             await sc.group.add_client(sc.clients["opus-joiner"])
@@ -284,3 +294,15 @@ async def test_channel_that_misses_a_commit_stays_aligned() -> None:
         f"after the custom channel skipped one 100 ms commit: {_report(tail)} "
         f"(before the skip: {_report(head)}, tolerance {_TOLERANCE_US}us)"
     )
+
+
+async def test_joiner_whose_hold_back_covers_the_members_joins_at_the_live_tail() -> None:
+    """A FLAC joiner needs no replay of what the PCM members' lead holds beyond its start."""
+    sc = await _scenario(
+        {"pcm-48k": (AudioCodec.PCM, 48_000), "flac-joiner": (AudioCodec.FLAC, 48_000)},
+        grouped=["pcm-48k"],
+    )
+    for index in range(20):
+        await sc.commit(index)
+    await sc.group.add_client(sc.clients["flac-joiner"])
+    assert not sc.stream._catchup_state  # noqa: SLF001
