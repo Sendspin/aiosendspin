@@ -1701,8 +1701,12 @@ class SendspinConnection:
 
     @property
     def _management_capable(self) -> bool:
-        """Whether this connection may carry management."""
-        return self._noise_psk is not None and self._noise_psk.category is PskCategory.LONG_TERM
+        """Whether this connection may carry management: paired and on the pre-spec-#177 wire."""
+        return (
+            self._noise_psk is not None
+            and self._noise_psk.category is PskCategory.LONG_TERM
+            and self._legacy_hello
+        )
 
     @property
     def _client_in_playback(self) -> bool:
@@ -2336,7 +2340,7 @@ class SendspinConnection:
 
     # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     def enable_management(self) -> None:
-        """Add ``management`` to this connection's activities; requires a paired connection.
+        """Add ``management`` to this connection's activities; needs a paired pre-spec-#177 client.
 
         Deprecated: the Sendspin spec no longer defines the management activity.
         """
@@ -2354,9 +2358,12 @@ class SendspinConnection:
 
     # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     def _set_management(self, *, active: bool) -> None:
-        """Add or drop ``management``; adding it requires a paired connection."""
+        """Add or drop ``management``; adding it requires a paired pre-spec-#177 client."""
         if active and not self._management_capable:
-            msg = "management requires a paired (long-term Sendspin PSK) connection"
+            msg = (
+                "management requires a paired (long-term Sendspin PSK) connection "
+                "from a client on the pre-spec-#177 wire"
+            )
             raise RuntimeError(msg)
         if active == self._management_active:
             return

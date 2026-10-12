@@ -37,6 +37,7 @@ def _bare_connection() -> SendspinConnection:
     conn._client = None  # noqa: SLF001
     conn._hello_description = ""  # noqa: SLF001
     conn._server = SimpleNamespace(allow_noncompliant_clients=True)  # type: ignore[assignment]  # noqa: SLF001
+    conn._legacy_hello = True  # noqa: SLF001
     return conn
 
 
@@ -167,6 +168,7 @@ def _conn_with_psk(category: PskCategory | None) -> SendspinConnection:
         psk = generate_psk()
         conn._noise_psk = ResolvedPsk(psk_id_for(psk), psk, category)  # noqa: SLF001
     conn._management_active = False  # noqa: SLF001
+    conn._legacy_hello = True  # noqa: SLF001
     # Keep _pairing_in_progress False.
     conn._in_pairing = False  # noqa: SLF001
     conn._pairing_message_queue = None  # noqa: SLF001
@@ -196,6 +198,15 @@ def test_enable_management_rejects_non_long_term(category: PskCategory | None) -
     """enable_management refuses a connection that is not paired (long-term PSK)."""
     conn = _conn_with_psk(category)
     with pytest.raises(RuntimeError, match="paired"):
+        conn.enable_management()
+    assert conn._management_active is False  # noqa: SLF001
+
+
+def test_enable_management_rejects_current_wire_client() -> None:
+    """enable_management refuses a paired client whose hello is on the current wire."""
+    conn = _conn_with_psk(PskCategory.LONG_TERM)
+    conn._legacy_hello = False  # noqa: SLF001
+    with pytest.raises(RuntimeError, match="pre-spec-#177 wire"):
         conn.enable_management()
     assert conn._management_active is False  # noqa: SLF001
 
