@@ -2476,17 +2476,24 @@ class PushStream:
         encoder: AudioTransformer | None,
         req: AudioRequirements,
         channel_id: UUID,
+        *,
+        end_us: int | None = None,
     ) -> list[CachedChunk]:
-        """Drain one resampler's FIR tail and run it through quantizer/encoder."""
+        """Drain one resampler's FIR tail up to `end_us` and run it through quantizer/encoder."""
         tkey = self._build_transform_key(req, channel_id)
         drained = _flush_resampler(resampler_state)
-        if drained.sample_count == 0 or not drained.pcm_data:
+        sample_count = drained.sample_count
+        if end_us is not None:
+            end_frames = (
+                (end_us - drained.output_start_ts) * req.sample_rate + 500_000
+            ) // 1_000_000
+            sample_count = max(0, min(sample_count, end_frames))
+        if sample_count == 0 or not drained.pcm_data:
             return []
 
-        resampled_pcm = drained.pcm_data
+        resampled_pcm = drained.pcm_data[: sample_count * resampler_state.target_av_frame_stride]
         needs_s32_to_s24_conversion = drained.needs_s32_to_s24_conversion
         output_start_ts = drained.output_start_ts
-        sample_count = drained.sample_count
 
         if drained.sample_type == "float":
             edge_quantized = _quantize_float_pcm(
@@ -2530,7 +2537,7 @@ class PushStream:
             for data, ts, dur in encoded_frames
         ]
 
-    async def _start_catchup_encoding(  # noqa: PLR0912, PLR0915
+    async def _start_catchup_encoding(  # noqa: C901, PLR0912, PLR0915
         self,
         role: Role,
         req: AudioRequirements,
@@ -2672,6 +2679,27 @@ class PushStream:
                 if drained and self._catchup_state.get(cache_key) == "catching_up":
                     self._role_chunk_cache[cache_key].extend(drained)
                     last_encoded_end_us = drained[-1].timestamp_us + drained[-1].duration_us
+
+            # A shared live graph can release output at a different position than the catch-up
+            # graph, so fill from the catch-up graph's tail up to where the live graph resumes.
+            for rkey, rstate in catchup_resamplers.items():
+                live_state = self._resamplers.get(rkey)
+                if (
+                    rkey not in established_resampler_keys
+                    or live_state is None
+                    or live_state.pending_timestamp_us is None
+                ):
+                    continue
+                bridged = self._flush_resampler_to_chunks(
+                    rstate,
+                    catchup_quantizers,
+                    encoder,
+                    req,
+                    channel_id,
+                    end_us=live_state.pending_timestamp_us,
+                )
+                if bridged and self._catchup_state.get(cache_key) == "catching_up":
+                    self._role_chunk_cache[cache_key].extend(bridged)
 
             # Promote FIR-warmed catch-up state, skipping shared live keys.
             for rkey, rstate in catchup_resamplers.items():
