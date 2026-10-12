@@ -380,7 +380,6 @@ def test_player_role_get_binary_handling_returns_handling_for_audio_chunk() -> N
 
     assert handling is not None
     assert handling.drop_late is True
-    assert handling.grace_period_us == 2_000_000
     assert handling.buffer_track is True
 
 
@@ -440,7 +439,7 @@ def test_player_role_on_stream_start_sets_pending_flag() -> None:
 
 
 def test_player_role_on_stream_start_resets_binary_timing() -> None:
-    """on_stream_start() should reset stale timing so late-drop grace reapplies."""
+    """on_stream_start() should reset stale late-drop timing and log state."""
     client = _make_client_stub()
 
     audio_req = AudioRequirements(
