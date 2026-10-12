@@ -35,7 +35,8 @@ class AudioTransformer(Protocol):
 
         Args:
             pcm: Raw PCM audio data (already resampled to target format).
-            timestamp_us: Playback timestamp in microseconds.
+            timestamp_us: Playback timestamp in microseconds, minus the timeline jumps
+                this transformer has followed.
             duration_us: Duration of this chunk in microseconds.
 
         Returns:
