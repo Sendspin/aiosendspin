@@ -27,10 +27,13 @@ from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import ManualClock
 from aiosendspin.server.group import SendspinGroup
-from aiosendspin.server.push_stream import PushStream
+from aiosendspin.server.push_stream import PushStream, _resampler_hold_back_us
 from aiosendspin.server.roles import AudioRequirements
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 from tests.integration.sync_assertions import best_lag_samples
+
+# A PCM player can hold back up to one 25 ms frame between commits, so the lead covers it.
+_PCM_FRAME_US = 25_000
 
 
 @dataclass(slots=True)
@@ -576,7 +579,7 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
 
-    _player_a, group_a, conn_a = _make_player(
+    player_a, group_a, conn_a = _make_player(
         server,
         "pA",
         supported_formats=[
@@ -592,12 +595,16 @@ async def test_multi_player_group_join_sync_stable_source() -> None:
         ],
         buffer_capacity=60_000,
     )
+    # A's lead covers B's resampler, so B joining doesn't move the timeline.
+    role_a = player_a.role("player@v1")
+    assert role_a is not None
+    role_a.min_buffer_ms = math.ceil((1_000_000 + _resampler_hold_back_us(48_000, 32_000)) / 1_000)
 
     stream = group_a.start_stream()
 
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
-    next_play_start_us = clock.now_us() + 1_000_000
+    next_play_start_us = clock.now_us() + role_a.min_buffer_ms * 1_000 + _PCM_FRAME_US
 
     # Run 3 seconds virtual time; join B at t=1s.
     for i in range(120):  # 120 * 25ms = 3s
@@ -680,7 +687,9 @@ async def test_multi_player_sync_with_jittery_source_is_continuous() -> None:
 
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
-    next_play_start_us = clock.now_us() + 1_000_000
+    next_play_start_us = (
+        clock.now_us() + 1_000_000 + _PCM_FRAME_US + _resampler_hold_back_us(48_000, 32_000)
+    )
 
     # Alternate 20ms and 30ms blocks (still "continuous" overall).
     pattern_frames = [960, 1440]  # 20ms, 30ms at 48kHz
@@ -753,7 +762,7 @@ async def test_production_gap_rebases_timeline() -> None:
     stream = group_a.start_stream()
     source_fmt = AudioFormat(sample_rate=48_000, bit_depth=16, channels=2)
 
-    next_play_start_us = clock.now_us() + 1_000_000
+    next_play_start_us = clock.now_us() + 1_000_000 + _PCM_FRAME_US
 
     # Produce 1s of audio.
     for _ in range(40):
@@ -798,7 +807,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
     clock = ManualClock()
     server = _DummyServer(loop=loop, clock=clock)
 
-    _player_a, group_a, conn_a = _make_player(
+    player_a, group_a, conn_a = _make_player(
         server,
         "pA",
         supported_formats=[
@@ -842,7 +851,18 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
     # 100ms per commit to ensure FLAC yields packets promptly.
     duration_us = 100_000
     frame_count = 4800  # 100ms @ 48kHz
-    next_play_start_us = clock.now_us() + 1_000_000
+    # A's lead covers B's FLAC frame and resampler, so regrouping never moves the timeline.
+    role_b = player_b.role("player@v1")
+    assert role_b is not None
+    req_b = role_b.get_audio_requirements()
+    assert req_b is not None
+    assert req_b.transformer is not None
+    b_hold_back_us = req_b.transformer.frame_duration_us + _resampler_hold_back_us(48_000, 44_100)
+    role_a = player_a.role("player@v1")
+    assert role_a is not None
+    role_a.min_buffer_ms = math.ceil((1_000_000 + b_hold_back_us - _PCM_FRAME_US) / 1_000)
+    lead_us = role_a.min_buffer_ms * 1_000 + _PCM_FRAME_US
+    next_play_start_us = clock.now_us() + lead_us
 
     # Initial start latency (player A).
     first_idx_a = len(conn_a.events)
@@ -852,7 +872,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
     assert abs(play_start_us - next_play_start_us) <= 1_000
     ts_a = _first_audio_timestamp_after(conn_a.events, start_index=first_idx_a)
     assert ts_a is not None
-    assert 1_000_000 <= ts_a - clock.now_us() <= 1_100_000
+    assert lead_us <= ts_a - clock.now_us() <= lead_us + 100_000
     next_play_start_us = play_start_us + duration_us
 
     joins = _JoinTracker(clock)
@@ -905,7 +925,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
                 await action()
 
     join_delays_us = joins.finalize()
-    _assert_join_delays(join_delays_us, min_delay_us=0, max_delay_us=1_000_000)
+    _assert_join_delays(join_delays_us, min_delay_us=0, max_delay_us=lead_us)
     _assert_three_player_sync_and_continuity(
         conn_a=conn_a,
         conn_b=conn_b,
@@ -939,7 +959,7 @@ async def test_four_players_regroup_fast_start_and_sync() -> None:  # noqa: PLR0
 
 
 @pytest.mark.asyncio
-async def test_first_time_join_unique_format_starts_under_1s_without_next_commit() -> None:
+async def test_first_time_join_unique_format_starts_within_lead_without_next_commit() -> None:
     """Late joiner with a unique format should start via PCM cache without waiting for commit."""
     loop = asyncio.get_running_loop()
     clock = ManualClock()
@@ -1003,4 +1023,7 @@ async def test_first_time_join_unique_format_starts_under_1s_without_next_commit
             break
         await asyncio.sleep(0.01)
     assert first_ts is not None, "expected immediate catch-up audio from PCM cache"
-    assert first_ts - join_now_us <= 1_000_000
+    req_b = role_b.get_audio_requirements()
+    assert req_b is not None
+    assert req_b.transformer is not None
+    assert first_ts - join_now_us <= 1_000_000 + req_b.transformer.frame_duration_us

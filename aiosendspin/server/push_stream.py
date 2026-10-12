@@ -209,6 +209,36 @@ def _build_resample_graph(
     )
 
 
+@lru_cache
+def _resampler_hold_back_us(source_sample_rate: int, target_sample_rate: int) -> int:
+    """Return the most output a resample graph between these rates holds back behind its input."""
+    av = _get_av()
+    graph = _build_resample_graph(
+        source_av_format="s16",
+        source_layout="stereo",
+        source_sample_rate=source_sample_rate,
+        target_av_format="s16",
+        target_layout="stereo",
+        target_sample_rate=target_sample_rate,
+    )
+    push_frames = source_sample_rate // 100
+    silence = bytes(push_frames * 4)
+    input_frames = output_frames = hold_back_us = 0
+    for _ in range(100):
+        frame = av.AudioFrame(format="s16", layout="stereo", samples=push_frames)
+        frame.sample_rate = source_sample_rate
+        frame.planes[0].update(silence)
+        graph.push(frame)
+        input_frames += push_frames
+        output_frames += sum(out.samples for out in _drain_audio_graph(graph))
+        hold_back_us = max(
+            hold_back_us,
+            input_frames * 1_000_000 // source_sample_rate
+            - output_frames * 1_000_000 // target_sample_rate,
+        )
+    return hold_back_us
+
+
 def _encode_for_transform_key(
     transformer: AudioTransformer | None,
     pcm_data: bytes,
@@ -784,6 +814,8 @@ class PushStream:
         # Sample rate of the last _advance_channel_timing call per channel. Residue is
         # modulo this rate, so changes invalidate it and force a residue reset.
         self._channel_timing_rate: dict[UUID, int] = {}
+        # Sample rate of the most recently prepared audio per channel.
+        self._channel_source_rate: dict[UUID, int] = {}
         # Channels that have committed real audio (live or historical), not just synthetic timing.
         self._channels_with_committed_audio: set[UUID] = set()
         # Role-based streaming tracking (for hook-based flow)
@@ -898,16 +930,18 @@ class PushStream:
             return 0
         return max(role.get_output_delay_us() for _, role in roles)
 
-    def _role_send_ahead_us(self, role: Role) -> int:
+    def _role_send_ahead_us(self, role: Role, *, include_hold_back: bool = True) -> int:
         """Per-role send-ahead floor.
 
-        Both cases floor at min_buffer + output_delay. Buffered streams extend the
+        Both cases floor at min_buffer + hold_back + output_delay. Buffered streams extend the
         lead toward required_lead (it adds no latency once the queue grows past
         min_buffer); live streams do not, since a realtime queue cannot grow after
         playback begins and extra lead would only add latency. Both raise the lead
         before output_delay to at least MIN_LEAD_FLOOR_US.
         """
         min_buffer_us = role.get_min_buffer_us()
+        if include_hold_back:
+            min_buffer_us += self._role_hold_back_us(role)
         output_delay_us = role.get_output_delay_us()
         if self._is_live:
             return max(min_buffer_us, MIN_LEAD_FLOOR_US) + output_delay_us
@@ -920,6 +954,17 @@ class PushStream:
         if not roles:
             return DEFAULT_INITIAL_DELAY_US
         return max(self._role_send_ahead_us(role) for _, role in roles)
+
+    def _role_hold_back_us(self, role: Role) -> int:
+        """Return how much audio the role's resampler and encoder can hold back between commits."""
+        req = role.get_audio_requirements()
+        if req is None:
+            return 0
+        hold_back_us = req.transformer.frame_duration_us if req.transformer is not None else 0
+        source_rate = self._channel_source_rate.get(req.channel_id or MAIN_CHANNEL)
+        if source_rate is not None and source_rate != req.sample_rate:
+            hold_back_us += _resampler_hold_back_us(source_rate, req.sample_rate)
+        return hold_back_us
 
     @property
     def is_live(self) -> bool:
@@ -1021,6 +1066,7 @@ class PushStream:
             channel_id: Channel to prepare audio for (default: MAIN_CHANNEL).
         """
         self._channel_buffers[channel_id] = (pcm, audio_format)
+        self._channel_source_rate[channel_id] = audio_format.sample_rate
 
     def prepare_historical_audio(
         self,
@@ -1054,6 +1100,7 @@ class PushStream:
         if start_time_us is not None and channel_id not in self._historical_start_us:
             self._historical_start_us[channel_id] = start_time_us
         self._historical_buffers.setdefault(channel_id, []).append((pcm, audio_format))
+        self._channel_source_rate[channel_id] = audio_format.sample_rate
 
     def get_cached_pcm_chunks(self, channel_id: UUID = MAIN_CHANNEL) -> list[CachedPCMChunk]:
         """Retrieve cached PCM chunks for a channel.
@@ -1079,7 +1126,10 @@ class PushStream:
         """Return a safe minimum playback timestamp for late-join replay."""
         now_us = self._clock.now_us()
         if role is not None:
-            effective_lead_us = max(min_lead_us, self._role_send_ahead_us(role))
+            # The timeline lead covers the hold-back, so replay may start at the plain floor.
+            effective_lead_us = max(
+                min_lead_us, self._role_send_ahead_us(role, include_hold_back=False)
+            )
         else:
             effective_lead_us = max(0, min_lead_us)
         target_us = now_us + effective_lead_us
@@ -2118,6 +2168,8 @@ class PushStream:
                             channel_id=channel_id,
                             align_to_channel_tail=(channel_id != MAIN_CHANNEL),
                         )
+                        # Cached audio within the joiner's hold-back isn't worth replaying.
+                        + self._role_hold_back_us(role)
                     )
                     latest_cached_end_us = (
                         channel_pcm_cache[-1].timestamp_us + channel_pcm_cache[-1].duration_us

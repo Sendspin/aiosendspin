@@ -23,7 +23,7 @@ class AudioTransformer(Protocol):
 
     @property
     def frame_duration_us(self) -> int:
-        """Static frame duration used for `TransformKey` identity.
+        """Static frame duration, used for `TransformKey` identity and the send-ahead.
 
         Per-frame wire duration is emitted by `process` / `flush` and may
         vary by ±1µs at non-divisible rates.

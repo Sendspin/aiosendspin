@@ -315,7 +315,10 @@ async def test_live_send_ahead_uses_min_buffer_not_required_lead() -> None:
     stream = PushStream(loop=loop, clock=clock, group=group)
     stream.set_live_source(is_live=True)
 
-    assert stream._role_send_ahead_us(role) == 200_000  # noqa: SLF001
+    req = role.get_audio_requirements()
+    assert req is not None
+    assert req.transformer is not None
+    assert stream._role_send_ahead_us(role) == 200_000 + req.transformer.frame_duration_us  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -379,7 +382,11 @@ async def test_non_main_join_rebase_includes_player_output_delay() -> None:
 
     stream._rebase_far_ahead_join_tail(channel_id, role)  # noqa: SLF001
 
-    assert stream._channel_timing[channel_id] == 7_000_000  # noqa: SLF001
+    req = role.get_audio_requirements()
+    assert req is not None
+    assert req.transformer is not None
+    expected_us = 7_000_000 + req.transformer.frame_duration_us
+    assert stream._channel_timing[channel_id] == expected_us  # noqa: SLF001
 
 
 @pytest.mark.asyncio
