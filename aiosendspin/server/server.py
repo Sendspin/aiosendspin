@@ -1100,8 +1100,20 @@ class SendspinServer:
                 port=port,
             )
             await self._tcp_site.start()
-            logger.info("Sendspin server started successfully on %s:%d", host, port)
+        except OSError as e:
+            logger.error("Failed to start server on %s:%d: %s", host, port, e)
+            if self._app_runner:
+                # cleanup() already stops/unregisters any site added to this runner.
+                await self._app_runner.cleanup()
+                self._app_runner = None
+            self._tcp_site = None
+            if self._app:
+                await self._app.shutdown()
+                self._app = None
+            raise
+        logger.info("Sendspin server started successfully on %s:%d", host, port)
 
+        try:
             self._zc = AsyncZeroconf(
                 ip_version=IPVersion.V4Only,
                 interfaces=[host] if host != "0.0.0.0" else InterfaceChoice.Default,
@@ -1128,17 +1140,8 @@ class SendspinServer:
             if discover_clients:
                 await self._start_mdns_discovery()
         except OSError as e:
-            logger.error("Failed to start server on %s:%d: %s", host, port, e)
+            logger.error("Server is running without mDNS advertising and discovery: %s", e)
             await self._stop_mdns()
-            if self._app_runner:
-                # cleanup() already stops/unregisters any site added to this runner.
-                await self._app_runner.cleanup()
-                self._app_runner = None
-            self._tcp_site = None
-            if self._app:
-                await self._app.shutdown()
-                self._app = None
-            raise
 
     async def stop_server(self) -> None:
         """Stop the server HTTP listener and mDNS services."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
@@ -84,6 +85,30 @@ async def test_start_server_survives_invalid_advertise_address(
         await writer.wait_closed()
     finally:
         await server.close()  # must not raise
+
+
+def _raise_enodev(*_args: object, **_kwargs: object) -> None:
+    raise OSError(errno.ENODEV, "No such device")
+
+
+@pytest.mark.asyncio
+async def test_start_server_survives_mdns_socket_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zeroconf socket error must not tear down the HTTP listener."""
+    monkeypatch.setattr("aiosendspin.server.server.AsyncZeroconf", _raise_enodev)
+
+    server = _make_server()
+    port = _free_port()
+
+    await server.start_server(port=port, host="127.0.0.1")
+
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", port), timeout=2.0
+        )
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.close()
 
 
 @pytest.mark.asyncio
