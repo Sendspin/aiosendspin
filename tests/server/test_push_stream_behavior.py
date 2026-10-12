@@ -3301,7 +3301,7 @@ async def test_late_joiner_after_historical_injection() -> None:
     group.clients.append(_DummyClient([role1]))
 
     loop = asyncio.get_running_loop()
-    stream = PushStream(loop=loop, clock=LoopClock(loop), group=group)
+    stream = PushStream(loop=loop, clock=ManualClock(now_us_value=1_000_000), group=group)
 
     fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
     stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel)
