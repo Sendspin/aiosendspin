@@ -280,6 +280,9 @@ class SendspinServer:
         self._mdns_client_urls: dict[str, str] = {}
         # mDNS URLs whose client said goodbye with a no-reconnect reason.
         self._mdns_goodbye_urls: set[str] = set()
+        self._dial_connections: dict[str, SendspinConnection] = {}
+        # URLs dialed explicitly while their dial task's connection was closing.
+        self._redial_urls: set[str] = set()
         self._app: web.Application | None = None
         self._app_runner: web.AppRunner | None = None
         self._tcp_site: web.TCPSite | None = None
@@ -567,11 +570,27 @@ class SendspinServer:
         A ``PLAYBACK`` reason applies to the next connection only. Later reconnects use
         ``DISCOVERY``.
         """
-        self._mdns_goodbye_urls.discard(url)
-        self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if connection_reason is ConnectionReason.MANAGEMENT:
             warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
+        self._redial_if_closing(url)
+        self._dial(
+            url,
+            connection_reason=connection_reason,
+            retry_initial_connection=retry_initial_connection,
+            pairing_attempt=pairing_attempt,
+        )
+
+    def _dial(
+        self,
+        url: str,
+        *,
+        connection_reason: ConnectionReason,
+        retry_initial_connection: bool = False,
+        pairing_attempt: PairingAttempt | None = None,
+    ) -> None:
+        self._mdns_goodbye_urls.discard(url)
+        self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
@@ -611,6 +630,7 @@ class SendspinServer:
             TimeoutError: If the initial connection attempt times out.
             Exception: Other unexpected errors during the initial connection attempt.
         """
+        self._redial_if_closing(url)
         self._mdns_goodbye_urls.discard(url)
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
@@ -638,6 +658,19 @@ class SendspinServer:
             )
 
         await waiter
+
+    def _redial_if_closing(self, url: str) -> None:
+        conn = self._dial_connections.get(url)
+        if (
+            conn is None
+            or not conn._disconnecting  # noqa: SLF001
+            or conn.should_retry_server_initiated_connection
+        ):
+            return
+        self._redial_urls.add(url)
+        self._initial_connect_succeeded.discard(url)
+        if retry_event := self._retry_events.get(url):
+            retry_event.set()
 
     async def initiate_pairing(self, client_id: str, attempt: PairingAttempt) -> None:
         """Run a pairing attempt on a connected client.
@@ -925,6 +958,9 @@ class SendspinServer:
         try:
             while True:
                 retry_event = self._retry_events.get(url)
+                # A dial while this attempt connects is served by it, not a redial.
+                self._dial_connections.pop(url, None)
+                self._redial_urls.discard(url)
                 try:
                     async with self._client_session.ws_connect(
                         url,
@@ -946,17 +982,23 @@ class SendspinServer:
                             pairing_attempt=pairing_attempt,
                         )
                         pairing_attempt = None
+                        self._dial_connections[url] = conn
                         await conn.handle_client()
                         session_duration_s = time.monotonic() - connection_started_s
 
                     if session_duration_s >= STABLE_SERVER_INITIATED_SESSION_S:
                         backoff = 1.0
 
-                    if not conn.should_retry_server_initiated_connection:
+                    if url in self._redial_urls:
+                        logger.debug("Redialing %s on request after the connection closed", url)
+                        # Handle the redial like the initial attempt of a new dial.
+                        first_connection_succeeded = False
+                    elif not conn.should_retry_server_initiated_connection:
                         reason = conn.goodbye_reason
-                        if (
+                        # With no goodbye and no server-side close, a non-playback session dropped.
+                        if url in self._mdns_client_urls.values() and (
                             reason in _NO_REDIAL_GOODBYE_REASONS
-                            and url in self._mdns_client_urls.values()
+                            or (reason is None and not conn._closing)  # noqa: SLF001
                         ):
                             self._mdns_goodbye_urls.add(url)
                         logger.debug(
@@ -1015,6 +1057,8 @@ class SendspinServer:
         finally:
             self._connection_tasks.pop(url, None)
             self._retry_events.pop(url, None)
+            self._dial_connections.pop(url, None)
+            self._redial_urls.discard(url)
             self._pending_pairing_attempts.pop(url, None)
             self._initial_connect_succeeded.discard(url)
             self._connection_options.pop(url, None)
@@ -1269,7 +1313,7 @@ class SendspinServer:
                 url,
             )
         self._mdns_client_urls[name] = url
-        self.connect_to_client(url, connection_reason=self.get_connection_reason(url))
+        self._dial(url, connection_reason=self.get_connection_reason(url))
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)
