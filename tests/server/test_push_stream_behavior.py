@@ -2562,6 +2562,58 @@ async def test_format_change_during_inflight_commit_aborts_old_format_delivery(
 
 
 @pytest.mark.asyncio
+async def test_join_during_inflight_commit_replays_that_commit_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejoin deferred by an in-flight commit replays that commit's chunk without a hole."""
+    loop = asyncio.get_running_loop()
+    group = _DummyGroup(clients=[])
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=group.transformer_pool.get_or_create(
+                PcmPassthrough,
+                channel_id=MAIN_CHANNEL.int,
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+                frame_duration_us=25_000,
+            ),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))  # type: ignore[arg-type]
+    stream = PushStream(loop=loop, clock=ManualClock(now_us_value=1_000_000), group=group)  # type: ignore[arg-type]
+    audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    for _ in range(4):
+        stream.prepare_audio(bytes(4800), audio_format)
+        await stream.commit_audio()
+
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+    join_fired = False
+
+    async def resample_with_midflight_join(*args: Any, **kwargs: Any) -> Any:
+        nonlocal join_fired
+        if not join_fired:
+            join_fired = True
+            stream.on_role_join(role)
+        return await original_resample(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "_resample_for_roles", resample_with_midflight_join)
+    role.received.clear()
+    for _ in range(2):
+        stream.prepare_audio(bytes(4800), audio_format)
+        await stream.commit_audio()
+
+    assert len(role.received) == 6
+    for previous, chunk in pairwise(role.received):
+        assert chunk.timestamp_us == previous.timestamp_us + previous.duration_us
+
+
+@pytest.mark.asyncio
 async def test_format_change_preserves_peer_audio(
     mock_loop: Any,
     monkeypatch: pytest.MonkeyPatch,

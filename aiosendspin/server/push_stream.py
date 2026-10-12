@@ -1863,13 +1863,19 @@ class PushStream:
 
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
         active_roles = {role for _client, role in self._get_audio_roles()}
+        joining_keys = {
+            self._build_transform_key(join_req, join_req.channel_id or MAIN_CHANNEL, role)
+            for role in self._pending_join_roles
+            if (join_req := role.get_audio_requirements()) is not None
+        }
 
         for tkey, frame_list in transformed.items():
             roles = roles_by_transform.get(tkey, [])
-            if not any(r in active_roles for r in roles):
+            if tkey not in joining_keys and not any(r in active_roles for r in roles):
                 # Every recipient was excluded mid-commit (e.g. a format change
-                # deferred the sole role to the join path); caching these frames
-                # would repopulate the transform key the boundary just evicted.
+                # deferred the sole role to the join path) and no pending join is on
+                # this key; caching these frames would repopulate the transform key
+                # the boundary just evicted.
                 continue
             cached_for_key: list[CachedChunk] = []
             for data, ts, dur in frame_list:
