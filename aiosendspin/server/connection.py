@@ -216,6 +216,9 @@ _CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
 _MAC_ADDRESS_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
 
 _NO_PAYLOAD_OBJECT = "sent a message without a payload object"
+_BEFORE_REHANDSHAKE_ACTIVATE = (
+    "sent a message before the server/activate that follows a re-handshake"
+)
 
 _SERVER_BINARY_TYPES: frozenset[int] = frozenset(
     message_type.value
@@ -2593,6 +2596,8 @@ class SendspinConnection:
         # Only a pre-#287 client's repeated hello belongs to the attempt; any other is flagged.
         if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
+        if self._awaiting_rehandshake_activate and message_type != "client/hello":
+            self._flag_noncompliance(_BEFORE_REHANDSHAKE_ACTIVATE)
         self._flag_pairing_frame_before_activate(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
             self._flag_pairing_frame_deviations(cast("str", msg.data), message_type)
@@ -2602,9 +2607,7 @@ class SendspinConnection:
     def _flag_message_before_activate(self, msg: WSMessage) -> None:
         """Flag a message sent while the client awaits a ``server/activate``."""
         if self._awaiting_rehandshake_activate and msg.type in (WSMsgType.TEXT, WSMsgType.BINARY):
-            self._flag_noncompliance(
-                "sent a message before the server/activate that follows a re-handshake"
-            )
+            self._flag_noncompliance(_BEFORE_REHANDSHAKE_ACTIVATE)
             return
         # Connect-time pairing's reader admits only client/goodbye before the first one.
         if (
