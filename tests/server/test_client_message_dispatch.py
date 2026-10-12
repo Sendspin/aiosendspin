@@ -185,7 +185,7 @@ _NOT_OFFERED = "sent a controller command the server did not offer"
         ({"command": "volume", "volume": 101}, False, []),
         ({"command": "from-the-future"}, True, [_NOT_OFFERED]),
         ({"command": "from-the-future"}, False, []),
-        ({"command": "seek", "position_ms": -1}, True, []),
+        ({"command": "seek", "position_ms": -1}, True, [_MALFORMED]),
     ],
 )
 async def test_controller_command_is_skipped_or_flagged(
@@ -193,7 +193,7 @@ async def test_controller_command_is_skipped_or_flagged(
     controller_active: bool,  # noqa: FBT001
     noncompliance: list[str],
 ) -> None:
-    """A bad controller object is flagged only from an active controller, never a negative seek."""
+    """A bad controller object is flagged only from an active controller."""
     command = orjson.dumps({"type": "client/command", "payload": {"controller": controller}})
     conn, client = _connection([command.decode(), _LEAVE], controller=controller_active)
 
