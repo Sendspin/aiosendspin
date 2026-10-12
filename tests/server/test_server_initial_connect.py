@@ -97,6 +97,16 @@ class _FailOnceThenConnectSession:
         self.closed = True
 
 
+class _ConnectOnceSession(_PersistentSuccessfulSession):
+    """Client session whose connections after the first fail."""
+
+    def ws_connect(self, *args: object, **kwargs: object) -> _SuccessfulConnectContext:
+        context = super().ws_connect(*args, **kwargs)
+        if self.calls > 1:
+            raise ClientConnectionError("offline")
+        return context
+
+
 class _FakeAsyncServiceInfo:
     """Configurable AsyncServiceInfo test double."""
 
@@ -704,7 +714,7 @@ async def test_mdns_update_reconnect_decision(
     if has_task:
         connection_task = asyncio.create_task(asyncio.sleep(3600))
         server._connection_tasks[old_url] = connection_task  # noqa: SLF001
-    server.connect_to_client = MagicMock()  # type: ignore[method-assign]
+    server._dial = MagicMock()  # type: ignore[method-assign]  # noqa: SLF001
 
     try:
         await server._handle_service_added(  # noqa: SLF001
@@ -718,11 +728,11 @@ async def test_mdns_update_reconnect_decision(
 
     assert server._mdns_client_urls[service_name] == expected_url  # noqa: SLF001
     if expect_reconnect:
-        server.connect_to_client.assert_called_once_with(
+        server._dial.assert_called_once_with(  # noqa: SLF001
             expected_url, connection_reason=ConnectionReason.DISCOVERY
         )
     else:
-        server.connect_to_client.assert_not_called()
+        server._dial.assert_not_called()  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
@@ -779,6 +789,137 @@ async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
     )
     assert url in server._connection_tasks  # noqa: SLF001
     await _wait_for_connection_task_cleanup(server, url)
+
+
+@pytest.mark.parametrize(("via_mdns_update", "expected_dials"), [(False, 2), (True, 1)])
+@pytest.mark.asyncio
+async def test_dial_while_connection_closes_after_goodbye(
+    monkeypatch: pytest.MonkeyPatch,
+    via_mdns_update: bool,  # noqa: FBT001
+    expected_dials: int,
+) -> None:
+    """An explicit dial while the connection closes redials, an mDNS update does not."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+    url = "ws://10.0.0.2:9999/sendspin"
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+
+    class _ClosingConnection:
+        """Connection double that is dialed again while it closes after its goodbye."""
+
+        goodbye_reason = GoodbyeReason.ANOTHER_SERVER
+        should_retry_server_initiated_connection = False
+        _closing = True
+        _disconnecting = True
+
+        def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
+            pass
+
+        async def handle_client(self) -> None:
+            if session.calls > 1:
+                return
+            if via_mdns_update:
+                await server._handle_service_added(  # noqa: SLF001
+                    MagicMock(), service_type, service_name, ServiceStateChange.Updated
+                )
+            else:
+                server.connect_to_client(url, connection_reason=ConnectionReason.PLAYBACK)
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _ClosingConnection)
+
+    await server._handle_service_added(  # noqa: SLF001
+        MagicMock(), service_type, service_name, ServiceStateChange.Added
+    )
+    await _wait_for_connection_task_cleanup(server, url)
+
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert session.calls == expected_dials
+
+
+@pytest.mark.asyncio
+async def test_failed_redial_while_connection_closes_gives_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redial requested while the connection closes fails like a new initial dial."""
+    session = _ConnectOnceSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    redials: list[asyncio.Task[None]] = []
+
+    class _ClosingConnection:
+        """Connection double that is dialed again while it closes after its goodbye."""
+
+        goodbye_reason = GoodbyeReason.ANOTHER_SERVER
+        should_retry_server_initiated_connection = False
+        _closing = True
+        _disconnecting = True
+
+        def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
+            pass
+
+        async def handle_client(self) -> None:
+            redials.append(asyncio.create_task(server.connect_to_client_and_wait(url)))
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _ClosingConnection)
+
+    server.connect_to_client(url)
+    for _ in range(50):
+        if redials:
+            break
+        await asyncio.sleep(0)
+
+    with pytest.raises(ClientConnectionError):
+        await asyncio.wait_for(redials[0], timeout=1)
+    await _wait_for_connection_task_cleanup(server, url)
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert session.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_dial_while_restarting_connection_closes_keeps_reconnecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dial while a restarting client's connection closes keeps reconnecting after a failure."""
+    session = _ConnectOnceSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    class _RestartingConnection:
+        """Connection double that is dialed again while it closes after a ``restart`` goodbye."""
+
+        goodbye_reason = GoodbyeReason.RESTART
+        should_retry_server_initiated_connection = True
+        _closing = False
+        _disconnecting = True
+
+        def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
+            pass
+
+        async def handle_client(self) -> None:
+            server.connect_to_client(url)
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _RestartingConnection)
+
+    server.connect_to_client(url)
+    task = server._connection_tasks[url]  # noqa: SLF001
+    for _ in range(50):
+        if session.calls >= 2:
+            break
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
+
+    assert session.calls == 2
+    assert not task.done()
+    server.disconnect_from_client(url)
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
@@ -887,6 +1028,7 @@ async def test_pairing_attempt_queued_for_existing_dial_task(
 
         closing = False
         goodbye_reason = None
+        _disconnecting = False
 
         def __init__(
             self,
