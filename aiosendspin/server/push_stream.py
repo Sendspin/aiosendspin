@@ -923,6 +923,20 @@ class PushStream:
                 result.append((client, role))
         return result
 
+    def _get_warm_reattached_audio_roles(self) -> list[tuple[SendspinClient, Role]]:
+        """Get retained audio roles with cached audio whose client awaits its initial state."""
+        return [
+            (client, role)
+            for client in self._group.clients
+            if client.has_warm_reattached_roles
+            for role in client.active_roles
+            if (req := role.get_audio_requirements()) is not None
+            and not client.awaits_role_state(role.role_family)
+            and self._role_chunk_cache.get(
+                self._build_transform_key(req, req.channel_id or MAIN_CHANNEL, role)
+            )
+        ]
+
     def _max_active_output_delay_us(self) -> int:
         """Return the largest output delay among active audio roles."""
         roles = self._get_audio_roles()
@@ -1546,7 +1560,8 @@ class PushStream:
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
         ] = defaultdict(list)
 
-        for client, role in self._get_audio_roles():
+        # Encode reattached roles without delivering to them, so their late-join replay has no hole.
+        for client, role in [*self._get_audio_roles(), *self._get_warm_reattached_audio_roles()]:
             req = role.get_audio_requirements()
             if req is None:
                 continue
@@ -1865,7 +1880,10 @@ class PushStream:
         active_roles = {role for _client, role in self._get_audio_roles()}
         joining_keys = {
             self._build_transform_key(join_req, join_req.channel_id or MAIN_CHANNEL, role)
-            for role in self._pending_join_roles
+            for role in [
+                *self._pending_join_roles,
+                *(role for _client, role in self._get_warm_reattached_audio_roles()),
+            ]
             if (join_req := role.get_audio_requirements()) is not None
         }
 
