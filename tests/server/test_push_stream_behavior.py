@@ -4013,6 +4013,23 @@ async def test_live_stream_with_zero_min_buffer_schedules_ahead_of_play_time() -
 
 
 @pytest.mark.asyncio
+async def test_buffered_stream_with_zero_lead_schedules_ahead_of_play_time() -> None:
+    """A buffered player reporting no min_buffer or lead still gets audio before its play time."""
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=500_000)
+    group.clients.append(_DummyClient([role]))
+
+    stream = PushStream(loop=loop, clock=clock, group=group)
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(bytes(4800), fmt)
+    play_start = await stream.commit_audio()
+
+    assert play_start - role.get_output_delay_us() > clock.now_us()
+
+
+@pytest.mark.asyncio
 async def test_buffered_source_floors_at_min_buffer_at_startup() -> None:
     """Buffered streams floor startup at min_buffer + static (spec 8181237)."""
     loop = asyncio.get_running_loop()
