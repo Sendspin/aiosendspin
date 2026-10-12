@@ -2891,6 +2891,39 @@ async def test_historical_audio_skips_stale_delivery_but_advances_timing() -> No
 
 
 @pytest.mark.asyncio
+async def test_historical_audio_skips_chunk_straddling_send_ahead() -> None:
+    """A historical chunk starting before the send-ahead floor is not delivered."""
+    group = _DummyGroup(clients=[])
+    channel = UUID("abababab-abab-abab-abab-bbbbbbbbbbbb")
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=channel,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+
+    loop = asyncio.get_running_loop()
+    clock = ManualClock(now_us_value=1_000_000)
+    stream = PushStream(loop=loop, clock=clock, group=group)
+
+    floor_us = clock.now_us() + DEFAULT_INITIAL_DELAY_US
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_historical_audio(
+        bytes(4800), fmt, channel_id=channel, start_time_us=floor_us - 10_000
+    )
+    stream.prepare_historical_audio(bytes(4800), fmt, channel_id=channel)
+
+    await stream.commit_audio()
+
+    assert [chunk.timestamp_us for chunk in role.received] == [floor_us + 15_000]
+
+
+@pytest.mark.asyncio
 async def test_historical_audio_only_no_live() -> None:
     """Historical-only commit (no prepare_audio) bootstraps channel with correct timing."""
     group = _DummyGroup(clients=[])

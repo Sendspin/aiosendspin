@@ -1412,8 +1412,8 @@ class PushStream:
 
                 # For late-join injection, historical chunks may already be too old by the
                 # time they're processed. Keep timeline/cache continuity, but don't deliver
-                # chunks that would be immediately dropped as late by the connection layer.
-                if chunk_start_us + duration_us <= min_delivery_timestamp_us:
+                # chunks that start before the send-ahead floor.
+                if chunk_start_us < min_delivery_timestamp_us:
                     continue
 
                 # Encode and deliver to roles
