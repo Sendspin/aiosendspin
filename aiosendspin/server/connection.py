@@ -216,6 +216,9 @@ _CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
 _MAC_ADDRESS_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
 
 _NO_PAYLOAD_OBJECT = "sent a message without a payload object"
+_BEFORE_REHANDSHAKE_ACTIVATE = (
+    "sent a message before the server/activate that follows a re-handshake"
+)
 
 _SERVER_BINARY_TYPES: frozenset[int] = frozenset(
     message_type.value
@@ -423,6 +426,8 @@ class SendspinConnection:
         self._trusted_unpaired = False
         self._credential_mismatch = False
         self._moved_off_record = False
+        # Set from a re-handshake's key swap until the server/activate that follows it is sent.
+        self._awaiting_rehandshake_activate = False
         # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
         # DEPRECATED(spec-pr-167): remove in aiosendspin <version>
         # Set for a client on a pre-#177 wire: unencrypted, or a client/hello carrying
@@ -2012,6 +2017,7 @@ class SendspinConnection:
                 if self._legacy_hello
                 else ServerActivateMessage(activation_payload)
             )
+            self._awaiting_rehandshake_activate = False
             # Finish the send through a cancel so the count matches the activations sent.
             _, cancelled = await finish_despite_cancel(transport.send_str(activation.to_json()))
             self._pairing_index += 1
@@ -2213,6 +2219,7 @@ class SendspinConnection:
             psk=psk,
             strict=not self._server.allow_noncompliant_clients,
         )
+        self._awaiting_rehandshake_activate = True
         for reason in result.noncompliance:
             self._flag_noncompliance(reason)
         if self._is_long_term_paired and result.psk.category is not PskCategory.LONG_TERM:
@@ -2589,14 +2596,20 @@ class SendspinConnection:
         # Only a pre-#287 client's repeated hello belongs to the attempt; any other is flagged.
         if message_type == "client/hello" and not self._expects_rehandshake_hellos:
             return False
+        if self._awaiting_rehandshake_activate and message_type != "client/hello":
+            self._flag_noncompliance(_BEFORE_REHANDSHAKE_ACTIVATE)
         self._flag_pairing_frame_before_activate(message_type)
         if message_type in _PAIRING_MESSAGE_TYPES:
             self._flag_pairing_frame_deviations(cast("str", msg.data), message_type)
         self._pairing_message_queue.put_nowait(msg)
         return True
 
-    def _flag_message_before_first_activate(self, msg: WSMessage) -> None:
-        """Flag a message other than ``client/goodbye`` read by connect-time pairing's reader."""
+    def _flag_message_before_activate(self, msg: WSMessage) -> None:
+        """Flag a message sent while the client awaits a ``server/activate``."""
+        if self._awaiting_rehandshake_activate and msg.type in (WSMsgType.TEXT, WSMsgType.BINARY):
+            self._flag_noncompliance(_BEFORE_REHANDSHAKE_ACTIVATE)
+            return
+        # Connect-time pairing's reader admits only client/goodbye before the first one.
         if (
             self._pairing_message_queue is None
             or self._declared_activities is not None
@@ -2654,7 +2667,7 @@ class SendspinConnection:
 
                 if self._try_route_to_pairing_queue(msg):
                     continue
-                self._flag_message_before_first_activate(msg)
+                self._flag_message_before_activate(msg)
 
                 if msg.type == WSMsgType.ERROR:
                     self._logger.warning("WebSocket error: %s", transport.exception() or "unknown")
@@ -3191,6 +3204,8 @@ class SendspinConnection:
                 self._streaming_roles.clear()
             else:
                 self._streaming_roles.difference_update(message.payload.roles)
+        if isinstance(message, ServerActivateMessage):
+            self._awaiting_rehandshake_activate = False
         await wsock.send_str(message.to_json())
         if isinstance(message, ServerUnpairMessage):
             self._arm_unpair_goodbye_timeout()

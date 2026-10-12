@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +12,7 @@ import pytest
 from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.models.core import ClientLeaveMessage
+from aiosendspin.models.types import PairMethod
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import _MAX_WARNED_UNKNOWN_TYPES, SendspinConnection
 
@@ -185,7 +187,7 @@ _NOT_OFFERED = "sent a controller command the server did not offer"
         ({"command": "volume", "volume": 101}, False, []),
         ({"command": "from-the-future"}, True, [_NOT_OFFERED]),
         ({"command": "from-the-future"}, False, []),
-        ({"command": "seek", "position_ms": -1}, True, []),
+        ({"command": "seek", "position_ms": -1}, True, [_MALFORMED]),
     ],
 )
 async def test_controller_command_is_skipped_or_flagged(
@@ -193,7 +195,7 @@ async def test_controller_command_is_skipped_or_flagged(
     controller_active: bool,  # noqa: FBT001
     noncompliance: list[str],
 ) -> None:
-    """A bad controller object is flagged only from an active controller, never a negative seek."""
+    """A bad controller object is flagged only from an active controller."""
     command = orjson.dumps({"type": "client/command", "payload": {"controller": controller}})
     conn, client = _connection([command.decode(), _LEAVE], controller=controller_active)
 
@@ -201,6 +203,23 @@ async def test_controller_command_is_skipped_or_flagged(
 
     assert client.noncompliance == noncompliance
     client.handle_leave.assert_awaited_once_with()
+
+
+async def test_pairing_frame_before_the_post_rehandshake_activate_is_rejected() -> None:
+    """A strict server rejects a pair/abort under the new keys before it reaches the attempt."""
+    abort = orjson.dumps({"type": "pair/abort", "payload": {"reason": "user_cancelled"}})
+    conn, client = _connection([abort.decode()], strict=True)
+    queue: asyncio.Queue[WSMessage] = asyncio.Queue()
+    conn._pairing_message_queue = queue  # noqa: SLF001
+    conn._activated_pairing_method = PairMethod.PAIRING_PSK  # noqa: SLF001
+    conn._awaiting_rehandshake_activate = True  # noqa: SLF001
+
+    await conn._run_message_loop()  # noqa: SLF001
+
+    assert client.noncompliance == [
+        "sent a message before the server/activate that follows a re-handshake"
+    ]
+    assert queue.get_nowait().type is WSMsgType.CLOSE
 
 
 async def test_request_format_without_role_object_is_flagged() -> None:

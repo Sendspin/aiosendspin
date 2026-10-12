@@ -7,6 +7,7 @@ import json
 import pytest
 
 from aiosendspin import noise
+from aiosendspin.models.base import parse_noting_wire_deviations
 from aiosendspin.models.types import PairAbortReason, ServerErrorReason
 from aiosendspin.noise.models import (
     ClientInitMessage,
@@ -186,7 +187,10 @@ def test_client_pair_retry_round_trip() -> None:
 
 # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
 def test_pair_abort_reads_pre_rename_pin_mismatch() -> None:
-    """A pre-rename PIN client's pin_mismatch abort parses as a pairing-code mismatch."""
-    message = PairingMessage.from_json('{"type":"pair/abort","payload":{"reason":"pin_mismatch"}}')
+    """A pre-rename PIN client's pin_mismatch abort parses as a pairing-code mismatch, recorded."""
+    message, deviations = parse_noting_wire_deviations(
+        PairingMessage.from_json, '{"type":"pair/abort","payload":{"reason":"pin_mismatch"}}'
+    )
     assert isinstance(message, PairAbortMessage)
     assert message.payload.reason is PairAbortReason.PAIRING_CODE_MISMATCH
+    assert deviations == ["sent the pre-rename pin_mismatch reason"]

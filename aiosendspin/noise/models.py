@@ -157,6 +157,7 @@ class PairAbortPayload(SendspinModel):
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Read the pre-rename ``pin_mismatch`` reason as ``pairing_code_mismatch``."""
         if d.get("reason") == "pin_mismatch":
+            note_wire_deviation("sent the pre-rename pin_mismatch reason")
             return super().__pre_deserialize__(
                 {**d, "reason": PairAbortReason.PAIRING_CODE_MISMATCH.value}
             )
