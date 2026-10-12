@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aiosendspin.clock import Clock, ManualClock
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
@@ -119,7 +120,7 @@ def _custom_role_hello(client_id: str, role_id: str) -> ClientHelloPayload:
     )
 
 
-def _make_server() -> SendspinServer:
+def _make_server(clock: Clock | None = None) -> SendspinServer:
     loop = asyncio.get_running_loop()
     client_session = MagicMock()
     client_session.closed = True
@@ -130,6 +131,7 @@ def _make_server() -> SendspinServer:
         server_name="server",
         client_session=client_session,
         pairing_store=InMemoryServerPairingStore(),
+        clock=clock,
     )
 
 
@@ -397,7 +399,7 @@ async def test_add_external_preconnect_player_to_active_group_replays_cached_aud
 
     monkeypatch.setitem(ROLE_FACTORIES, "preconnectaudio@v1", _PreconnectAudioRole)
 
-    server = _make_server()
+    server = _make_server(ManualClock(now_us_value=1_000_000))
     callback_calls: list[ExternalStreamStartRequest] = []
 
     owner = SendspinClient(server, client_id="owner-preconnect")
