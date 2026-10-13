@@ -350,7 +350,7 @@ class SendspinConnection:
         Exactly one of `request` (client-initiated) or `wsock_client` (server-initiated)
         must be provided. For server-initiated connections, `url` should be provided
         for connection reason lookup and client URL registration, and
-        ``expected_client_id`` may be set to bind the handshake to a known peer.
+        ``expected_client_id`` names the client the dial's playback intent is for.
         ``pairing_attempt`` carries an operator-initiated pairing intent for this dial.
         """
         self._server = server
@@ -1202,7 +1202,6 @@ class SendspinConnection:
                 local_identity=self._server.identity,
                 psk_provider=self._psk_provider,
                 client_init_text=first_text,
-                expected_client_id=self._expected_client_id,
                 strict=not self._server.allow_noncompliant_clients,
             )
         except HandshakeNoncomplianceError as exc:
@@ -1478,6 +1477,12 @@ class SendspinConnection:
         await self._reload_trusted_unpaired()
 
         if self._client is None:
+            if self._url is not None and self._expected_client_id not in (None, client_id):
+                self._logger.info(
+                    "Client at %s changed identity from %s", self._url, self._expected_client_id
+                )
+                # A playback dial targeted the previous client, not this one.
+                self._server._consume_playback_reason(self._url)  # noqa: SLF001
             self._attach_new_client(client_id, client_info)
         else:
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
@@ -1669,13 +1674,6 @@ class SendspinConnection:
 
     async def _admit_legacy_client_id(self, client_id: str) -> bool:
         """Whether an unauthenticated (legacy) hello may claim ``client_id``."""
-        if self._expected_client_id is not None and client_id != self._expected_client_id:
-            self._logger.error(
-                "Unencrypted client/hello claims %r, expected %r",
-                client_id,
-                self._expected_client_id,
-            )
-            return False
         # A paired, pairing-staged, or trusted-unpaired client has proven it can
         # connect encrypted (its static key authenticated the Noise handshake);
         # never admit it unencrypted (downgrade protection).

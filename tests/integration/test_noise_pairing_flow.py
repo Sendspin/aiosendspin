@@ -40,6 +40,7 @@ from aiosendspin.models.types import (
     Activity,
     AudioCodec,
     ClientMessage,
+    ConnectionReason,
     GoodbyeReason,
     PairAbortReason,
     PairingCodeFormat,
@@ -511,11 +512,12 @@ async def test_pairing_dial_refuses_legacy_client(allow_unencrypted: bool) -> No
         await server.close()
 
 
-async def test_dial_enforces_expected_client_id_for_legacy_hello() -> None:
-    """A legacy hello on a dial pinned to another client_id is refused."""
+async def test_dial_admits_legacy_hello_from_a_new_identity_without_playback() -> None:
+    """A legacy hello from a new client_id at a known URL is admitted with a discovery reason."""
     server = _make_server(InMemoryServerPairingStore(), allow_unencrypted=True)
     try:
         async with _serve_legacy_peer() as (url, closed, frames):
+            server._connection_reasons[url] = ConnectionReason.PLAYBACK  # noqa: SLF001
             async with ClientSession() as session, session.ws_connect(url) as wsock:
                 conn = SendspinConnection(
                     server,
@@ -523,10 +525,15 @@ async def test_dial_enforces_expected_client_id_for_legacy_hello() -> None:
                     url=url,
                     expected_client_id="some-other-client",
                 )
-                await asyncio.wait_for(conn.handle_client(), timeout=5)
+                task = asyncio.create_task(conn.handle_client())
+                await _await_connected_client(server, "legacy-client")
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             await asyncio.wait_for(closed.wait(), timeout=5)
-            assert frames == []
-            assert server.get_client("legacy-client") is None
+            server_hello = json.loads(frames[0])
+            assert server_hello["type"] == "server/hello"
+            assert server_hello["payload"]["connection_reason"] == ConnectionReason.DISCOVERY.value
     finally:
         await server.close()
 
@@ -4613,12 +4620,20 @@ async def _host_incoming_client(
 
 @asynccontextmanager
 async def _dial(
-    server: SendspinServer, url: str, *, pairing_attempt: PairingAttempt | None = None
+    server: SendspinServer,
+    url: str,
+    *,
+    pairing_attempt: PairingAttempt | None = None,
+    expected_client_id: str | None = None,
 ) -> AsyncIterator[None]:
     """Dial ``url`` from ``server`` (server-initiated), running the connection in the background."""
     async with ClientSession() as session, session.ws_connect(url) as wsock:
         conn = SendspinConnection(
-            server, wsock_client=wsock, url=url, pairing_attempt=pairing_attempt
+            server,
+            wsock_client=wsock,
+            url=url,
+            expected_client_id=expected_client_id,
+            pairing_attempt=pairing_attempt,
         )
         task = asyncio.create_task(conn.handle_client())
         try:
@@ -4661,6 +4676,33 @@ async def test_attach_websocket_admits_server_initiated_dial() -> None:
             assert sdk.noise_psk.category is PskCategory.LONG_TERM
             server_client = await _await_connected_client(server, identity.peer_id)
             assert server_client.is_paired
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
+async def test_dial_admits_encrypted_client_that_replaced_a_legacy_identity() -> None:
+    """An encrypted client answering at a legacy client's URL is admitted and takes over the URL."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    legacy_id = "44:B1:76:D9:98:C7"
+
+    sdk = make_sdk_client(
+        identity=identity,
+        pairing_store=client_store,
+        client_name="c",
+        roles=[Roles.CONTROLLER],
+    )
+    try:
+        async with _host_incoming_client(sdk) as url:
+            server.register_client_url(legacy_id, url)
+            async with _dial(server, url, expected_client_id=legacy_id):
+                await _await_connected_client(server, identity.peer_id)
+                assert server.get_client_url(identity.peer_id) == url
+                assert server.get_client_url(legacy_id) is None
     finally:
         await sdk.disconnect()
         await server.close()

@@ -642,6 +642,19 @@ async def test_deferred_unregister_suppressed_when_reconnect_attaches() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deferred_unregister_completes_when_another_client_takes_the_url() -> None:
+    """A deferred unregister fires once a different client registers the URL."""
+    server = _make_server()
+    url = "ws://127.0.0.1:9006/sendspin"
+    await _defer_unregister_with_task(server, "reconnecting", url)
+
+    server.register_client_url("new-identity", url)
+    await _flush_asyncio_callbacks()
+
+    assert server.get_client("reconnecting") is None
+
+
+@pytest.mark.asyncio
 async def test_reclaim_timeout_refreshes_on_repeated_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

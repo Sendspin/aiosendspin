@@ -794,8 +794,13 @@ class SendspinServer:
         """Record the URL used to connect to a client.
 
         If the client was previously registered with a different URL, the
-        connection to that stale URL is cancelled.
+        connection to that stale URL is cancelled. Any other client known at
+        ``url`` loses it.
         """
+        for other_id in [c for c, u in self._client_urls.items() if u == url and c != client_id]:
+            del self._client_urls[other_id]
+            if other_id in self._deferred_unregister:
+                create_task(self._full_unregister_disconnected_client(other_id))
         previous_url = self._client_urls.get(client_id)
         self._client_urls[client_id] = url
         if previous_url is not None and previous_url != url:
