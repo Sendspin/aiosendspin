@@ -140,11 +140,6 @@ def test_server_record_maps_legacy_pair_method_names() -> None:
         PairMethod.PAIRING_PSK,
         PairMethod.DYNAMIC_PAIRING_CODE,
     ]
-    assert record.to_dict()["pair_methods"] == [
-        "static_pairing_code",
-        "pairing_psk",
-        "dynamic_pairing_code",
-    ]
 
 
 def test_server_record_rejects_unknown_pair_method() -> None:
@@ -297,6 +292,29 @@ async def test_file_server_store_persists_all_categories(tmp_path: Path) -> None
     assert await reloaded.trusted_unpaired("client-T") == trusted
 
 
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+async def test_file_server_store_writes_legacy_pair_method_names(tmp_path: Path) -> None:
+    """Saved pair methods use the pre-rename names and load back as the current members."""
+    path = tmp_path / "pairings.json"
+    store = await FileServerPairingStore.open(path)
+    methods = [
+        PairMethod.DYNAMIC_PAIRING_CODE,
+        PairMethod.PAIRING_PSK,
+        PairMethod.STATIC_PAIRING_CODE,
+    ]
+    record = replace(_server_record(client_id="client-A"), pair_methods=methods)
+    await store.store_record(record)
+
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["records"]["client-A"]["pair_methods"] == [
+        "dynamic_pin",
+        "pairing_psk",
+        "static_pin",
+    ]
+    reloaded = await FileServerPairingStore.open(path)
+    assert await reloaded.record_by_client_id("client-A") == record
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 async def test_file_stores_are_owner_readable_only(tmp_path: Path) -> None:
     """Store files hold PSKs; writes must produce 0600 files."""
@@ -332,7 +350,7 @@ async def test_file_server_store_tolerates_absent_sections(tmp_path: Path) -> No
 
 # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
 async def test_file_server_store_loads_legacy_pair_method_names(tmp_path: Path) -> None:
-    """A store saved with pre-rename method names loads, and saves only the new names."""
+    """A store saved with pre-rename method names loads."""
     path = tmp_path / "pairings.json"
     staged = _staged_psk()
     path.write_text(
@@ -360,12 +378,6 @@ async def test_file_server_store_loads_legacy_pair_method_names(tmp_path: Path) 
     assert record_b.pair_methods == [PairMethod.PAIRING_PSK, PairMethod.STATIC_PAIRING_CODE]
     assert await store.staged_pairing_psk("client-S") == staged
     assert await store.trusted_unpaired("client-T") is not None
-
-    await store.store_record(_server_record(client_id="client-C"))
-    saved = json.loads(path.read_text(encoding="utf-8"))["records"]
-    assert saved["client-A"]["pair_methods"] == ["dynamic_pairing_code"]
-    assert saved["client-B"]["pair_methods"] == ["pairing_psk", "static_pairing_code"]
-    assert saved["client-C"]["pair_methods"] == []
 
 
 async def test_file_server_store_skips_record_with_unknown_pair_method(
