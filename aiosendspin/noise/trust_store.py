@@ -138,7 +138,7 @@ class ServerPairingRecord:
             "psk_id": self.psk_id,
             "psk": b64url_encode(self.psk),
             "client_id": self.client_id,
-            "pair_methods": [m.value for m in self.pair_methods],
+            "pair_methods": [_LEGACY_PAIR_METHOD_NAMES.get(m, m.value) for m in self.pair_methods],
             "created_at": self.created_at.isoformat(),
             "owner": self.owner,
         }
@@ -970,9 +970,17 @@ def _opt_str(data: Mapping[str, object], key: str) -> str | None:
 
 
 # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+# Remove one release after _LEGACY_PAIR_METHOD_NAMES, so saves first rewrite stored files with
+# the new names. Without this map, loading skips records that use the old names.
 _LEGACY_PAIR_METHODS: Final[dict[str, PairMethod]] = {
     "dynamic_pin": PairMethod.DYNAMIC_PAIRING_CODE,
     "static_pin": PairMethod.STATIC_PAIRING_CODE,
+}
+
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+# Stored records keep the pre-rename names so aiosendspin 9.x can still read them.
+_LEGACY_PAIR_METHOD_NAMES: Final[dict[PairMethod, str]] = {
+    method: name for name, method in _LEGACY_PAIR_METHODS.items()
 }
 
 
