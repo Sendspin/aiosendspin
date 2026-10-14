@@ -159,6 +159,7 @@ from aiosendspin.noise.pairing import (
     PairingAttempt,
     PairingError,
     PairingTimeoutError,
+    RemotePairingAbortError,
     abort_pairing,
     run_dynamic_pairing_code_server,
     run_pairing_psk_server,
@@ -1309,6 +1310,12 @@ class SendspinConnection:
                     self._pairing_attempt = None
                 except PairingAbortError as exc:
                     if exc.reason in CLOSING_ABORT_REASONS:
+                        if (
+                            isinstance(exc, RemotePairingAbortError)
+                            and exc.reason is PairAbortReason.CONCURRENT_ATTEMPT
+                        ):
+                            # Pairing connections get this abort where others get client/goodbye.
+                            self._last_goodbye_reason = GoodbyeReason.CONCURRENT_ATTEMPT
                         raise
                     # Non-closing abort reason; the connection stays open for a retry.
                     self._logger.debug("Initial-connect pairing aborted: %s", exc)

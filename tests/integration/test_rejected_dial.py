@@ -34,6 +34,7 @@ from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     ServerPairingRecord,
 )
+from aiosendspin.server import client as client_module
 from aiosendspin.server.server import (
     ClientAddedEvent,
     ClientConnectedEvent,
@@ -230,33 +231,32 @@ async def test_initiate_pairing_pairs_a_client_held_elsewhere() -> None:
         assert Activity.PLAYBACK not in client.activities
 
 
-@pytest.mark.parametrize(
-    ("holder_reason", "code", "abort_reason"),
-    [
-        pytest.param(
-            ConnectionReason.DISCOVERY,
-            "87654321",
-            PairAbortReason.PAIRING_CODE_MISMATCH,
-            id="wrong_code",
-        ),
-        pytest.param(
-            ConnectionReason.PLAYBACK,
-            _STATIC_PAIRING_CODE,
-            PairAbortReason.CONCURRENT_ATTEMPT,
-            id="holder_playing",
-        ),
-    ],
-)
-async def test_initiate_pairing_raises_the_client_abort(
-    holder_reason: ConnectionReason, code: str, abort_reason: PairAbortReason
-) -> None:
+async def test_initiate_pairing_raises_the_client_abort() -> None:
     """A pairing dial the client aborts raises its abort reason and stores no record."""
-    async with _held_elsewhere(holder_reason) as (_client, client_id, pairing, _url):
+    async with _held_elsewhere(ConnectionReason.DISCOVERY) as (_client, client_id, pairing, _url):
         async with asyncio.timeout(5):
             with pytest.raises(RemotePairingAbortError) as excinfo:
-                await pairing.initiate_pairing(client_id, _static_code_attempt(code))
-        assert excinfo.value.reason is abort_reason
+                await pairing.initiate_pairing(client_id, _static_code_attempt("87654321"))
+        assert excinfo.value.reason is PairAbortReason.PAIRING_CODE_MISMATCH
         assert await pairing.pairing_store.record_by_client_id(client_id) is None
+
+
+async def test_pairing_refused_by_a_held_client_keeps_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pairing dial refused with concurrent_attempt keeps the client past the cleanup delay."""
+    monkeypatch.setattr(client_module, "CLIENT_CLEANUP_DELAY", 0.1)
+    async with _held_elsewhere(ConnectionReason.PLAYBACK) as (_client, client_id, pairing, _url):
+        async with asyncio.timeout(5):
+            with pytest.raises(RemotePairingAbortError) as excinfo:
+                await pairing.initiate_pairing(
+                    client_id, _static_code_attempt(_STATIC_PAIRING_CODE)
+                )
+            assert excinfo.value.reason is PairAbortReason.CONCURRENT_ATTEMPT
+            while (c := pairing.get_client(client_id)) is not None and c.connection is not None:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.3)
+        kept = pairing.get_client(client_id)
+        assert kept is not None
+        assert kept.cleanup_on_mdns_removal
 
 
 async def test_cancelled_initiate_pairing_closes_its_dial() -> None:
