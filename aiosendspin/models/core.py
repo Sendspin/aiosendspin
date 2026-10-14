@@ -275,8 +275,8 @@ class SupportedPairMethods(SendspinModel):
     for the server to log. Not part of the wire schema (omitted when None)."""
     offered_both_pairing_code_methods: bool | None = None
     """Whether the client offered both pairing-code methods, recorded for the server to log.
-    The static one is dropped in favor of a dynamic one offering digits. Not part of the wire
-    schema (omitted when None)."""
+    The static one is dropped in favor of a dynamic one offering digits, but stays usable.
+    Not part of the wire schema (omitted when None)."""
     ignored_values: list[str] | None = None
     """Descriptor values this implementation does not recognize, as ``method.field=value``,
     recorded for the server to log. Not part of the wire schema (omitted when None)."""
