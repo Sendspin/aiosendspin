@@ -461,6 +461,11 @@ _OPUS_FORMAT = {"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth
             id="non-list-locations",
         ),
         pytest.param(
+            {"supported_pair_methods": {"pairing_psk": {"locations": None}}},
+            "client/hello sent a malformed pair-method descriptor",
+            id="null-locations",
+        ),
+        pytest.param(
             {
                 "supported_pair_methods": {
                     "pairing_psk": {},

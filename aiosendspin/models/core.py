@@ -211,8 +211,7 @@ def _filter_descriptor_values(
 
 def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
     """Whether a recognized method's descriptor has the wrong shape, before value filtering."""
-    locations = descriptor.get("locations")
-    if locations is not None and not isinstance(locations, list):
+    if "locations" in descriptor and not isinstance(descriptor["locations"], list):
         return True
     if method != PairMethod.DYNAMIC_PAIRING_CODE.value:
         return False
