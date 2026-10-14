@@ -39,7 +39,6 @@ from aiosendspin.noise.models import (
     ServerPairInitPayload,
 )
 from aiosendspin.noise.pairing import (
-    PAIR_PENDING_MESSAGE_MAX_LEN,
     InvalidPairingCodeError,
     PairingAbortError,
     PairingAttempt,
@@ -279,21 +278,22 @@ async def test_static_pairing_code_server_first_message_wait_times_out(
 
 
 @pytest.mark.parametrize(
-    ("sent", "surfaced"),
+    ("sent", "surfaced", "flagged"),
     [
-        pytest.param(None, None, id="absent"),
-        pytest.param("Press the pairing button", "Press the pairing button", id="present"),
-        pytest.param("x" * 250, "x" * PAIR_PENDING_MESSAGE_MAX_LEN, id="truncated"),
+        pytest.param(None, None, False, id="absent"),
+        pytest.param("Press the pairing button", "Press the pairing button", False, id="present"),
+        pytest.param("x" + "é" * 150, "x" + "é" * 99, True, id="truncated"),
     ],
 )
 async def test_pair_pending_extends_the_first_message_wait(
-    sent: str | None, surfaced: str | None
+    sent: str | None, surfaced: str | None, *, flagged: bool
 ) -> None:
     """A matching pair-pending surfaces its message and switches to the gesture timeout."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
     pending_messages: list[str | None] = []
+    noncompliance: list[str] = []
 
     async def gated_client() -> None:
         await client_ews.send_str(
@@ -323,11 +323,15 @@ async def test_pair_pending_extends_the_first_message_wait(
             client_id="client-A",
             store=server_store,
             on_pair_pending=pending_messages.append,
+            on_noncompliance=noncompliance.append,
         ),
     )
     assert server_record is not None
     assert await server_store.record_by_client_id("client-A") == server_record
     assert pending_messages == [surfaced]
+    assert noncompliance == (
+        ["sent a client/pair-pending message over 200 bytes in UTF-8"] if flagged else []
+    )
 
 
 async def test_gesture_wait_times_out_after_pair_pending(

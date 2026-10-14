@@ -72,7 +72,7 @@ _SERVER_FINALIZE_TIMEOUT_S: float = 30.0
 SERVER_ATTEMPT_TIMEOUT_S: float = 180.0
 SERVER_FIRST_MESSAGE_TIMEOUT_S: float = 60.0
 SERVER_GESTURE_TIMEOUT_S: float = 360.0
-# Longest client/pair-pending message handed to on_pair_pending; longer ones are truncated.
+# Longest client/pair-pending message in UTF-8 bytes. Longer ones are truncated.
 PAIR_PENDING_MESSAGE_MAX_LEN = 200
 
 
@@ -147,7 +147,7 @@ class PairingAttempt:
     """Called when the client reports the attempt gesture-gated or held back.
 
     Receives the client's operator message, truncated to ``PAIR_PENDING_MESSAGE_MAX_LEN``
-    characters, or ``None`` when it sent none.
+    bytes in UTF-8, or ``None`` when it sent none.
     """
     owner: str | None = None
     """Application-defined authorization id the resulting record is bound to."""
@@ -404,8 +404,8 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
 
     Returns the persisted record.
     ``on_noncompliance`` is called for each retry past the round limit, for each field that
-    is not canonical base64url, and for each frame discarded before ``client/pair-init`` on the
-    first pairing activation since the handshake.
+    is not canonical base64url, for each frame discarded before ``client/pair-init`` on the
+    first pairing activation since the handshake, and for an over-length pending message.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds: one round under the ``sid`` without a round number. ``legacy_pin``
     serves a dynamic PIN client predating the pairing-code rename, which reveals ``nonce_B``
@@ -580,9 +580,9 @@ async def run_static_pairing_code_server(
     """Run the server side of the static-pairing-code flow.
 
     Returns the persisted record.
-    ``on_noncompliance`` is called for each field that is not canonical base64url, and for each
+    ``on_noncompliance`` is called for each field that is not canonical base64url, for each
     frame discarded before ``client/pair-init`` on the first pairing activation since the
-    handshake.
+    handshake, and for an over-length pending message.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds with the ``sid`` without a round number.
     """
@@ -1041,11 +1041,19 @@ async def _receive_pair_init(
             # A leftover from a superseded pairing server/activate: discard silently.
     if isinstance(message, ClientPairInitMessage):
         return message
+    pending_message = message.payload.message
+    if pending_message is not None:
+        encoded = pending_message.encode()
+        if len(encoded) > PAIR_PENDING_MESSAGE_MAX_LEN:
+            if on_noncompliance is not None:
+                on_noncompliance(
+                    "sent a client/pair-pending message over "
+                    f"{PAIR_PENDING_MESSAGE_MAX_LEN} bytes in UTF-8"
+                )
+            # Drop a character the cut splits.
+            pending_message = encoded[:PAIR_PENDING_MESSAGE_MAX_LEN].decode(errors="ignore")
     if on_pending is not None:
-        pending_message = message.payload.message
-        on_pending(
-            pending_message[:PAIR_PENDING_MESSAGE_MAX_LEN] if pending_message is not None else None
-        )
+        on_pending(pending_message)
     # In-order delivery leaves no room for leftovers after the matching pair-pending:
     # the next pairing frame must be this attempt's client/pair-init.
     async with _server_timeout(SERVER_GESTURE_TIMEOUT_S, "gesture-gated client/pair-init"):
