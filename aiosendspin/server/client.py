@@ -719,6 +719,9 @@ class SendspinClient:
 
         if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
             create_task(self._handle_takeover_disconnect())
+        elif goodbye_reason == GoodbyeReason.CONCURRENT_ATTEMPT:
+            # Another server holds the device, so a group start here must not dial it back.
+            create_task(self.quiesce_to_solo_stopped())
 
         # Schedule client cleanup from registry
         self._schedule_cleanup(goodbye_reason)
