@@ -278,6 +278,57 @@ async def test_static_pairing_code_server_first_message_wait_times_out(
 
 
 @pytest.mark.parametrize(
+    ("pairing_index", "leftover_index", "flagged"),
+    [
+        pytest.param(1, 0, True, id="zero"),
+        pytest.param(2, -1, True, id="negative"),
+        pytest.param(2, 1, False, id="superseded"),
+    ],
+)
+async def test_lower_pairing_index_below_one_is_flagged(
+    pairing_index: int, leftover_index: int, *, flagged: bool
+) -> None:
+    """A lower ``pairing_index`` is discarded, and flagged when no activation can produce it."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server_store = InMemoryServerPairingStore()
+    noncompliance: list[str] = []
+
+    async def client() -> None:
+        await client_ews.send_str(
+            ClientPairPendingMessage(
+                payload=ClientPairPendingPayload(pairing_index=leftover_index)
+            ).to_json()
+        )
+        await run_static_pairing_code_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=pairing_index,
+            static_pairing_code=_STATIC_PAIRING_CODE,
+            server_id="server-X",
+            store=InMemoryClientPairingStore(),
+        )
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    await asyncio.gather(
+        client(),
+        run_static_pairing_code_server(
+            server_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=pairing_index,
+            pairing_code_provider=provide,
+            client_id="client-A",
+            store=server_store,
+            on_noncompliance=noncompliance.append,
+        ),
+    )
+    assert noncompliance == (
+        ["sent client/pair-pending with a pairing_index below 1"] if flagged else []
+    )
+
+
+@pytest.mark.parametrize(
     ("sent", "surfaced", "flagged"),
     [
         pytest.param(None, None, False, id="absent"),

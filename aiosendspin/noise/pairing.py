@@ -236,9 +236,9 @@ async def run_pairing_psk_server(
     """Run the server side of the Pairing PSK flow.
 
     ``on_pair_init`` is called for every ``client/pair-init`` received, whatever its index.
-    ``on_noncompliance`` is called for each field that is not canonical base64url, and for each
+    ``on_noncompliance`` is called for each field that is not canonical base64url, for each
     frame discarded before ``client/pair-init`` on the first pairing activation since the
-    handshake.
+    handshake, and for each ``pairing_index`` below 1.
     A ``client/pair-finalize`` delivering ``pairing_psk`` or the Sentinel PSK raises
     ``PairingError``.
     ``client/pair-auth``, ``client/pair-confirm``, ``client/pair-finalize`` and
@@ -283,7 +283,8 @@ async def run_pairing_psk_server(
                     f"{type(message).__name__} pairing_index is ahead of the server's count"
                 )
             if message.payload.pairing_index < pairing_index:
-                # A leftover from a superseded pairing server/activate: discard silently.
+                _flag_pairing_index_below_one(message, on_noncompliance)
+                # A leftover from a superseded pairing server/activate: discard it.
                 continue
             if isinstance(message, ClientPairPendingMessage):
                 raise PairingError("client/pair-pending is not part of the Pairing PSK flow")
@@ -405,7 +406,8 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     Returns the persisted record.
     ``on_noncompliance`` is called for each retry past the round limit, for each field that
     is not canonical base64url, for each frame discarded before ``client/pair-init`` on the
-    first pairing activation since the handshake, and for an over-length pending message.
+    first pairing activation since the handshake, for an over-length pending message, and for
+    each ``pairing_index`` below 1.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds: one round under the ``sid`` without a round number. ``legacy_pin``
     serves a dynamic PIN client predating the pairing-code rename, which reveals ``nonce_B``
@@ -582,7 +584,7 @@ async def run_static_pairing_code_server(
     Returns the persisted record.
     ``on_noncompliance`` is called for each field that is not canonical base64url, for each
     frame discarded before ``client/pair-init`` on the first pairing activation since the
-    handshake, and for an over-length pending message.
+    handshake, for an over-length pending message, and for each ``pairing_index`` below 1.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds with the ``sid`` without a round number.
     """
@@ -978,6 +980,15 @@ def _pre_init_leftover_flagger(
     )
 
 
+def _flag_pairing_index_below_one(
+    message: ClientPairInitMessage | ClientPairPendingMessage,
+    on_noncompliance: Callable[[str], None] | None,
+) -> None:
+    """Flag a ``pairing_index`` no pairing ``server/activate`` can have produced."""
+    if message.payload.pairing_index < 1 and on_noncompliance is not None:
+        on_noncompliance(f"sent {message.to_dict()['type']} with a pairing_index below 1")
+
+
 async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
     """Await the ``pair/abort`` ending an unstarted attempt.
 
@@ -1038,7 +1049,8 @@ async def _receive_pair_init(
                 )
             if message.payload.pairing_index == pairing_index:
                 break
-            # A leftover from a superseded pairing server/activate: discard silently.
+            _flag_pairing_index_below_one(message, on_noncompliance)
+            # A leftover from a superseded pairing server/activate: discard it.
     if isinstance(message, ClientPairInitMessage):
         return message
     pending_message = message.payload.message
