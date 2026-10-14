@@ -25,6 +25,7 @@ from zeroconf import (
     NonUniqueNameException,
     ServiceStateChange,
     Zeroconf,
+    current_time_millis,
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
@@ -55,6 +56,9 @@ MAX_RECONNECT_BACKOFF_S = 300.0
 # Only consider a connection stable if it lasts at least this long, otherwise
 # a successful but broken session may cause a reconnection every second.
 STABLE_SERVER_INITIATED_SESSION_S = 10.0
+# Continued mDNS querying while no client is known, doubling up to RFC 6762's 60 minute cap.
+_MDNS_REQUERY_FIRST_S = 30.0
+_MDNS_REQUERY_MAX_S = 3600.0
 _NO_REDIAL_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.ANOTHER_SERVER,
@@ -298,6 +302,7 @@ class SendspinServer:
         self._zc: AsyncZeroconf | None = None
         self._mdns_service: AsyncServiceInfo | None = None
         self._mdns_browser: AsyncServiceBrowser | None = None
+        self._mdns_requery_handle: asyncio.TimerHandle | None = None
 
         logger.debug("SendspinServer initialized: id=%s, name=%s", self._id, server_name)
 
@@ -1242,6 +1247,23 @@ class SendspinServer:
             service_type,
             handlers=[self._on_mdns_service_state_change],
         )
+        self._schedule_mdns_requery(_MDNS_REQUERY_FIRST_S)
+
+    def _schedule_mdns_requery(self, delay_s: float) -> None:
+        if self._mdns_requery_handle is not None:
+            self._mdns_requery_handle.cancel()
+        self._mdns_requery_handle = self._loop.call_later(delay_s, self._mdns_requery, delay_s)
+
+    def _mdns_requery(self, delay_s: float) -> None:
+        self._mdns_requery_handle = None
+        browser = self._mdns_browser
+        if browser is None or self._mdns_client_urls:
+            return
+        # python-zeroconf stops querying after its startup queries while its cache is empty.
+        browser.query_scheduler.async_send_ready_queries(
+            first_request=False, now_millis=current_time_millis(), ready_types=browser.types
+        )
+        self._schedule_mdns_requery(min(delay_s * 2, _MDNS_REQUERY_MAX_S))
 
     def _on_mdns_service_state_change(
         self,
@@ -1344,6 +1366,8 @@ class SendspinServer:
         url = self._mdns_client_urls.pop(name, None)
         if url is None:
             return
+        if not self._mdns_client_urls:
+            self._schedule_mdns_requery(_MDNS_REQUERY_FIRST_S)
         self._mdns_goodbye_urls.discard(url)
         # Keep the retry loop alive if a normal client still wants to be reached.
         # mDNS can drop ahead of the device coming back, and the device may not
@@ -1385,6 +1409,9 @@ class SendspinServer:
     async def _stop_mdns(self) -> None:
         if self._zc is None:
             return
+        if self._mdns_requery_handle is not None:
+            self._mdns_requery_handle.cancel()
+            self._mdns_requery_handle = None
         try:
             if self._mdns_browser is not None:
                 await self._mdns_browser.async_cancel()
