@@ -74,6 +74,10 @@ SERVER_FIRST_MESSAGE_TIMEOUT_S: float = 60.0
 SERVER_GESTURE_TIMEOUT_S: float = 360.0
 # Longest client/pair-pending message in UTF-8 bytes. Longer ones are truncated.
 PAIR_PENDING_MESSAGE_MAX_LEN = 200
+# A client sends these only after its attempt's first message, so earlier ones are leftovers.
+_LEFTOVER_ABORT_REASONS = frozenset(
+    {PairAbortReason.ATTEMPT_TIMEOUT, PairAbortReason.PAIRING_CODE_MISMATCH}
+)
 
 
 class PairingError(Exception):
@@ -250,6 +254,7 @@ async def run_pairing_psk_server(
     finalize: ClientPairFinalizeMessage | None = None
     pair_init_seen = False
     on_discard = _pre_init_leftover_flagger(pairing_index, on_noncompliance)
+    discard_aborts = _LEFTOVER_ABORT_REASONS if pairing_index > 1 else frozenset()
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
             # Pairing-code exchange messages are leftovers from a superseded attempt.
@@ -258,6 +263,7 @@ async def run_pairing_psk_server(
                 (ClientPairInitMessage, ClientPairPendingMessage, ClientPairFinalizeMessage),
                 discard=(ClientPairAuthMessage, ClientPairConfirmMessage, ClientPairRetryMessage),
                 on_discard=on_discard,
+                discard_aborts=discard_aborts,
             )
             if isinstance(message, ClientPairFinalizeMessage):
                 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
@@ -906,6 +912,7 @@ async def _receive_pairing[T: PairingMessage](
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> T: ...
 
 
@@ -916,6 +923,7 @@ async def _receive_pairing[T: PairingMessage, U: PairingMessage](
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> T | U: ...
 
 
@@ -926,6 +934,7 @@ async def _receive_pairing[T: PairingMessage, U: PairingMessage, V: PairingMessa
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> T | U | V: ...
 
 
@@ -937,6 +946,7 @@ async def _receive_pairing(
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> PairingMessage:
     """Receive the next pairing frame not of a ``discard`` type, requiring an ``expected`` type."""
     kinds = expected if isinstance(expected, tuple) else (expected,)
@@ -952,6 +962,8 @@ async def _receive_pairing(
         except (ValueError, LookupError) as exc:
             raise PairingError(f"malformed message awaiting {expected_names}") from exc
         if isinstance(message, PairAbortMessage):
+            if message.payload.reason in discard_aborts:
+                continue
             raise RemotePairingAbortError(message.payload.reason)
         if not isinstance(message, discard):
             break
@@ -1026,9 +1038,11 @@ async def _receive_pair_init(
 
     It allows one gesture-extending ``client/pair-pending``.
     It also discards any leftover pair-init/pair-pending/pair-auth/pair-confirm/pair-finalize/
-    pair-retry from a superseded attempt.
+    pair-retry from a superseded attempt, and its pair/abort with a reason in
+    ``_LEFTOVER_ABORT_REASONS`` when an earlier pairing activation exists since the handshake.
     """
     on_discard = _pre_init_leftover_flagger(pairing_index, on_noncompliance)
+    discard_aborts = _LEFTOVER_ABORT_REASONS if pairing_index > 1 else frozenset()
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
             # Messages without a pairing_index are leftovers from a superseded attempt.
@@ -1042,6 +1056,7 @@ async def _receive_pair_init(
                     ClientPairRetryMessage,
                 ),
                 on_discard=on_discard,
+                discard_aborts=discard_aborts,
             )
             if message.payload.pairing_index > pairing_index:
                 raise PairingError(
