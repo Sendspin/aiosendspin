@@ -2690,8 +2690,15 @@ class SendspinConnection:
             self._flag_noncompliance("sent a message before the first server/activate")
 
     def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
-        if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
+        if message_type not in _PAIRING_MESSAGE_TYPES:
+            return
+        if self._activated_pairing_method is None:
             self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
+        # A pair/abort for an attempt that already ended has no effect.
+        elif self._pairing_index == 0 and message_type != "pair/abort":
+            self._flag_noncompliance(
+                f"sent {message_type} before any pairing server/activate since the handshake"
+            )
 
     def _flag_pairing_index_ahead(self, text: str, message_type: str) -> None:
         """Flag a ``pairing_index`` above the pairing activations sent since the handshake."""

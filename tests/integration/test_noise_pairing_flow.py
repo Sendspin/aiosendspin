@@ -2473,11 +2473,8 @@ async def test_strict_server_discards_a_pairing_frame_after_a_pairing() -> None:
             await client.disconnect()
 
 
-@pytest.mark.parametrize(("pairing_index", "closes"), [(1, True), (0, False)])
-async def test_strict_server_rejects_a_pair_init_ahead_of_its_count_outside_an_attempt(
-    pairing_index: int, *, closes: bool
-) -> None:
-    """Outside an attempt only a pair-init ahead of the server's count is a protocol error."""
+async def test_strict_server_rejects_a_pair_init_after_the_pairing_rehandshake() -> None:
+    """A pair-init with no pairing activation since the re-handshake closes a strict server."""
     server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
     client_identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
@@ -2505,16 +2502,10 @@ async def test_strict_server_rejects_a_pair_init_ahead_of_its_count_outside_an_a
             await _await_paired_session(client)
             assert client._admitted_connection is not None  # noqa: SLF001
             await client._admitted_connection._send_message(  # noqa: SLF001
-                ClientPairInitMessage(
-                    payload=ClientPairInitPayload(pairing_index=pairing_index)
-                ).to_json(),
+                ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json(),
                 force=True,
             )
-            if closes:
-                await _wait_until(lambda: not client.connected)
-            else:
-                await asyncio.sleep(0.1)  # a fatal frame would have torn the connection down
-                assert client.connected
+            await _wait_until(lambda: not client.connected)
         finally:
             await client.disconnect()
 
