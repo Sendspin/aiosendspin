@@ -795,6 +795,23 @@ def test_reset_progress_without_progress_cancels_scheduled_metadata() -> None:
     assert mgr.metadata.title == "Now"
 
 
+def test_freeze_progress_without_progress_cancels_scheduled_metadata() -> None:
+    """freeze_progress() with no position cancels the scheduled metadata, keeping the current."""
+    group, clock = _make_scheduling_group()
+    mgr = MetadataGroupRole(group)
+    member = MagicMock()
+    mgr._members = [member]  # noqa: SLF001
+    mgr.set_metadata(Metadata(title="Now"))
+    mgr.set_metadata(_track("Next", 0), timestamp_us=1_500_000)
+
+    mgr.freeze_progress()
+
+    assert _all_sent_metadata(member)[-1] == {"timestamp": 1_000_000, "title": "Now"}
+    clock.advance_us(600_000)
+    assert mgr.metadata is not None
+    assert mgr.metadata.title == "Now"
+
+
 def test_reset_progress_discards_scheduled_metadata() -> None:
     """The reset state itself discards scheduled metadata, which never takes effect."""
     group, clock = _make_scheduling_group()
