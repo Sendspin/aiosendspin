@@ -298,12 +298,15 @@ class TrustedUnpairedClient:
 
     client_id: str
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    approved_roles: frozenset[str] = frozenset()
+    """Pairing-required role families the operator explicitly approved."""
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to a JSON-friendly dict (timestamp ISO-8601)."""
         return {
             "client_id": self.client_id,
             "created_at": self.created_at.isoformat(),
+            "approved_roles": sorted(self.approved_roles),
         }
 
     @classmethod
@@ -312,6 +315,7 @@ class TrustedUnpairedClient:
         return cls(
             client_id=_str(data, "client_id"),
             created_at=datetime.fromisoformat(_str(data, "created_at")),
+            approved_roles=frozenset(_str_list(data, "approved_roles")),
         )
 
 
@@ -957,6 +961,20 @@ def _str(data: Mapping[str, object], key: str) -> str:
         msg = f"{key!r} must be a string, got {type(value).__name__}"
         raise TypeError(msg)
     return value
+
+
+def _str_list(data: Mapping[str, object], key: str) -> list[str]:
+    value = data.get(key, [])
+    if not isinstance(value, list):
+        msg = f"{key!r} must be a list, got {type(value).__name__}"
+        raise TypeError(msg)
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            msg = f"{key!r} entries must be strings, got {type(item).__name__}"
+            raise TypeError(msg)
+        items.append(item)
+    return items
 
 
 def _opt_str(data: Mapping[str, object], key: str) -> str | None:

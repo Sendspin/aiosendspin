@@ -12,7 +12,7 @@ from .events import (
 from .stream import SourceStream
 from .v1 import SourceV1Role
 
-# Source capture requires a paired connection.
+# Source capture requires a paired connection or explicit unpaired approval.
 register_role(
     "source@v1",
     lambda client: SourceV1Role(client=client),

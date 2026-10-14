@@ -235,9 +235,17 @@ async def test_server_store_remove_record(server_store: ServerPairingStore) -> N
 
 def test_trusted_unpaired_client_round_trip() -> None:
     """TrustedUnpairedClient.to_dict/from_dict preserves every field."""
-    client = TrustedUnpairedClient(client_id="client-A")
+    client = TrustedUnpairedClient(client_id="client-A", approved_roles=frozenset({"source"}))
     restored = TrustedUnpairedClient.from_dict(client.to_dict())
     assert restored == client
+
+
+def test_trusted_unpaired_client_without_approved_roles_loads() -> None:
+    """A record saved before role approval existed loads with no approved roles."""
+    restored = TrustedUnpairedClient.from_dict(
+        {"client_id": "client-A", "created_at": "2026-05-01T12:00:00+00:00"}
+    )
+    assert restored.approved_roles == frozenset()
 
 
 async def test_server_store_trusted_unpaired_lifecycle(server_store: ServerPairingStore) -> None:

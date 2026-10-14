@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -742,9 +743,19 @@ class SendspinServer:
         await connection.refresh_trusted_unpaired()
         connection.unpair()
 
-    async def trust_unpaired(self, client_id: str) -> None:
-        """Approve ``client_id`` for unpaired playback, re-activating it if connected."""
-        await self.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=client_id))
+    async def trust_unpaired(
+        self, client_id: str, *, approved_roles: AbstractSet[str] | None = None
+    ) -> None:
+        """Approve ``client_id`` for unpaired playback, re-activating it if connected.
+
+        ``approved_roles`` replaces the approved pairing-required families. ``None`` keeps them.
+        """
+        if approved_roles is None:
+            existing = await self.pairing_store.trusted_unpaired(client_id)
+            approved_roles = existing.approved_roles if existing is not None else frozenset()
+        await self.pairing_store.add_trusted_unpaired(
+            TrustedUnpairedClient(client_id=client_id, approved_roles=frozenset(approved_roles))
+        )
         await self._refresh_trusted_unpaired(client_id)
 
     async def untrust_unpaired(self, client_id: str) -> None:

@@ -424,6 +424,7 @@ class SendspinConnection:
         self._negotiated_roles: list[str] = []
         self._client: SendspinClient | None = None
         self._trusted_unpaired = False
+        self._approved_role_families: frozenset[str] = frozenset()
         self._credential_mismatch = False
         self._moved_off_record = False
         # Set from a re-handshake's key swap until the server/activate that follows it is sent.
@@ -1731,10 +1732,14 @@ class SendspinConnection:
         return self._noise_psk is not None and self._noise_psk.category is PskCategory.LONG_TERM
 
     def _filter_pairing_roles(self, role_ids: list[str]) -> list[str]:
-        """Drop roles that require pairing unless the connection is long-term paired."""
+        """Drop roles that require pairing unless long-term paired or approved for this client."""
         if self._is_long_term_paired:
             return role_ids
-        return [rid for rid in role_ids if not role_requires_pairing(rid)]
+        return [
+            rid
+            for rid in role_ids
+            if not role_requires_pairing(rid) or role_family(rid) in self._approved_role_families
+        ]
 
     @property
     def _roles_to_activate(self) -> list[str]:
@@ -2346,9 +2351,9 @@ class SendspinConnection:
         if self._noise_psk is None or self._noise_psk.category is PskCategory.LONG_TERM:
             return
         assert self._client_id is not None
-        self._trusted_unpaired = (
-            await self._server.pairing_store.trusted_unpaired(self._client_id) is not None
-        )
+        trusted = await self._server.pairing_store.trusted_unpaired(self._client_id)
+        self._trusted_unpaired = trusted is not None
+        self._approved_role_families = trusted.approved_roles if trusted else frozenset()
 
     # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
     def enable_management(self) -> None:
