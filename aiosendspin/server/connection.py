@@ -361,6 +361,8 @@ class SendspinConnection:
         self._expected_client_id = expected_client_id
         self._in_pairing = False
         self._pairing_attempt = pairing_attempt
+        # The dial's attempt until its outcome is reported to the server.
+        self._dial_pairing_attempt = pairing_attempt
         self._pairing_task: asyncio.Task[bool] | None = None
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_index = 0
@@ -1340,18 +1342,31 @@ class SendspinConnection:
                 )
         return True
 
+    def _settle_dial_pairing(self, err: BaseException | None) -> None:
+        """Report the dial's pairing outcome to the server once."""
+        attempt = self._dial_pairing_attempt
+        if attempt is None:
+            return
+        self._dial_pairing_attempt = None
+        self._server._settle_pairing_attempt(attempt, err)  # noqa: SLF001
+
     async def _pair_on_connect(self, transport: EncryptedWebSocket) -> bool:
         """Run the pairing this connection was admitted for, alongside the message loops."""
-        self._refuse_unadvertised_pairing(self._pairing_attempt)
-        queue: asyncio.Queue[WSMessage] = asyncio.Queue()
-        self._pairing_message_queue = queue
-        # The writer starts once the first server/activate is out.
-        self._writer_paused = True
-        self._message_loop_task = create_task(self._run_message_loop())
         try:
-            return await self._pair(QueuedEncryptedWebSocket(transport, queue))
+            self._refuse_unadvertised_pairing(self._pairing_attempt)
+            queue: asyncio.Queue[WSMessage] = asyncio.Queue()
+            self._pairing_message_queue = queue
+            # The writer starts once the first server/activate is out.
+            self._writer_paused = True
+            self._message_loop_task = create_task(self._run_message_loop())
+            paired = await self._pair(QueuedEncryptedWebSocket(transport, queue))
+        except Exception as exc:
+            self._settle_dial_pairing(exc)
+            raise
         finally:
             self._pairing_message_queue = None
+        self._settle_dial_pairing(None if paired else PairingError("pairing failed"))
+        return paired
 
     async def _send_server_hello_and_recv(self, transport: Transport) -> bool:
         """Send ``server/hello`` and receive+ingest ``client/hello``."""
@@ -3727,10 +3742,12 @@ class SendspinConnection:
             await self._connection_done.wait()
         except HandshakeAbortedError as exc:
             self._logger.debug("Noise handshake aborted: %s", exc)
+            self._settle_dial_pairing(exc)
         except PairingError as exc:
             self._logger.debug("Pairing aborted: %s", exc)
         except ClientComplianceError:
             # Strict mode: hard-reject (no warm reconnect); already logged at error.
             self._closing = True
         finally:
+            self._settle_dial_pairing(PairingError("connection closed before pairing finished"))
             await self._cleanup_connection()
