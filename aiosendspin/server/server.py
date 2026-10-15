@@ -1089,20 +1089,25 @@ class SendspinServer:
                 self._resolve_initial_connect_waiters(url, err)
             logger.exception("Unexpected error occurred")
         finally:
-            self._connection_tasks.pop(url, None)
-            self._retry_events.pop(url, None)
-            self._dial_connections.pop(url, None)
-            self._redial_urls.discard(url)
-            self._pending_pairing_attempts.pop(url, None)
-            self._initial_connect_succeeded.discard(url)
-            self._connection_options.pop(url, None)
-            self._connection_reasons.pop(url, None)
             current = asyncio.current_task()
-            await self._complete_deferred_unregister(
-                url,
-                connection_succeeded=first_connection_succeeded,
-                cancelled=current is not None and current.cancelling() > 0,
-            )
+            # A dial started for this URL after this task was stopped owns the URL's state.
+            if self._connection_tasks.get(url) in (None, current):
+                self._release_dial_state(url)
+                await self._complete_deferred_unregister(
+                    url,
+                    connection_succeeded=first_connection_succeeded,
+                    cancelled=current is not None and current.cancelling() > 0,
+                )
+
+    def _release_dial_state(self, url: str) -> None:
+        self._connection_tasks.pop(url, None)
+        self._retry_events.pop(url, None)
+        self._dial_connections.pop(url, None)
+        self._redial_urls.discard(url)
+        self._pending_pairing_attempts.pop(url, None)
+        self._initial_connect_succeeded.discard(url)
+        self._connection_options.pop(url, None)
+        self._connection_reasons.pop(url, None)
 
     async def start_server(
         self,

@@ -660,6 +660,44 @@ async def test_mdns_removal_keeps_connection_task_for_persistent_client(
 
 
 @pytest.mark.asyncio
+async def test_stopped_dial_keeps_the_state_of_a_dial_started_right_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dial task stopped without awaiting it leaves a newer dial for the same URL intact."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://127.0.0.1:9999/sendspin"
+
+    class _HangingConnection:
+        goodbye_reason = None
+        should_retry_server_initiated_connection = True
+        _disconnecting = False
+
+        def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
+            pass
+
+        async def handle_client(self) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _HangingConnection)
+
+    server.connect_to_client(url)
+    old_task = server._connection_tasks[url]  # noqa: SLF001
+    while url not in server._dial_connections:  # noqa: ASYNC110, SLF001
+        await asyncio.sleep(0)
+    server.disconnect_from_client(url)
+    server.connect_to_client(url)
+    new_task = server._connection_tasks[url]  # noqa: SLF001
+    with suppress(asyncio.CancelledError):
+        await old_task
+
+    assert server._connection_tasks.get(url) is new_task  # noqa: SLF001
+    assert url in server._retry_events  # noqa: SLF001
+    new_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await new_task
+
+
+@pytest.mark.asyncio
 async def test_mdns_removal_cancels_connection_when_no_persistent_client() -> None:
     """With no persistent client (or only an ANOTHER_SERVER retainer), tear the retry task down."""
     session = _PersistentSuccessfulSession()
