@@ -947,3 +947,18 @@ async def test_source_activates_on_unpaired_connection_only_while_approved() -> 
     )
     await conn.refresh_trusted_unpaired()
     assert [role.role_id for role in client.active_roles] == [Roles.PLAYER.value]
+
+
+@pytest.mark.asyncio
+async def test_revoking_source_approval_during_pairing_ends_pairing() -> None:
+    """Pairing keeps active roles, so revoking only source must end the attempt."""
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value, "source@v1"]), approved_roles=frozenset({"source"})
+    )
+    conn._in_pairing = True  # noqa: SLF001
+    await conn._server.pairing_store.add_trusted_unpaired(  # noqa: SLF001
+        TrustedUnpairedClient(client_id=CLIENT_ID)
+    )
+    with patch.object(conn, "end_pairing", new=AsyncMock()) as end_pairing:
+        await conn.refresh_trusted_unpaired()
+    end_pairing.assert_awaited_once()

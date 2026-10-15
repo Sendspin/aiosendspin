@@ -2335,12 +2335,15 @@ class SendspinConnection:
         if self._client is None:
             return
         was_trusted = self._trusted_unpaired
+        was_approved = self._approved_role_families
         await self._reload_trusted_unpaired()
         if self._declared_activities is None:
             return  # The first server/activate reads the reloaded approval.
         if self._in_pairing:
             # A server/activate would cancel the attempt; the one ending pairing carries the change.
-            if was_trusted and not self._trusted_unpaired:
+            if (was_trusted and not self._trusted_unpaired) or (
+                was_approved - self._approved_role_families
+            ):
                 await self.end_pairing()
             return
         self._declared_activities = self._desired_activities
