@@ -26,6 +26,7 @@ from aiosendspin.models.types import (
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.pairing import (
     PairingAttempt,
+    PairingError,
     RemotePairingAbortError,
 )
 from aiosendspin.noise.trust_store import (
@@ -275,6 +276,92 @@ async def test_cancelled_initiate_pairing_closes_its_dial() -> None:
         async with asyncio.timeout(5):
             while url in pairing._connection_tasks:  # noqa: ASYNC110, SLF001
                 await asyncio.sleep(0.01)
+
+
+async def test_initiate_pairing_refuses_a_different_client_at_the_address() -> None:
+    """A pairing dial answered by a different client pairs nothing and raises."""
+    server = SendspinServer(
+        loop=asyncio.get_running_loop(),
+        identity=Identity.generate(),
+        server_name="test-server",
+        pairing_store=InMemoryServerPairingStore(),
+    )
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await client_store.store_pairing_config(
+        replace(
+            await client_store.get_pairing_config(),
+            static_pairing_code_enabled=True,
+            unpaired_access_enabled=True,
+        )
+    )
+    await client_store.set_static_pairing_code(_STATIC_PAIRING_CODE)
+
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        if active:
+            client.open_pairing_window()
+
+    client = _player_client(identity, client_store, PairingSupport(gesture_prompt=gesture_prompt))
+    try:
+        async with _host_incoming_client(client) as url:
+            try:
+                server.get_or_create_client("client-1")
+                server.register_client_url("client-1", url)
+                async with asyncio.timeout(5):
+                    with pytest.raises(PairingError, match="different client"):
+                        await server.initiate_pairing(
+                            "client-1", _static_code_attempt(_STATIC_PAIRING_CODE)
+                        )
+                assert await server.pairing_store.record_by_client_id(identity.peer_id) is None
+            finally:
+                await client.disconnect()
+    finally:
+        await server.close()
+
+
+async def test_initiate_pairing_pairs_its_client_after_the_address_moved() -> None:
+    """A pairing dial pairs its client even after another client took over the address."""
+    server = SendspinServer(
+        loop=asyncio.get_running_loop(),
+        identity=Identity.generate(),
+        server_name="test-server",
+        pairing_store=InMemoryServerPairingStore(),
+    )
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await client_store.store_pairing_config(
+        replace(
+            await client_store.get_pairing_config(),
+            static_pairing_code_enabled=True,
+            unpaired_access_enabled=True,
+        )
+    )
+    await client_store.set_static_pairing_code(_STATIC_PAIRING_CODE)
+
+    async def gesture_prompt(active: bool) -> None:  # noqa: FBT001
+        if active:
+            client.open_pairing_window()
+
+    client = _player_client(identity, client_store, PairingSupport(gesture_prompt=gesture_prompt))
+    try:
+        async with _host_incoming_client(client) as url:
+            try:
+                server.get_or_create_client(identity.peer_id)
+                server.register_client_url(identity.peer_id, url)
+                pairing = asyncio.create_task(
+                    server.initiate_pairing(
+                        identity.peer_id, _static_code_attempt(_STATIC_PAIRING_CODE)
+                    )
+                )
+                await asyncio.sleep(0)
+                server.register_client_url("other-client", url)
+                async with asyncio.timeout(5):
+                    await pairing
+                assert await server.pairing_store.record_by_client_id(identity.peer_id) is not None
+            finally:
+                await client.disconnect()
+    finally:
+        await server.close()
 
 
 async def test_initiate_pairing_raises_when_the_client_is_unreachable() -> None:

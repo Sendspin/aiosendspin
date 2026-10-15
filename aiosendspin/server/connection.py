@@ -1423,7 +1423,7 @@ class SendspinConnection:
             await self.disconnect(retry_connection=False)
             return False
 
-    async def _ingest_client_hello_checked(self, text: str) -> bool:
+    async def _ingest_client_hello_checked(self, text: str) -> bool:  # noqa: PLR0915
         """Body of the hello exchange; raises ClientComplianceError in strict mode."""
         try:
             decoded = orjson.loads(text)
@@ -1504,8 +1504,13 @@ class SendspinConnection:
                 self._logger.info(
                     "Client at %s changed identity from %s", self._url, self._expected_client_id
                 )
-                # A playback dial targeted the previous client, not this one.
+                # A playback or pairing dial targeted the previous client, not this one.
                 self._server._consume_playback_reason(self._url)  # noqa: SLF001
+                if self._dial_pairing_attempt is not None:
+                    self._settle_dial_pairing(
+                        PairingError("a different client answered at this address")
+                    )
+                    self._pairing_attempt = None
             self._attach_new_client(client_id, client_info)
         else:
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>

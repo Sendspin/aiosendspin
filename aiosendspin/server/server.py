@@ -286,8 +286,8 @@ class SendspinServer:
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
         # Pairing intents handed to an already-running dial task, consumed on its next dial.
         self._pending_pairing_attempts: dict[str, PairingAttempt] = {}
-        # Callers awaiting a dial's pairing outcome, keyed by the attempt's identity.
-        self._pairing_waiters: dict[int, asyncio.Future[None]] = {}
+        # The client each dial attempt pairs and its caller's waiter, keyed by attempt identity.
+        self._pairing_waiters: dict[int, tuple[str, asyncio.Future[None]]] = {}
         self._client_urls: dict[str, str] = {}  # client_id → url
         self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
         self._external_registration_timeouts: dict[str, asyncio.Handle] = {}
@@ -716,11 +716,12 @@ class SendspinServer:
         A known client that is not connected is dialed at its last address with the attempt,
         which raises the same errors, plus the dial's connection errors and
         ``HandshakeAbortedError`` when the client lacks the attempt's Pairing PSK, or
-        ``PairingError`` when a newer attempt replaces it or the dial ends first. A reconnect
-        already running for that address carries the attempt on its next dial, or fails it
-        with that dial's connection error. An attempt queued behind a session that is already
-        connecting waits until that session ends, so callers wanting a deadline must apply their
-        own timeout. Raises ``ValueError`` for an unknown client or one with no known address.
+        ``PairingError`` when a newer attempt replaces it, the dial ends first or a different
+        client answers at that address. A reconnect already running for that address carries
+        the attempt on its next dial, or fails it with that dial's connection error. An attempt
+        queued behind a session that is already connecting waits until that session ends, so
+        callers wanting a deadline must apply their own timeout. Raises ``ValueError`` for an
+        unknown client or one with no known address.
         """
         client = self.get_client(client_id)
         if client is not None and client.connection is None:
@@ -742,7 +743,7 @@ class SendspinServer:
         if attempt.method is PairMethod.PAIRING_PSK and attempt.client_id != client_id:
             raise InvalidPairingCodeError("pairing token is for another client")
         waiter: asyncio.Future[None] = self._loop.create_future()
-        self._pairing_waiters[id(attempt)] = waiter
+        self._pairing_waiters[id(attempt)] = (client_id, waiter)
         started_dial = url not in self._connection_tasks or self._dial_closing_for_good(url)
         try:
             self.connect_to_client(url, pairing_attempt=attempt)
@@ -778,15 +779,21 @@ class SendspinServer:
                 replaced, PairingError("replaced by a newer pairing attempt")
             )
 
+    def _dial_target(self, url: str, attempt: PairingAttempt | None) -> str | None:
+        """Return the client a dial to ``url`` is meant to reach, preferring the attempt's."""
+        entry = self._pairing_waiters.get(id(attempt)) if attempt is not None else None
+        return entry[0] if entry is not None else self.get_client_id_for_url(url)
+
     def _fail_pending_pairing(self, url: str, err: BaseException) -> None:
         if pending := self._pending_pairing_attempts.pop(url, None):
             self._settle_pairing_attempt(pending, err)
 
     def _settle_pairing_attempt(self, attempt: PairingAttempt, err: BaseException | None) -> None:
         """Resolve the caller awaiting ``attempt``'s outcome, if any."""
-        waiter = self._pairing_waiters.pop(id(attempt), None)
-        if waiter is None or waiter.done():
+        entry = self._pairing_waiters.pop(id(attempt), None)
+        if entry is None or entry[1].done():
             return
+        waiter = entry[1]
         if err is None:
             waiter.set_result(None)
         else:
@@ -1097,7 +1104,7 @@ class SendspinServer:
                             self,
                             wsock_client=wsock,
                             url=url,
-                            expected_client_id=self.get_client_id_for_url(url),
+                            expected_client_id=self._dial_target(url, pairing_attempt),
                             pairing_attempt=pairing_attempt,
                         )
                         pairing_attempt = None
