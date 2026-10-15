@@ -53,11 +53,19 @@ _T = TypeVar("_T")
 CLIENT_CLEANUP_DELAY = 180.0
 
 # Reasons that trigger immediate client cleanup from the registry.
-# Note: ANOTHER_SERVER is intentionally excluded and never auto-cleaned up.
+# Note: ANOTHER_SERVER and CONCURRENT_ATTEMPT are intentionally excluded and never auto-cleaned up.
 IMMEDIATE_CLEANUP_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.SHUTDOWN,
         GoodbyeReason.USER_REQUEST,
+    }
+)
+
+# Reasons that keep a disconnected client until its mDNS record disappears.
+_RETAINED_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
+    {
+        GoodbyeReason.ANOTHER_SERVER,
+        GoodbyeReason.CONCURRENT_ATTEMPT,
     }
 )
 
@@ -141,7 +149,7 @@ class SendspinClient:
 
         # Pending cleanup handle (scheduled via loop.call_soon/call_later on disconnect)
         self._cleanup_handle: asyncio.Handle | None = None
-        # True when we intentionally retain a disconnected client after ANOTHER_SERVER goodbye.
+        # True when we intentionally retain a disconnected client after a retained goodbye reason.
         self._cleanup_on_mdns_removal: bool = False
         self._last_goodbye_reason: GoodbyeReason | None = None
 
@@ -711,6 +719,9 @@ class SendspinClient:
 
         if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
             create_task(self._handle_takeover_disconnect())
+        elif goodbye_reason == GoodbyeReason.CONCURRENT_ATTEMPT:
+            # Another server holds the device, so a group start here must not dial it back.
+            create_task(self.quiesce_to_solo_stopped())
 
         # Schedule client cleanup from registry
         self._schedule_cleanup(goodbye_reason)
@@ -751,7 +762,7 @@ class SendspinClient:
             self._cleanup_on_mdns_removal = False
             return
 
-        if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
+        if goodbye_reason in _RETAINED_GOODBYE_REASONS:
             self._logger.debug("Skipping cleanup scheduling (reason: %s)", goodbye_reason)
             self._cleanup_on_mdns_removal = True
             return

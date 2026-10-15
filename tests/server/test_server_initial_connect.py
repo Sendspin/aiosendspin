@@ -19,7 +19,7 @@ from aiosendspin.noise.keys import Identity, generate_psk
 from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
-from aiosendspin.server.server import SendspinServer
+from aiosendspin.server.server import SendspinServer, _ended_without_redial
 
 
 class _FailingInitialConnectSession:
@@ -752,6 +752,7 @@ async def test_mdns_update_reconnect_decision(
     "goodbye_reason",
     [
         GoodbyeReason.USER_REQUEST,
+        GoodbyeReason.CONCURRENT_ATTEMPT,
         # A non-playback session that dropped without goodbye.
         None,
     ],
@@ -777,6 +778,7 @@ async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
 
         should_retry_server_initiated_connection = False
         _closing = False
+        _client_info = object()
 
         def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
             self.goodbye_reason = goodbye_reason
@@ -802,6 +804,12 @@ async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
     )
     assert url in server._connection_tasks  # noqa: SLF001
     await _wait_for_connection_task_cleanup(server, url)
+
+
+def test_concurrent_attempt_before_hello_leaves_redial_to_mdns() -> None:
+    """A client that rejected a dial before its hello is redialed on the next mDNS update."""
+    conn = MagicMock(goodbye_reason=GoodbyeReason.CONCURRENT_ATTEMPT, _client_info=None)
+    assert not _ended_without_redial(conn)
 
 
 @pytest.mark.parametrize(("via_mdns_update", "expected_dials"), [(False, 2), (True, 1)])

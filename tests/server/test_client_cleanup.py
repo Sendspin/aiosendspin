@@ -199,6 +199,36 @@ async def test_another_server_disconnect_ungroups_client(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_attempt_disconnect_leaves_shared_group(
+    mock_server: _MockServer, client: SendspinClient
+) -> None:
+    """A client that rejected a dial leaves the group it shared on this server."""
+    other = SendspinClient(mock_server, client_id="player-2")
+    SendspinGroup(mock_server, other)
+    await client.group.add_client(other)
+    shared_group = client.group
+
+    client.detach_connection(GoodbyeReason.CONCURRENT_ATTEMPT)
+    await asyncio.sleep(0)
+
+    assert client.group is not shared_group
+    assert client.group.clients == [client]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_attempt_disconnect_stops_solo_playback(
+    client: SendspinClient,
+) -> None:
+    """A client that rejected a dial no longer keeps its solo group playing."""
+    client.group.start_stream()
+
+    client.detach_connection(GoodbyeReason.CONCURRENT_ATTEMPT)
+    await asyncio.sleep(0)
+
+    assert not client.group.has_active_stream
+
+
+@pytest.mark.asyncio
 async def test_another_server_disconnect_solo_client_is_stopped(
     client: SendspinClient,
 ) -> None:

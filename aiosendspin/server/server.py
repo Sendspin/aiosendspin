@@ -181,6 +181,9 @@ def _get_first_valid_ip(addresses: list[str]) -> str | None:
 def _ended_without_redial(conn: SendspinConnection) -> bool:
     """Return whether a dial's session leaves redialing to an explicit call."""
     reason = conn.goodbye_reason
+    if reason is GoodbyeReason.CONCURRENT_ATTEMPT:
+        # A client rejected before its hello is not kept, so mDNS keeps redialing it.
+        return conn._client_info is not None  # noqa: SLF001
     # With no goodbye and no server-side close, a non-playback session dropped.
     return reason in _NO_REDIAL_GOODBYE_REASONS or (
         reason is None and not conn._closing  # noqa: SLF001
@@ -541,6 +544,10 @@ class SendspinServer:
         self, client_id: str, goodbye_reason: GoodbyeReason | None
     ) -> None:
         """Emit a ClientDisconnectedEvent (called from SendspinClient)."""
+        client = self._clients.get(client_id)
+        if client is not None and goodbye_reason is GoodbyeReason.CONCURRENT_ATTEMPT:
+            # A rejected dial can close before the initial client/state.
+            self._fire_client_added_event_once(client)
         self._signal_event(ClientDisconnectedEvent(client_id, goodbye_reason))
 
     async def on_client_connect(self, request: web.Request) -> web.StreamResponse:
@@ -835,7 +842,8 @@ class SendspinServer:
         """Attempt to reconnect to a client for playback.
 
         Returns True if reconnection was initiated, False if no URL available.
-        Used when starting playback to reclaim clients that disconnected with 'another_server'.
+        Used when starting playback to reclaim clients that disconnected with 'another_server'
+        or 'concurrent_attempt'.
 
         The client must reconnect within timeout_s seconds; otherwise it is
         fully unregistered from this server.
@@ -1398,7 +1406,7 @@ class SendspinServer:
         return False
 
     async def _cleanup_retained_clients_for_removed_mdns_url(self, url: str) -> None:
-        """Remove retained ANOTHER_SERVER clients when their mDNS URL disappears."""
+        """Remove clients retained after their goodbye when their mDNS URL disappears."""
         client_ids = [
             client_id for client_id, known_url in self._client_urls.items() if known_url == url
         ]
