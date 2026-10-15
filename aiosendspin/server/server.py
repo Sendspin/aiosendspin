@@ -682,13 +682,19 @@ class SendspinServer:
         await waiter
 
     def _redial_if_closing(self, url: str) -> None:
+        if self._dial_closing_for_good(url):
+            self._request_redial(url)
+
+    def _dial_closing_for_good(self, url: str) -> bool:
         conn = self._dial_connections.get(url)
-        if (
-            conn is None
-            or not conn._disconnecting  # noqa: SLF001
-            or conn.should_retry_server_initiated_connection
-        ):
-            return
+        return (
+            conn is not None
+            and conn._disconnecting  # noqa: SLF001
+            and not conn.should_retry_server_initiated_connection
+        )
+
+    def _request_redial(self, url: str) -> None:
+        """Have the dial task for ``url`` dial again once its connection closes."""
         self._redial_urls.add(url)
         self._initial_connect_succeeded.discard(url)
         if retry_event := self._retry_events.get(url):
@@ -1377,14 +1383,9 @@ class SendspinServer:
         self._dial(url, connection_reason=self.get_connection_reason(url))
 
     def _is_closing_without_redial(self, url: str | None) -> bool:
-        conn = self._dial_connections.get(url) if url is not None else None
-        return (
-            conn is not None
-            and conn._disconnecting  # noqa: SLF001
-            and not conn.should_retry_server_initiated_connection
-            and url not in self._redial_urls
-            and _ended_without_redial(conn)
-        )
+        if url is None or not self._dial_closing_for_good(url):
+            return False
+        return url not in self._redial_urls and _ended_without_redial(self._dial_connections[url])
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)
