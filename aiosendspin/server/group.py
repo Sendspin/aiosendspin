@@ -251,12 +251,13 @@ class SendspinGroup:
         self._signal_event(GroupStateChangedEvent(new_state))
         self._send_group_update_to_clients()
 
-    async def stop(self) -> bool:
+    async def stop(self, *, keep_progress: bool = False) -> bool:
         """
         Stop playback for the group and clean up resources.
 
         This stops any active PushStream and marks the group playback state as
-        STOPPED. The reported playback position resets to 0 as of the stop.
+        STOPPED. The reported playback position resets to 0 as of the stop, or
+        with `keep_progress` stays where playback stopped, at speed 0.
 
         Returns:
             bool: True if an active stream was stopped,
@@ -280,7 +281,10 @@ class SendspinGroup:
 
             metadata_group_role = self.group_role("metadata")
             if isinstance(metadata_group_role, MetadataGroupRole):
-                metadata_group_role.reset_progress()
+                if keep_progress:
+                    metadata_group_role.freeze_progress()
+                else:
+                    metadata_group_role.reset_progress()
 
             # Stop the push stream if active
             if self._push_stream is not None:
