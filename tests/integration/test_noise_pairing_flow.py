@@ -652,6 +652,21 @@ async def test_trust_unpaired_before_connect_activates_roles() -> None:
     assert [c.client_id for c in trusted] == [identity.peer_id]
 
 
+async def test_trust_unpaired_without_approved_roles_keeps_them() -> None:
+    """A plain trust_unpaired keeps approved role families, and an explicit set replaces them."""
+    server = _make_server(InMemoryServerPairingStore())
+    await server.trust_unpaired("c", approved_roles={"source"})
+    await server.trust_unpaired("c")
+    trusted = await server.pairing_store.trusted_unpaired("c")
+    assert trusted is not None
+    assert trusted.approved_roles == {"source"}
+
+    await server.trust_unpaired("c", approved_roles=set())
+    trusted = await server.pairing_store.trusted_unpaired("c")
+    assert trusted is not None
+    assert trusted.approved_roles == frozenset()
+
+
 async def test_live_trust_then_untrust_toggles_roles() -> None:
     """trust_unpaired/untrust_unpaired re-activate a live Sentinel session without reconnect."""
     server = _make_server(InMemoryServerPairingStore())

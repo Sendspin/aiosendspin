@@ -42,7 +42,7 @@ def register_role(role_id: str, factory: RoleFactory, *, requires_pairing: bool 
 
 
 def role_requires_pairing(role_id: str) -> bool:
-    """Whether the role with this versioned ID may only run on a paired connection."""
+    """Whether the role with this versioned ID needs pairing or explicit unpaired approval."""
     return role_id in PAIRING_REQUIRED_ROLE_IDS
 
 

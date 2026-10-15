@@ -128,6 +128,7 @@ async def _connect(
     hello: ClientHelloPayload,
     *,
     trusted: bool = True,
+    approved_roles: frozenset[str] = frozenset(),
     send_state: bool = True,
     category: PskCategory = PskCategory.SENTINEL,
     server: _MockServer | None = None,
@@ -137,7 +138,9 @@ async def _connect(
     if server is None:
         server = _MockServer(loop=loop, clock=LoopClock(loop))
     if trusted:
-        await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+        await server.pairing_store.add_trusted_unpaired(
+            TrustedUnpairedClient(client_id=CLIENT_ID, approved_roles=approved_roles)
+        )
     conn = SendspinConnection(server, wsock_client=AsyncMock())
     psk = generate_psk()
     conn._client_id = CLIENT_ID  # noqa: SLF001
@@ -928,3 +931,34 @@ async def test_activation_timeout_does_not_run_while_the_releasing_state_is_appl
     assert handles_during_dispatch == [None]
     activated.assert_called_once_with(role)
     assert conn._activation_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_source_activates_on_unpaired_connection_only_while_approved() -> None:
+    """A stored source approval activates source on connect, and revoking it applies live."""
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value, "source@v1"]), approved_roles=frozenset({"source"})
+    )
+    client = _client(conn)
+    assert {role.role_id for role in client.active_roles} == {Roles.PLAYER.value, "source@v1"}
+
+    await conn._server.pairing_store.add_trusted_unpaired(  # noqa: SLF001
+        TrustedUnpairedClient(client_id=CLIENT_ID)
+    )
+    await conn.refresh_trusted_unpaired()
+    assert [role.role_id for role in client.active_roles] == [Roles.PLAYER.value]
+
+
+@pytest.mark.asyncio
+async def test_revoking_source_approval_during_pairing_ends_pairing() -> None:
+    """Pairing keeps active roles, so revoking only source must end the attempt."""
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value, "source@v1"]), approved_roles=frozenset({"source"})
+    )
+    conn._in_pairing = True  # noqa: SLF001
+    await conn._server.pairing_store.add_trusted_unpaired(  # noqa: SLF001
+        TrustedUnpairedClient(client_id=CLIENT_ID)
+    )
+    with patch.object(conn, "end_pairing", new=AsyncMock()) as end_pairing:
+        await conn.refresh_trusted_unpaired()
+    end_pairing.assert_awaited_once()
