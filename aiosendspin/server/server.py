@@ -758,7 +758,7 @@ class SendspinServer:
     async def _withdraw_pairing_dial(
         self, url: str, attempt: PairingAttempt, *, started_dial: bool
     ) -> None:
-        """Stop a cancelled attempt's dial, leaving a reconnect that was already running."""
+        """Stop a cancelled attempt's dial but keep a running reconnect and a queued attempt."""
         if self._pending_pairing_attempts.get(url) is attempt:
             del self._pending_pairing_attempts[url]
             if started_dial:
@@ -773,7 +773,6 @@ class SendspinServer:
             queued = self._pending_pairing_attempts.pop(url, None)
             self.disconnect_from_client(url)
             if queued is not None:
-                # Hand an attempt queued on the stopped dial to a new one.
                 self.connect_to_client(url, pairing_attempt=queued)
 
     def _queue_pairing_attempt(self, url: str, attempt: PairingAttempt) -> None:
