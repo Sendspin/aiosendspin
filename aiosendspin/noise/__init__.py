@@ -53,6 +53,7 @@ from .models import (
 )
 from .pairing import (
     InvalidPairingCodeError,
+    PairingDialError,
     PairingError,
     run_dynamic_pairing_code_client,
     run_dynamic_pairing_code_server,
@@ -124,6 +125,7 @@ __all__ = [
     "NoiseMsg2Payload",
     "NoiseSession",
     "PSKPairingToken",
+    "PairingDialError",
     "PairingError",
     "PairingPsk",
     "PskCategory",

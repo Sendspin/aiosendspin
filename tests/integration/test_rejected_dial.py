@@ -26,6 +26,7 @@ from aiosendspin.models.types import (
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.pairing import (
     PairingAttempt,
+    PairingDialError,
     PairingError,
     RemotePairingAbortError,
 )
@@ -365,7 +366,7 @@ async def test_initiate_pairing_pairs_its_client_after_the_address_moved() -> No
 
 
 async def test_initiate_pairing_raises_when_the_client_is_unreachable() -> None:
-    """A dial for pairing that cannot connect raises the connection error."""
+    """A dial for pairing that cannot connect raises PairingDialError from the connection error."""
     server = SendspinServer(
         loop=asyncio.get_running_loop(),
         identity=Identity.generate(),
@@ -377,9 +378,10 @@ async def test_initiate_pairing_raises_when_the_client_is_unreachable() -> None:
 
     try:
         async with asyncio.timeout(5):
-            with pytest.raises(ClientConnectionError):
+            with pytest.raises(PairingDialError) as excinfo:
                 await server.initiate_pairing(
                     "client-1", _static_code_attempt(_STATIC_PAIRING_CODE)
                 )
+        assert isinstance(excinfo.value.__cause__, ClientConnectionError)
     finally:
         await server.close()

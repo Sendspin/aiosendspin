@@ -39,6 +39,7 @@ from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
     PairingAbortError,
     PairingAttempt,
+    PairingDialError,
     PairingError,
     PairingTimeoutError,
 )
@@ -714,11 +715,11 @@ class SendspinServer:
         failures disconnect.
 
         A known client that is not connected is dialed at its last address with the attempt,
-        which raises the same errors, plus the dial's connection errors and
+        which raises the same errors, plus ``PairingDialError`` when the dial cannot connect,
         ``HandshakeAbortedError`` when the client lacks the attempt's Pairing PSK, or
         ``PairingError`` when a newer attempt replaces it, the dial ends first or a different
         client answers at that address. A reconnect already running for that address carries
-        the attempt on its next dial, or fails it with that dial's connection error. An attempt
+        the attempt on its next dial, or fails it with ``PairingDialError``. An attempt
         queued behind a session that is already connecting waits until that session ends, so
         callers wanting a deadline must apply their own timeout. Raises ``ValueError`` for an
         unknown client or one with no known address.
@@ -1141,8 +1142,8 @@ class SendspinServer:
                         self._resolve_initial_connect_waiters(url, asyncio.CancelledError())
                     break
                 except TimeoutError as err:
-                    dial_error = err
-                    self._fail_pending_pairing(url, err)
+                    dial_error = PairingDialError(err)
+                    self._fail_pending_pairing(url, dial_error)
                     if not first_connection_succeeded:
                         if self._get_connection_options(url).retry_initial_connection:
                             logger.debug("Initial connection to %s timed out, retrying", url)
@@ -1153,8 +1154,8 @@ class SendspinServer:
                     else:
                         logger.debug("Connection task for %s timed out", url)
                 except (ClientConnectionError, ClientResponseError) as err:
-                    dial_error = err
-                    self._fail_pending_pairing(url, err)
+                    dial_error = PairingDialError(err)
+                    self._fail_pending_pairing(url, dial_error)
                     if not first_connection_succeeded:
                         if self._get_connection_options(url).retry_initial_connection:
                             logger.debug("Initial connection to %s failed, retrying: %s", url, err)

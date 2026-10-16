@@ -16,7 +16,7 @@ from zeroconf import ServiceStateChange
 
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason, PairMethod
 from aiosendspin.noise.keys import Identity, generate_psk
-from aiosendspin.noise.pairing import PairingAttempt, PairingError
+from aiosendspin.noise.pairing import PairingAttempt, PairingDialError, PairingError
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer, _ended_without_redial
@@ -743,7 +743,7 @@ async def test_pairing_on_an_unreachable_reconnecting_client_fails(
     created[0].end(retry=True)
 
     async with asyncio.timeout(5):
-        with pytest.raises(ClientConnectionError):
+        with pytest.raises(PairingDialError):
             await server.initiate_pairing("client-1", attempt)
     assert url in server._connection_tasks  # noqa: SLF001
     server.disconnect_from_client(url)
