@@ -770,6 +770,44 @@ async def test_pairing_on_an_unreachable_reconnecting_client_fails(
     server.disconnect_from_client(url)
 
 
+class _FailNextSession(_PersistentSuccessfulSession):
+    """Client session whose next connect fails once ``fail_next`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next = False
+
+    def ws_connect(self, *args: object, **kwargs: object) -> _SuccessfulConnectContext:
+        if self.fail_next:
+            self.fail_next = False
+            raise ClientConnectionError("offline")
+        return super().ws_connect(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_queued_pairing_intent_survives_a_failed_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pairing intent queued without a waiting caller rides the next successful reconnect."""
+    monkeypatch.setattr("aiosendspin.server.server.MAX_RECONNECT_BACKOFF_S", 0.01)
+    session = _FailNextSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    created = _patch_controlled_connections(monkeypatch)
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    attempt = PairingAttempt(
+        method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=AsyncMock(return_value="1")
+    )
+    server.connect_to_client(url, pairing_attempt=attempt)
+    session.fail_next = True
+    created[0].end(retry=True)
+
+    await _wait_for_dials(created, 2)
+    assert created[1]._dial_pairing_attempt is attempt  # noqa: SLF001
+    server.disconnect_from_client(url)
+
+
 @pytest.mark.asyncio
 async def test_cancelled_pairing_keeps_a_running_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancelling a pairing carried by a reconnect that was already running redials without it."""

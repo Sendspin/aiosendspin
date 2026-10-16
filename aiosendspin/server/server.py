@@ -699,8 +699,10 @@ class SendspinServer:
         err = PairingError("dial ended before pairing")
         if attempt is not None:
             self._settle_pairing_attempt(attempt, err)
-        if self._connection_tasks.get(url) in (None, task):
-            self._fail_pending_pairing(url, err)
+        if self._connection_tasks.get(url) in (None, task) and (
+            queued := self._pending_pairing_attempts.pop(url, None)
+        ):
+            self._settle_pairing_attempt(queued, err)
 
     def _redial_if_closing(self, url: str) -> None:
         if self._dial_closing_for_good(url):
@@ -809,7 +811,10 @@ class SendspinServer:
         return entry[0] if entry is not None else self.get_client_id_for_url(url)
 
     def _fail_pending_pairing(self, url: str, err: BaseException) -> None:
-        if pending := self._pending_pairing_attempts.pop(url, None):
+        """Fail the attempt queued for ``url`` when a caller waits on it."""
+        pending = self._pending_pairing_attempts.get(url)
+        if pending is not None and id(pending) in self._pairing_waiters:
+            del self._pending_pairing_attempts[url]
             self._settle_pairing_attempt(pending, err)
 
     def _settle_pairing_attempt(self, attempt: PairingAttempt, err: BaseException | None) -> None:
