@@ -784,17 +784,18 @@ class SendspinServer:
             if started_dial:
                 self.disconnect_from_client(url)
             return
+        queued = self._pending_pairing_attempts.get(url)
+        if started_dial and queued is not None and id(queued) in self._pairing_waiters:
+            self._dial_owners.add(id(queued))
         conn = self._dial_connections.get(url)
         if conn is not None and conn._dial_pairing_attempt is attempt:  # noqa: SLF001
             if not started_dial:
                 self._request_redial(url)
             await conn.disconnect(retry_connection=False)
         elif started_dial:
-            queued = self._pending_pairing_attempts.pop(url, None)
+            self._pending_pairing_attempts.pop(url, None)
             self.disconnect_from_client(url)
             if queued is not None:
-                if id(queued) in self._pairing_waiters:
-                    self._dial_owners.add(id(queued))
                 self.connect_to_client(url, pairing_attempt=queued)
 
     def _queue_pairing_attempt(self, url: str, attempt: PairingAttempt) -> None:

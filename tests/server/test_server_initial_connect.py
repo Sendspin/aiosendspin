@@ -896,6 +896,38 @@ async def test_cancelled_pairing_keeps_a_pairing_queued_on_its_dial(
 
 
 @pytest.mark.asyncio
+async def test_pairing_queued_on_a_connected_dial_takes_it_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pairing queued on a connected dial owns it once the pairing that started it cancels."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://127.0.0.1:9999/sendspin"
+    created = _patch_controlled_connections(monkeypatch)
+    first = _known_disconnected_client(server, url)
+    second = PairingAttempt(
+        method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=AsyncMock(return_value="1")
+    )
+
+    first_pairing = asyncio.create_task(server.initiate_pairing("client-1", first))
+    await _wait_for_dials(created, 1)
+    second_pairing = asyncio.create_task(server.initiate_pairing("client-1", second))
+    await asyncio.sleep(0)
+    first_pairing.cancel()
+    with suppress(asyncio.CancelledError):
+        await first_pairing
+    await _wait_for_dials(created, 2)
+    assert created[1]._dial_pairing_attempt is second  # noqa: SLF001
+
+    second_pairing.cancel()
+    with suppress(asyncio.CancelledError):
+        await second_pairing
+    async with asyncio.timeout(5):
+        while url in server._connection_tasks:  # noqa: ASYNC110, SLF001
+            await asyncio.sleep(0)
+    assert len(created) == 2
+
+
+@pytest.mark.asyncio
 async def test_pairing_fails_when_its_dial_is_stopped_before_it_runs() -> None:
     """A pairing whose dial is stopped before the dial task runs fails."""
     server = _make_server(_PersistentSuccessfulSession())
