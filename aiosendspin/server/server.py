@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 
@@ -33,12 +34,14 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.management import MANAGEMENT_DEPRECATION
-from aiosendspin.models.types import ConnectionReason, GoodbyeReason
+from aiosendspin.models.types import ConnectionReason, GoodbyeReason, PairMethod
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import (
     InvalidPairingCodeError,
     PairingAbortError,
     PairingAttempt,
+    PairingDialError,
+    PairingError,
     PairingTimeoutError,
 )
 from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedClient
@@ -285,6 +288,10 @@ class SendspinServer:
         self._connection_reasons: dict[str, ConnectionReason] = {}  # url → reason
         # Pairing intents handed to an already-running dial task, consumed on its next dial.
         self._pending_pairing_attempts: dict[str, PairingAttempt] = {}
+        # The client each dial attempt pairs and its caller's waiter, keyed by attempt identity.
+        self._pairing_waiters: dict[int, tuple[str, asyncio.Future[None]]] = {}
+        # Waited-on attempts whose dial was started for them, keyed by attempt identity.
+        self._dial_owners: set[int] = set()
         self._client_urls: dict[str, str] = {}  # client_id → url
         self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
         self._external_registration_timeouts: dict[str, asyncio.Handle] = {}
@@ -617,17 +624,14 @@ class SendspinServer:
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
             if pairing_attempt is not None:
-                self._pending_pairing_attempts[url] = pairing_attempt
+                self._queue_pairing_attempt(url, pairing_attempt)
             if retry_event := self._retry_events.get(url):
                 retry_event.set()
             return
 
         self._initial_connect_succeeded.discard(url)
         self._retry_events[url] = asyncio.Event()
-        self._connection_tasks[url] = create_task(
-            self._handle_client_connection(url, pairing_attempt=pairing_attempt),
-            eager_start=False,
-        )
+        self._connection_tasks[url] = self._create_dial_task(url, pairing_attempt)
 
     async def connect_to_client_and_wait(
         self,
@@ -668,34 +672,59 @@ class SendspinServer:
         prev_task = self._connection_tasks.get(url)
         if prev_task is not None:
             if pairing_attempt is not None:
-                self._pending_pairing_attempts[url] = pairing_attempt
+                self._queue_pairing_attempt(url, pairing_attempt)
             if retry_event := self._retry_events.get(url):
                 retry_event.set()
         else:
             self._initial_connect_succeeded.discard(url)
             self._retry_events[url] = asyncio.Event()
-            self._connection_tasks[url] = create_task(
-                self._handle_client_connection(url, pairing_attempt=pairing_attempt),
-                eager_start=False,
-            )
+            self._connection_tasks[url] = self._create_dial_task(url, pairing_attempt)
 
         await waiter
 
-    def _redial_if_closing(self, url: str) -> None:
-        conn = self._dial_connections.get(url)
-        if (
-            conn is None
-            or not conn._disconnecting  # noqa: SLF001
-            or conn.should_retry_server_initiated_connection
+    def _create_dial_task(
+        self, url: str, pairing_attempt: PairingAttempt | None
+    ) -> asyncio.Task[None]:
+        task = create_task(
+            self._handle_client_connection(url, pairing_attempt=pairing_attempt),
+            eager_start=False,
+        )
+        # A task cancelled before it runs never reaches its own cleanup.
+        task.add_done_callback(partial(self._fail_unsettled_pairing, url, pairing_attempt))
+        return task
+
+    def _fail_unsettled_pairing(
+        self, url: str, attempt: PairingAttempt | None, task: asyncio.Task[None]
+    ) -> None:
+        err = PairingError("dial ended before pairing")
+        if attempt is not None:
+            self._settle_pairing_attempt(attempt, err)
+        if self._connection_tasks.get(url) in (None, task) and (
+            queued := self._pending_pairing_attempts.pop(url, None)
         ):
-            return
+            self._settle_pairing_attempt(queued, err)
+
+    def _redial_if_closing(self, url: str) -> None:
+        if self._dial_closing_for_good(url):
+            self._request_redial(url)
+
+    def _dial_closing_for_good(self, url: str) -> bool:
+        conn = self._dial_connections.get(url)
+        return (
+            conn is not None
+            and conn._disconnecting  # noqa: SLF001
+            and not conn.should_retry_server_initiated_connection
+        )
+
+    def _request_redial(self, url: str) -> None:
+        """Have the dial task for ``url`` dial again once its connection closes."""
         self._redial_urls.add(url)
         self._initial_connect_succeeded.discard(url)
         if retry_event := self._retry_events.get(url):
             retry_event.set()
 
     async def initiate_pairing(self, client_id: str, attempt: PairingAttempt) -> None:
-        """Run a pairing attempt on a connected client.
+        """Run a pairing attempt on a client, dialing it when it is not connected.
 
         An unpaired client keeps its playback, roles and group during the attempt; a long-term
         paired one leaves playback and its roles first.
@@ -703,7 +732,21 @@ class SendspinServer:
         A pair abort, a server-side timeout or ``InvalidPairingCodeError`` raises with pairing
         already left, or with the connection closed when the abort reason closes it; other
         failures disconnect.
+
+        A known client that is not connected is dialed at its last address with the attempt,
+        which raises the same errors, plus ``PairingDialError`` when the dial cannot connect,
+        ``HandshakeAbortedError`` when the client lacks the attempt's Pairing PSK, or
+        ``PairingError`` when a newer attempt replaces it, the dial ends first or a different
+        client answers at that address. A reconnect already running for that address carries
+        the attempt on its next dial, or fails it with ``PairingDialError``. An attempt
+        queued behind a session that is already connecting waits until that session ends, so
+        callers wanting a deadline must apply their own timeout. Raises ``ValueError`` for an
+        unknown client or one with no known address.
         """
+        client = self.get_client(client_id)
+        if client is not None and client.connection is None:
+            await self._pair_by_dial(client_id, attempt)
+            return
         connection = self._connection_for(client_id)
         try:
             await connection.initiate_pairing(attempt)
@@ -712,6 +755,79 @@ class SendspinServer:
         except BaseException:
             await connection.disconnect(retry_connection=False)
             raise
+
+    async def _pair_by_dial(self, client_id: str, attempt: PairingAttempt) -> None:
+        url = self._client_urls.get(client_id)
+        if url is None:
+            raise ValueError(f"client {client_id} is not connected and has no known address")
+        if attempt.method is PairMethod.PAIRING_PSK and attempt.client_id != client_id:
+            raise InvalidPairingCodeError("pairing token is for another client")
+        waiter: asyncio.Future[None] = self._loop.create_future()
+        self._pairing_waiters[id(attempt)] = (client_id, waiter)
+        if url not in self._connection_tasks or self._dial_closing_for_good(url):
+            self._dial_owners.add(id(attempt))
+        try:
+            self.connect_to_client(url, pairing_attempt=attempt)
+            await waiter
+        except asyncio.CancelledError:
+            await self._withdraw_pairing_dial(url, attempt)
+            raise
+        finally:
+            self._pairing_waiters.pop(id(attempt), None)
+            self._dial_owners.discard(id(attempt))
+
+    async def _withdraw_pairing_dial(self, url: str, attempt: PairingAttempt) -> None:
+        """Stop a cancelled attempt's dial but keep a running reconnect and a queued attempt."""
+        started_dial = id(attempt) in self._dial_owners
+        if self._pending_pairing_attempts.get(url) is attempt:
+            del self._pending_pairing_attempts[url]
+            if started_dial:
+                self.disconnect_from_client(url)
+            return
+        queued = self._pending_pairing_attempts.get(url)
+        if started_dial and queued is not None and id(queued) in self._pairing_waiters:
+            self._dial_owners.add(id(queued))
+        conn = self._dial_connections.get(url)
+        if conn is not None and conn._dial_pairing_attempt is attempt:  # noqa: SLF001
+            if not started_dial:
+                self._request_redial(url)
+            await conn.disconnect(retry_connection=False)
+        elif started_dial:
+            self._pending_pairing_attempts.pop(url, None)
+            self.disconnect_from_client(url)
+            if queued is not None:
+                self.connect_to_client(url, pairing_attempt=queued)
+
+    def _queue_pairing_attempt(self, url: str, attempt: PairingAttempt) -> None:
+        replaced = self._pending_pairing_attempts.get(url)
+        self._pending_pairing_attempts[url] = attempt
+        if replaced is not None and replaced is not attempt:
+            self._settle_pairing_attempt(
+                replaced, PairingError("replaced by a newer pairing attempt")
+            )
+
+    def _dial_target(self, url: str, attempt: PairingAttempt | None) -> str | None:
+        """Return the client a dial to ``url`` is meant to reach, preferring the attempt's."""
+        entry = self._pairing_waiters.get(id(attempt)) if attempt is not None else None
+        return entry[0] if entry is not None else self.get_client_id_for_url(url)
+
+    def _fail_pending_pairing(self, url: str, err: BaseException) -> None:
+        """Fail the attempt queued for ``url`` when a caller waits on it."""
+        pending = self._pending_pairing_attempts.get(url)
+        if pending is not None and id(pending) in self._pairing_waiters:
+            del self._pending_pairing_attempts[url]
+            self._settle_pairing_attempt(pending, err)
+
+    def _settle_pairing_attempt(self, attempt: PairingAttempt, err: BaseException | None) -> None:
+        """Resolve the caller awaiting ``attempt``'s outcome, if any."""
+        entry = self._pairing_waiters.pop(id(attempt), None)
+        if entry is None or entry[1].done():
+            return
+        waiter = entry[1]
+        if err is None:
+            waiter.set_result(None)
+        else:
+            waiter.set_exception(err)
 
     async def end_pairing(self, client_id: str) -> None:
         """End pairing on a connected client without finalizing.
@@ -992,6 +1108,7 @@ class SendspinServer:
         """Handle a server-initiated WebSocket connection task."""
         backoff = 1.0
         first_connection_succeeded = False
+        dial_error: BaseException | None = None
 
         try:
             while True:
@@ -1010,13 +1127,14 @@ class SendspinServer:
                             self._initial_connect_succeeded.add(url)
                             self._resolve_initial_connect_waiters(url)
                         connection_started_s = time.monotonic()
+                        dial_error = None
                         if pairing_attempt is None:
                             pairing_attempt = self._pending_pairing_attempts.pop(url, None)
                         conn = SendspinConnection(
                             self,
                             wsock_client=wsock,
                             url=url,
-                            expected_client_id=self.get_client_id_for_url(url),
+                            expected_client_id=self._dial_target(url, pairing_attempt),
                             pairing_attempt=pairing_attempt,
                         )
                         pairing_attempt = None
@@ -1027,7 +1145,10 @@ class SendspinServer:
                     if session_duration_s >= STABLE_SERVER_INITIATED_SESSION_S:
                         backoff = 1.0
 
-                    if url in self._redial_urls:
+                    if url in self._redial_urls or (
+                        url in self._pending_pairing_attempts
+                        and not conn.should_retry_server_initiated_connection
+                    ):
                         logger.debug("Redialing %s on request after the connection closed", url)
                         # Handle the redial like the initial attempt of a new dial.
                         first_connection_succeeded = False
@@ -1049,7 +1170,9 @@ class SendspinServer:
                     if not first_connection_succeeded:
                         self._resolve_initial_connect_waiters(url, asyncio.CancelledError())
                     break
-                except TimeoutError:
+                except TimeoutError as err:
+                    dial_error = PairingDialError(err)
+                    self._fail_pending_pairing(url, dial_error)
                     if not first_connection_succeeded:
                         if self._get_connection_options(url).retry_initial_connection:
                             logger.debug("Initial connection to %s timed out, retrying", url)
@@ -1060,6 +1183,8 @@ class SendspinServer:
                     else:
                         logger.debug("Connection task for %s timed out", url)
                 except (ClientConnectionError, ClientResponseError) as err:
+                    dial_error = PairingDialError(err)
+                    self._fail_pending_pairing(url, dial_error)
                     if not first_connection_succeeded:
                         if self._get_connection_options(url).retry_initial_connection:
                             logger.debug("Initial connection to %s failed, retrying: %s", url, err)
@@ -1089,20 +1214,30 @@ class SendspinServer:
                 self._resolve_initial_connect_waiters(url, err)
             logger.exception("Unexpected error occurred")
         finally:
-            self._connection_tasks.pop(url, None)
-            self._retry_events.pop(url, None)
-            self._dial_connections.pop(url, None)
-            self._redial_urls.discard(url)
-            self._pending_pairing_attempts.pop(url, None)
-            self._initial_connect_succeeded.discard(url)
-            self._connection_options.pop(url, None)
-            self._connection_reasons.pop(url, None)
+            unused_error = dial_error or PairingError("dial ended before pairing")
+            if pairing_attempt is not None:
+                self._settle_pairing_attempt(pairing_attempt, unused_error)
             current = asyncio.current_task()
-            await self._complete_deferred_unregister(
-                url,
-                connection_succeeded=first_connection_succeeded,
-                cancelled=current is not None and current.cancelling() > 0,
-            )
+            # A dial started for this URL after this task was stopped owns the URL's state.
+            if self._connection_tasks.get(url) in (None, current):
+                self._release_dial_state(url, unused_error)
+                await self._complete_deferred_unregister(
+                    url,
+                    connection_succeeded=first_connection_succeeded,
+                    cancelled=current is not None and current.cancelling() > 0,
+                )
+
+    def _release_dial_state(self, url: str, unused_error: BaseException) -> None:
+        """Forget a finished dial's state for ``url``, failing a pairing attempt it never ran."""
+        self._connection_tasks.pop(url, None)
+        self._retry_events.pop(url, None)
+        self._dial_connections.pop(url, None)
+        self._redial_urls.discard(url)
+        if pending_attempt := self._pending_pairing_attempts.pop(url, None):
+            self._settle_pairing_attempt(pending_attempt, unused_error)
+        self._initial_connect_succeeded.discard(url)
+        self._connection_options.pop(url, None)
+        self._connection_reasons.pop(url, None)
 
     async def start_server(
         self,
@@ -1372,14 +1507,9 @@ class SendspinServer:
         self._dial(url, connection_reason=self.get_connection_reason(url))
 
     def _is_closing_without_redial(self, url: str | None) -> bool:
-        conn = self._dial_connections.get(url) if url is not None else None
-        return (
-            conn is not None
-            and conn._disconnecting  # noqa: SLF001
-            and not conn.should_retry_server_initiated_connection
-            and url not in self._redial_urls
-            and _ended_without_redial(conn)
-        )
+        if url is None or not self._dial_closing_for_good(url):
+            return False
+        return url not in self._redial_urls and _ended_without_redial(self._dial_connections[url])
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)

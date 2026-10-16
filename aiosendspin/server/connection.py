@@ -159,6 +159,7 @@ from aiosendspin.noise.pairing import (
     PairingAttempt,
     PairingError,
     PairingTimeoutError,
+    RemotePairingAbortError,
     abort_pairing,
     run_dynamic_pairing_code_server,
     run_pairing_psk_server,
@@ -361,7 +362,10 @@ class SendspinConnection:
         self._expected_client_id = expected_client_id
         self._in_pairing = False
         self._pairing_attempt = pairing_attempt
+        # The dial's attempt until its outcome is reported to the server.
+        self._dial_pairing_attempt = pairing_attempt
         self._pairing_task: asyncio.Task[bool] | None = None
+        self._connect_pairing_task: asyncio.Task[bool] | None = None
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_index = 0
         self._activated_pairing_method: PairMethod | None = None
@@ -1307,6 +1311,12 @@ class SendspinConnection:
                     self._pairing_attempt = None
                 except PairingAbortError as exc:
                     if exc.reason in CLOSING_ABORT_REASONS:
+                        if (
+                            isinstance(exc, RemotePairingAbortError)
+                            and exc.reason is PairAbortReason.CONCURRENT_ATTEMPT
+                        ):
+                            # Pairing connections get this abort where others get client/goodbye.
+                            self._last_goodbye_reason = GoodbyeReason.CONCURRENT_ATTEMPT
                         raise
                     # Non-closing abort reason; the connection stays open for a retry.
                     self._logger.debug("Initial-connect pairing aborted: %s", exc)
@@ -1340,18 +1350,38 @@ class SendspinConnection:
                 )
         return True
 
+    def _settle_dial_pairing(self, err: BaseException | None) -> None:
+        """Report the dial's pairing outcome to the server once."""
+        attempt = self._dial_pairing_attempt
+        if attempt is None:
+            return
+        self._dial_pairing_attempt = None
+        self._server._settle_pairing_attempt(attempt, err)  # noqa: SLF001
+
     async def _pair_on_connect(self, transport: EncryptedWebSocket) -> bool:
         """Run the pairing this connection was admitted for, alongside the message loops."""
-        self._refuse_unadvertised_pairing(self._pairing_attempt)
-        queue: asyncio.Queue[WSMessage] = asyncio.Queue()
-        self._pairing_message_queue = queue
-        # The writer starts once the first server/activate is out.
-        self._writer_paused = True
-        self._message_loop_task = create_task(self._run_message_loop())
         try:
-            return await self._pair(QueuedEncryptedWebSocket(transport, queue))
+            self._refuse_unadvertised_pairing(self._pairing_attempt)
+            queue: asyncio.Queue[WSMessage] = asyncio.Queue()
+            self._pairing_message_queue = queue
+            # The writer starts once the first server/activate is out.
+            self._writer_paused = True
+            self._message_loop_task = create_task(self._run_message_loop())
+            # Run as a task so end_pairing can abort the attempt.
+            self._connect_pairing_task = asyncio.Task(
+                self._pair(QueuedEncryptedWebSocket(transport, queue)),
+                loop=self._server.loop,
+                eager_start=True,
+            )
+            paired = await self._connect_pairing_task
+        except Exception as exc:
+            self._settle_dial_pairing(exc)
+            raise
         finally:
+            self._connect_pairing_task = None
             self._pairing_message_queue = None
+        self._settle_dial_pairing(None if paired else PairingError("pairing failed"))
+        return paired
 
     async def _send_server_hello_and_recv(self, transport: Transport) -> bool:
         """Send ``server/hello`` and receive+ingest ``client/hello``."""
@@ -1401,7 +1431,7 @@ class SendspinConnection:
             await self.disconnect(retry_connection=False)
             return False
 
-    async def _ingest_client_hello_checked(self, text: str) -> bool:
+    async def _ingest_client_hello_checked(self, text: str) -> bool:  # noqa: PLR0915
         """Body of the hello exchange; raises ClientComplianceError in strict mode."""
         try:
             decoded = orjson.loads(text)
@@ -1482,8 +1512,13 @@ class SendspinConnection:
                 self._logger.info(
                     "Client at %s changed identity from %s", self._url, self._expected_client_id
                 )
-                # A playback dial targeted the previous client, not this one.
+                # A playback or pairing dial targeted the previous client, not this one.
                 self._server._consume_playback_reason(self._url)  # noqa: SLF001
+                if self._dial_pairing_attempt is not None:
+                    self._settle_dial_pairing(
+                        PairingError("a different client answered at this address")
+                    )
+                    self._pairing_attempt = None
             self._attach_new_client(client_id, client_info)
         else:
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
@@ -1900,6 +1935,10 @@ class SendspinConnection:
         If an attempt has already been finalized by the client, it completes as a success instead.
         """
         if not self._in_pairing:
+            if (task := self._connect_pairing_task) is not None and not task.done():
+                task.cancel()
+                with suppress(PairingError):
+                    await task
             return
         task = self._pairing_task
         if task is not None and not task.done():
@@ -3727,10 +3766,12 @@ class SendspinConnection:
             await self._connection_done.wait()
         except HandshakeAbortedError as exc:
             self._logger.debug("Noise handshake aborted: %s", exc)
+            self._settle_dial_pairing(exc)
         except PairingError as exc:
             self._logger.debug("Pairing aborted: %s", exc)
         except ClientComplianceError:
             # Strict mode: hard-reject (no warm reconnect); already logged at error.
             self._closing = True
         finally:
+            self._settle_dial_pairing(PairingError("connection closed before pairing finished"))
             await self._cleanup_connection()

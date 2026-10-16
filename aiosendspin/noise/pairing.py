@@ -91,6 +91,15 @@ class InvalidPairingCodeError(PairingError):
     """
 
 
+class PairingDialError(PairingError):
+    """The dial carrying a pairing attempt could not connect to the client."""
+
+    def __init__(self, cause: Exception) -> None:
+        """Record the connection error as the cause."""
+        super().__init__(f"could not connect to the client: {str(cause) or type(cause).__name__}")
+        self.__cause__ = cause
+
+
 class PairingAbortError(PairingError):
     """A pairing attempt ended with a ``pair/abort`` carrying ``reason`` (base)."""
 
