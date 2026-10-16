@@ -81,6 +81,27 @@ class _PersistentSuccessfulSession:
         self.closed = True
 
 
+class _GatedConnectContext(_SuccessfulConnectContext):
+    def __init__(self, gate: asyncio.Event) -> None:
+        self._gate = gate
+
+    async def __aenter__(self) -> object:
+        await self._gate.wait()
+        return MagicMock()
+
+
+class _GatedSession(_PersistentSuccessfulSession):
+    """Client session whose connects wait until ``gate`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    def ws_connect(self, *_args: object, **_kwargs: object) -> _GatedConnectContext:
+        self.calls += 1
+        return _GatedConnectContext(self.gate)
+
+
 class _FailOnceThenConnectSession:
     """Client session whose first connection fails and second succeeds."""
 
@@ -799,6 +820,38 @@ async def test_cancelled_pairing_stops_the_closing_dial_it_restarted(
 
     assert len(created) == 1
     assert url not in server._connection_tasks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pairing_keeps_a_pairing_queued_on_its_dial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a pairing while its dial connects leaves a pairing queued on that dial."""
+    session = _GatedSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    created = _patch_controlled_connections(monkeypatch)
+    first = _known_disconnected_client(server, url)
+    second = PairingAttempt(
+        method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=AsyncMock(return_value="1")
+    )
+
+    first_pairing = asyncio.create_task(server.initiate_pairing("client-1", first))
+    await asyncio.sleep(0)
+    second_pairing = asyncio.create_task(server.initiate_pairing("client-1", second))
+    await asyncio.sleep(0)
+    first_pairing.cancel()
+    with suppress(asyncio.CancelledError):
+        await first_pairing
+    session.gate.set()
+
+    await _wait_for_dials(created, 1)
+    assert created[0]._dial_pairing_attempt is second  # noqa: SLF001
+    assert not second_pairing.done()
+    second_pairing.cancel()
+    with suppress(asyncio.CancelledError):
+        await second_pairing
+    server.disconnect_from_client(url)
 
 
 @pytest.mark.asyncio

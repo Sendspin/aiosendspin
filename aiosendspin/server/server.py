@@ -770,7 +770,11 @@ class SendspinServer:
                 self._request_redial(url)
             await conn.disconnect(retry_connection=False)
         elif started_dial:
+            queued = self._pending_pairing_attempts.pop(url, None)
             self.disconnect_from_client(url)
+            if queued is not None:
+                # Hand an attempt queued on the stopped dial to a new one.
+                self.connect_to_client(url, pairing_attempt=queued)
 
     def _queue_pairing_attempt(self, url: str, attempt: PairingAttempt) -> None:
         replaced = self._pending_pairing_attempts.get(url)
