@@ -682,10 +682,25 @@ class SendspinServer:
     def _create_dial_task(
         self, url: str, pairing_attempt: PairingAttempt | None
     ) -> asyncio.Task[None]:
-        return create_task(
+        task = create_task(
             self._handle_client_connection(url, pairing_attempt=pairing_attempt),
             eager_start=False,
         )
+        # A task cancelled before it runs never reaches its own cleanup.
+        task.add_done_callback(
+            lambda done: self._fail_unsettled_pairing(url, pairing_attempt, done)
+        )
+        return task
+
+    def _fail_unsettled_pairing(
+        self, url: str, attempt: PairingAttempt | None, task: asyncio.Task[None]
+    ) -> None:
+        """Fail the pairing attempts a finished dial task left unsettled."""
+        err = PairingError("dial ended before pairing")
+        if attempt is not None:
+            self._settle_pairing_attempt(attempt, err)
+        if self._connection_tasks.get(url) in (None, task):
+            self._fail_pending_pairing(url, err)
 
     def _redial_if_closing(self, url: str) -> None:
         if self._dial_closing_for_good(url):

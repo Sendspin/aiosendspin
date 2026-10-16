@@ -855,6 +855,22 @@ async def test_cancelled_pairing_keeps_a_pairing_queued_on_its_dial(
 
 
 @pytest.mark.asyncio
+async def test_pairing_fails_when_its_dial_is_stopped_before_it_runs() -> None:
+    """A pairing whose dial is stopped before the dial task runs fails."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://127.0.0.1:9999/sendspin"
+    attempt = _known_disconnected_client(server, url)
+
+    pairing = asyncio.create_task(server.initiate_pairing("client-1", attempt))
+    await asyncio.sleep(0)
+    server.disconnect_from_client(url)
+
+    async with asyncio.timeout(5):
+        with pytest.raises(PairingError, match="dial ended"):
+            await pairing
+
+
+@pytest.mark.asyncio
 async def test_pairing_queued_on_a_stopped_dial_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """A pairing queued behind an open session fails when the dial is stopped."""
     server = _make_server(_PersistentSuccessfulSession())
