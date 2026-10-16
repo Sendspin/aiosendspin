@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 
@@ -689,15 +690,12 @@ class SendspinServer:
             eager_start=False,
         )
         # A task cancelled before it runs never reaches its own cleanup.
-        task.add_done_callback(
-            lambda done: self._fail_unsettled_pairing(url, pairing_attempt, done)
-        )
+        task.add_done_callback(partial(self._fail_unsettled_pairing, url, pairing_attempt))
         return task
 
     def _fail_unsettled_pairing(
         self, url: str, attempt: PairingAttempt | None, task: asyncio.Task[None]
     ) -> None:
-        """Fail the pairing attempts a finished dial task left unsettled."""
         err = PairingError("dial ended before pairing")
         if attempt is not None:
             self._settle_pairing_attempt(attempt, err)
