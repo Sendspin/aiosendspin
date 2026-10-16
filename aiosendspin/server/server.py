@@ -628,10 +628,7 @@ class SendspinServer:
 
         self._initial_connect_succeeded.discard(url)
         self._retry_events[url] = asyncio.Event()
-        self._connection_tasks[url] = create_task(
-            self._handle_client_connection(url, pairing_attempt=pairing_attempt),
-            eager_start=False,
-        )
+        self._connection_tasks[url] = self._create_dial_task(url, pairing_attempt)
 
     async def connect_to_client_and_wait(
         self,
@@ -678,12 +675,17 @@ class SendspinServer:
         else:
             self._initial_connect_succeeded.discard(url)
             self._retry_events[url] = asyncio.Event()
-            self._connection_tasks[url] = create_task(
-                self._handle_client_connection(url, pairing_attempt=pairing_attempt),
-                eager_start=False,
-            )
+            self._connection_tasks[url] = self._create_dial_task(url, pairing_attempt)
 
         await waiter
+
+    def _create_dial_task(
+        self, url: str, pairing_attempt: PairingAttempt | None
+    ) -> asyncio.Task[None]:
+        return create_task(
+            self._handle_client_connection(url, pairing_attempt=pairing_attempt),
+            eager_start=False,
+        )
 
     def _redial_if_closing(self, url: str) -> None:
         if self._dial_closing_for_good(url):
