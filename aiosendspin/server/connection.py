@@ -365,6 +365,7 @@ class SendspinConnection:
         # The dial's attempt until its outcome is reported to the server.
         self._dial_pairing_attempt = pairing_attempt
         self._pairing_task: asyncio.Task[bool] | None = None
+        self._connect_pairing_task: asyncio.Task[bool] | None = None
         self._pairing_message_queue: asyncio.Queue[WSMessage] | None = None
         self._pairing_index = 0
         self._activated_pairing_method: PairMethod | None = None
@@ -1366,11 +1367,18 @@ class SendspinConnection:
             # The writer starts once the first server/activate is out.
             self._writer_paused = True
             self._message_loop_task = create_task(self._run_message_loop())
-            paired = await self._pair(QueuedEncryptedWebSocket(transport, queue))
+            # Run as a task so end_pairing can abort the attempt.
+            self._connect_pairing_task = asyncio.Task(
+                self._pair(QueuedEncryptedWebSocket(transport, queue)),
+                loop=self._server.loop,
+                eager_start=True,
+            )
+            paired = await self._connect_pairing_task
         except Exception as exc:
             self._settle_dial_pairing(exc)
             raise
         finally:
+            self._connect_pairing_task = None
             self._pairing_message_queue = None
         self._settle_dial_pairing(None if paired else PairingError("pairing failed"))
         return paired
@@ -1927,6 +1935,10 @@ class SendspinConnection:
         If an attempt has already been finalized by the client, it completes as a success instead.
         """
         if not self._in_pairing:
+            if (task := self._connect_pairing_task) is not None and not task.done():
+                task.cancel()
+                with suppress(PairingError):
+                    await task
             return
         task = self._pairing_task
         if task is not None and not task.done():

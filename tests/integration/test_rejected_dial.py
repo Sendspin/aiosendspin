@@ -25,6 +25,7 @@ from aiosendspin.models.types import (
 )
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.pairing import (
+    LocalPairingAbortError,
     PairingAttempt,
     PairingDialError,
     PairingError,
@@ -277,6 +278,27 @@ async def test_cancelled_initiate_pairing_closes_its_dial() -> None:
         async with asyncio.timeout(5):
             while url in pairing._connection_tasks:  # noqa: ASYNC110, SLF001
                 await asyncio.sleep(0.01)
+
+
+async def test_end_pairing_aborts_a_pairing_dial() -> None:
+    """``end_pairing`` aborts a pairing that runs on its dial with ``user_cancelled``."""
+    async with _held_elsewhere(ConnectionReason.DISCOVERY, opens_window=False) as (
+        client,
+        client_id,
+        pairing,
+        _url,
+    ):
+        attempt = asyncio.create_task(
+            pairing.initiate_pairing(client_id, _static_code_attempt(_STATIC_PAIRING_CODE))
+        )
+        async with asyncio.timeout(5):
+            while Activity.PAIRING not in client.activities:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            await pairing.end_pairing(client_id)
+            with pytest.raises(LocalPairingAbortError) as excinfo:
+                await attempt
+        assert excinfo.value.reason is PairAbortReason.USER_CANCELLED
+        assert await pairing.pairing_store.record_by_client_id(client_id) is None
 
 
 async def test_initiate_pairing_refuses_a_different_client_at_the_address() -> None:
