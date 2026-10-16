@@ -16,7 +16,7 @@ from zeroconf import ServiceStateChange
 
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason, PairMethod
 from aiosendspin.noise.keys import Identity, generate_psk
-from aiosendspin.noise.pairing import PairingAttempt
+from aiosendspin.noise.pairing import PairingAttempt, PairingError
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.server import SendspinServer, _ended_without_redial
@@ -799,6 +799,25 @@ async def test_cancelled_pairing_stops_the_closing_dial_it_restarted(
 
     assert len(created) == 1
     assert url not in server._connection_tasks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_pairing_queued_on_a_stopped_dial_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pairing queued behind an open session fails when the dial is stopped."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://127.0.0.1:9999/sendspin"
+    created = _patch_controlled_connections(monkeypatch)
+    attempt = _known_disconnected_client(server, url)
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+
+    pairing = asyncio.create_task(server.initiate_pairing("client-1", attempt))
+    await asyncio.sleep(0)
+    server.disconnect_from_client(url)
+
+    async with asyncio.timeout(5):
+        with pytest.raises(PairingError, match="dial ended"):
+            await pairing
 
 
 @pytest.mark.asyncio
