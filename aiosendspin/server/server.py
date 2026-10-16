@@ -289,6 +289,8 @@ class SendspinServer:
         self._pending_pairing_attempts: dict[str, PairingAttempt] = {}
         # The client each dial attempt pairs and its caller's waiter, keyed by attempt identity.
         self._pairing_waiters: dict[int, tuple[str, asyncio.Future[None]]] = {}
+        # Waited-on attempts whose dial was started for them, keyed by attempt identity.
+        self._dial_owners: set[int] = set()
         self._client_urls: dict[str, str] = {}  # client_id → url
         self._external_stream_start_cbs: dict[str, ExternalStreamStartCallback] = {}
         self._external_registration_timeouts: dict[str, asyncio.Handle] = {}
@@ -762,20 +764,21 @@ class SendspinServer:
             raise InvalidPairingCodeError("pairing token is for another client")
         waiter: asyncio.Future[None] = self._loop.create_future()
         self._pairing_waiters[id(attempt)] = (client_id, waiter)
-        started_dial = url not in self._connection_tasks or self._dial_closing_for_good(url)
+        if url not in self._connection_tasks or self._dial_closing_for_good(url):
+            self._dial_owners.add(id(attempt))
         try:
             self.connect_to_client(url, pairing_attempt=attempt)
             await waiter
         except asyncio.CancelledError:
-            await self._withdraw_pairing_dial(url, attempt, started_dial=started_dial)
+            await self._withdraw_pairing_dial(url, attempt)
             raise
         finally:
             self._pairing_waiters.pop(id(attempt), None)
+            self._dial_owners.discard(id(attempt))
 
-    async def _withdraw_pairing_dial(
-        self, url: str, attempt: PairingAttempt, *, started_dial: bool
-    ) -> None:
+    async def _withdraw_pairing_dial(self, url: str, attempt: PairingAttempt) -> None:
         """Stop a cancelled attempt's dial but keep a running reconnect and a queued attempt."""
+        started_dial = id(attempt) in self._dial_owners
         if self._pending_pairing_attempts.get(url) is attempt:
             del self._pending_pairing_attempts[url]
             if started_dial:
@@ -790,6 +793,8 @@ class SendspinServer:
             queued = self._pending_pairing_attempts.pop(url, None)
             self.disconnect_from_client(url)
             if queued is not None:
+                if id(queued) in self._pairing_waiters:
+                    self._dial_owners.add(id(queued))
                 self.connect_to_client(url, pairing_attempt=queued)
 
     def _queue_pairing_attempt(self, url: str, attempt: PairingAttempt) -> None:

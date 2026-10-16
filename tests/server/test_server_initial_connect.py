@@ -826,7 +826,7 @@ async def test_cancelled_pairing_stops_the_closing_dial_it_restarted(
 async def test_cancelled_pairing_keeps_a_pairing_queued_on_its_dial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancelling a pairing while its dial connects leaves a pairing queued on that dial."""
+    """A pairing queued on a cancelled pairing's dial moves to a dial it owns."""
     session = _GatedSession()
     server = _make_server(session)
     url = "ws://127.0.0.1:9999/sendspin"
@@ -851,7 +851,10 @@ async def test_cancelled_pairing_keeps_a_pairing_queued_on_its_dial(
     second_pairing.cancel()
     with suppress(asyncio.CancelledError):
         await second_pairing
-    server.disconnect_from_client(url)
+    async with asyncio.timeout(5):
+        while url in server._connection_tasks:  # noqa: ASYNC110, SLF001
+            await asyncio.sleep(0)
+    assert len(created) == 1
 
 
 @pytest.mark.asyncio
