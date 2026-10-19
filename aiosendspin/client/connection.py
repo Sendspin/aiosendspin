@@ -755,7 +755,7 @@ class SendspinConnection:
                 raise
             self._client.record_pairing_window_attempt(self, paired=True)
             return
-        pairing_format = await self._validate_pairing_format(pairing.format)
+        pairing_format = PairingCodeFormat(pairing.format)
         try:
             # Dynamic pairing code is held back only at the round limit, until an operator action.
             if await store.is_pairing_round_limit_reached():
@@ -861,32 +861,28 @@ class SendspinConnection:
         """Whether the client currently admits unpaired access (from pairing config)."""
         return (await self._client.pairing_store.get_pairing_config()).unpaired_access_enabled
 
-    async def _validate_pairing(self, pairing: ActivatePairing | None) -> ActivatePairing:
-        """Reject a pairing whose method the matched PSK disallows or the client did not offer."""
+    async def _pairing_acceptable(self, pairing: ActivatePairing | None) -> bool:
+        """Whether the matched PSK allows ``pairing`` and the client offers its method/format."""
         assert self._noise_psk is not None
-        method = pairing.method if pairing is not None else None
+        if pairing is None:
+            return False
         # pairing_psk iff the matched PSK is the Pairing PSK; a pairing-code method otherwise.
-        method_fits_psk = (method is PairMethod.PAIRING_PSK) == (
+        method_fits_psk = (pairing.method is PairMethod.PAIRING_PSK) == (
             self._noise_psk.category is PskCategory.PAIRING
         )
-        supported = await self._supported_pair_methods()
-        if pairing is None or not method_fits_psk or method not in supported:
+        if not method_fits_psk or pairing.method not in await self._supported_pair_methods():
+            return False
+        if pairing.method is not PairMethod.DYNAMIC_PAIRING_CODE:
+            return True
+        # A format identifier from a newer spec revision is never offered.
+        return pairing.format in {f.value for f in await self._dynamic_pairing_formats()}
+
+    async def _validate_pairing(self, pairing: ActivatePairing | None) -> ActivatePairing:
+        """Reject a pairing the matched PSK disallows or the client did not offer."""
+        if not await self._pairing_acceptable(pairing):
             await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
+        assert pairing is not None
         return pairing
-
-    async def _validate_pairing_format(self, pairing_format: str | None) -> PairingCodeFormat:
-        """Validate that the activation selects a currently offered dynamic format.
-
-        An identifier from a newer spec revision does not parse, so it aborts like any
-        other format this client does not offer.
-        """
-        try:
-            selected = PairingCodeFormat(pairing_format)
-        except ValueError:
-            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
-        if selected not in await self._dynamic_pairing_formats():
-            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
-        return selected
 
     async def _dynamic_pairing_formats(self) -> tuple[PairingCodeFormat, ...]:
         """Return formats currently offered by this client."""
