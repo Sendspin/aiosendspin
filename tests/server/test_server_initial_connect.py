@@ -1281,6 +1281,74 @@ async def test_mdns_address_change_while_connection_closes(
 
 
 @pytest.mark.asyncio
+async def test_reconnect_follows_mdns_address_that_expired_without_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconnects follow each address left after the dialed one expired, until one connects."""
+    first_url = "ws://10.0.0.2:9999/sendspin"
+    unreachable_url = "ws://10.0.0.7:9999/sendspin"
+    final_url = "ws://10.0.0.9:9999/sendspin"
+    dialed_urls: list[str] = []
+
+    class _RecordingSession(_PersistentSuccessfulSession):
+        def ws_connect(self, url: str, *_args: object, **_kwargs: object) -> object:
+            dialed_urls.append(url)
+            if url == unreachable_url:
+                _FakeAsyncServiceInfo.addresses = ["10.0.0.9"]
+                raise ClientConnectionError("unreachable")
+            return super().ws_connect()
+
+    server = _make_server(_RecordingSession())
+    server._zc = MagicMock()  # noqa: SLF001
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    monkeypatch.setattr("aiosendspin.server.server.MAX_RECONNECT_BACKOFF_S", 0.01)
+
+    class _DroppedConnection:
+        """Connection double whose socket drops after the client moved to a new address."""
+
+        goodbye_reason = None
+        should_retry_server_initiated_connection = True
+        _closing = False
+        _disconnecting = False
+
+        def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
+            pass
+
+        async def handle_client(self) -> None:
+            if dialed_urls[-1] == final_url:
+                await asyncio.Event().wait()
+            _FakeAsyncServiceInfo.addresses = ["10.0.0.7", "10.0.0.2"]
+            await server._handle_service_added(  # noqa: SLF001
+                MagicMock(), service_type, service_name, ServiceStateChange.Updated
+            )
+            _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _DroppedConnection)
+    server.register_client_url("moving-client", first_url)
+    server.register_client_url("stale-client", final_url)
+
+    await server._handle_service_added(  # noqa: SLF001
+        MagicMock(), service_type, service_name, ServiceStateChange.Added
+    )
+    for _ in range(50):
+        if final_url in dialed_urls:
+            break
+        await asyncio.sleep(0.01)
+
+    assert dialed_urls == [first_url, unreachable_url, final_url]
+    assert server.get_client_id_for_url(final_url) == "moving-client"
+    for url in (first_url, unreachable_url, final_url):
+        server.disconnect_from_client(url)
+        await _wait_for_connection_task_cleanup(server, url)
+
+
+@pytest.mark.asyncio
 async def test_failed_redial_while_connection_closes_gives_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
