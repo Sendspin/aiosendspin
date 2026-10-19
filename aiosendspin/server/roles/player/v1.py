@@ -64,8 +64,6 @@ if TYPE_CHECKING:
 BUFFER_TRACKER_RESET_DELAY_S = 2.0
 # Largest required_lead_time_ms / min_buffer_ms the server honours; larger values are clamped.
 MAX_TIMING_PARAMETER_MS = 30_000
-# Line-rate bursts cause packet loss on weak WiFi links.
-MAX_FILL_RATE = 4
 
 
 @dataclass
@@ -946,7 +944,6 @@ class PlayerV1Role(Role):
                 client_id=self._client.client_id,
                 capacity_bytes=capacity,
                 max_duration_us=max_duration_us,
-                max_fill_rate=MAX_FILL_RATE,
             )
         else:
             state.buffer_tracker.capacity_bytes = capacity

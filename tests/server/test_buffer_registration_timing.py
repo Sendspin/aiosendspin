@@ -131,7 +131,6 @@ async def test_buffer_tracker_counts_from_transmission_start() -> None:  # noqa:
     role._stream_started = True  # noqa: SLF001
     buffer_tracker = role.get_buffer_tracker()
     assert buffer_tracker is not None
-    buffer_tracker.max_fill_rate = 0
 
     now_us = clock.now_us()
     chunks = [

@@ -51,7 +51,6 @@ class BufferTracker:
         client_id: str,
         capacity_bytes: int,
         max_duration_us: int = 0,
-        max_fill_rate: int = 0,
     ) -> None:
         """
         Initialize the buffer tracker for a client.
@@ -62,15 +61,11 @@ class BufferTracker:
             capacity_bytes: Maximum buffer capacity in bytes reported by the client.
             max_duration_us: Maximum buffer duration in microseconds. If 0, duration
                 is not tracked and has_duration_capacity() always returns True.
-            max_fill_rate: Largest multiple of real time at which audio is sent. If 0,
-                sends are not paced.
         """
         self._clock = clock
         self.client_id = client_id
         self.capacity_bytes = capacity_bytes
         self.max_duration_us = max_duration_us
-        self.max_fill_rate = max_fill_rate
-        self._next_send_us = 0
         self.buffered_chunks: deque[BufferedChunk] = deque()
         """Chunks that currently count, in registration order."""
         self.buffered_bytes = 0
@@ -250,8 +245,8 @@ class BufferTracker:
         """
         Calculate time until buffer can accept both bytes and duration.
 
-        Combines byte-based and duration-based backpressure and fill pacing into a
-        single wait time. Returns the maximum of these wait times.
+        Combines byte-based and duration-based backpressure into a single wait time.
+        Returns the maximum of both wait times.
 
         Args:
             bytes_needed: Number of bytes to check capacity for.
@@ -267,8 +262,7 @@ class BufferTracker:
             duration_wait = self.time_until_end_time_capacity(end_time_us)
         else:
             duration_wait = self.time_until_duration_capacity(duration_needed_us)
-        pace_wait = max(self._next_send_us - self._clock.now_us(), 0)
-        return max(byte_wait, duration_wait, pace_wait)
+        return max(byte_wait, duration_wait)
 
     # TODO: if unused delete
     async def wait_for_capacity(self, bytes_needed: int) -> None:
@@ -296,10 +290,6 @@ class BufferTracker:
         self.buffered_bytes += byte_count
         self.buffered_duration_us += duration_us
         self._transmitting = chunk
-        if self.max_fill_rate > 0:
-            self._next_send_us = max(
-                self._next_send_us + duration_us // self.max_fill_rate, self._clock.now_us()
-            )
         return chunk
 
     def finish_transmission(self, chunk: BufferedChunk) -> None:
@@ -314,7 +304,6 @@ class BufferTracker:
         self.buffered_bytes = 0
         self.buffered_duration_us = 0
         self._transmitting = None
-        self._next_send_us = 0
         self.oversize_logged = False
 
     def _completion_us(self, chunk: BufferedChunk) -> int:
