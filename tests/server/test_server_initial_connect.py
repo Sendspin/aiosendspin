@@ -1284,20 +1284,24 @@ async def test_mdns_address_change_while_connection_closes(
 async def test_reconnect_follows_mdns_address_that_expired_without_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dropped connection is redialed at the address left after the old one expired."""
+    """Reconnects follow each address left after the dialed one expired, until one connects."""
+    first_url = "ws://10.0.0.2:9999/sendspin"
+    unreachable_url = "ws://10.0.0.7:9999/sendspin"
+    final_url = "ws://10.0.0.9:9999/sendspin"
     dialed_urls: list[str] = []
 
     class _RecordingSession(_PersistentSuccessfulSession):
         def ws_connect(self, url: str, *_args: object, **_kwargs: object) -> object:
             dialed_urls.append(url)
+            if url == unreachable_url:
+                _FakeAsyncServiceInfo.addresses = ["10.0.0.9"]
+                raise ClientConnectionError("unreachable")
             return super().ws_connect()
 
     server = _make_server(_RecordingSession())
     server._zc = MagicMock()  # noqa: SLF001
     service_name = "service._sendspin._tcp.local."
     service_type = "_sendspin._tcp.local."
-    old_url = "ws://10.0.0.2:9999/sendspin"
-    new_url = "ws://10.0.0.7:9999/sendspin"
 
     _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
     _FakeAsyncServiceInfo.port = 9999
@@ -1317,7 +1321,7 @@ async def test_reconnect_follows_mdns_address_that_expired_without_update(
             pass
 
         async def handle_client(self) -> None:
-            if len(dialed_urls) > 1:
+            if dialed_urls[-1] == final_url:
                 await asyncio.Event().wait()
             _FakeAsyncServiceInfo.addresses = ["10.0.0.7", "10.0.0.2"]
             await server._handle_service_added(  # noqa: SLF001
@@ -1331,12 +1335,12 @@ async def test_reconnect_follows_mdns_address_that_expired_without_update(
         MagicMock(), service_type, service_name, ServiceStateChange.Added
     )
     for _ in range(50):
-        if len(dialed_urls) > 1:
+        if final_url in dialed_urls:
             break
         await asyncio.sleep(0.01)
 
-    assert dialed_urls == [old_url, new_url]
-    for url in (old_url, new_url):
+    assert dialed_urls == [first_url, unreachable_url, final_url]
+    for url in (first_url, unreachable_url, final_url):
         server.disconnect_from_client(url)
         await _wait_for_connection_task_cleanup(server, url)
 

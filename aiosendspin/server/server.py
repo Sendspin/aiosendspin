@@ -1235,7 +1235,8 @@ class SendspinServer:
                         pass
                 else:
                     await asyncio.sleep(sleep_s)
-                if first_connection_succeeded and self._redial_moved_mdns_client(url):
+                # Callers waiting on this URL's first connection keep the dial on it.
+                if url not in self._initial_connect_waiters and self._redial_moved_mdns_client(url):
                     break
                 backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF_S)
         except asyncio.CancelledError:
