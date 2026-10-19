@@ -1132,7 +1132,7 @@ class SendspinServer:
             else:
                 waiter.set_exception(err)
 
-    async def _handle_client_connection(  # noqa: PLR0912, PLR0915
+    async def _handle_client_connection(  # noqa: C901, PLR0912, PLR0915
         self, url: str, *, pairing_attempt: PairingAttempt | None = None
     ) -> None:
         """Handle a server-initiated WebSocket connection task."""
@@ -1235,6 +1235,8 @@ class SendspinServer:
                         pass
                 else:
                     await asyncio.sleep(sleep_s)
+                if first_connection_succeeded and self._redial_moved_mdns_client(url):
+                    break
                 backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF_S)
         except asyncio.CancelledError:
             if not first_connection_succeeded:
@@ -1513,6 +1515,31 @@ class SendspinServer:
             )
         self._mdns_client_urls[name] = url
         self._dial(url, connection_reason=self.get_connection_reason(url))
+
+    def _redial_moved_mdns_client(self, url: str) -> bool:
+        """Dial a discovered client at its new address once ``url`` is no longer advertised."""
+        name = next((n for n, u in self._mdns_client_urls.items() if u == url), None)
+        if name is None or self._zc is None:
+            return False
+        # Zeroconf fires no update when an address record expires, so only the cache shows the move.
+        info = AsyncServiceInfo(_CLIENT_SERVICE_TYPE, name)
+        if not info.load_from_cache(self._zc.zeroconf):
+            return False
+        new_url = _service_url(info)
+        if new_url is None or (
+            urlsplit(url).hostname in info.parsed_addresses() and _same_port_and_path(url, new_url)
+        ):
+            return False
+        logger.debug("mDNS address changed for %s (%s -> %s), reconnecting", name, url, new_url)
+        self._mdns_client_urls[name] = new_url
+        for client_id in [c for c, u in self._client_urls.items() if u == url]:
+            self._client_urls[client_id] = new_url
+        self._dial(
+            new_url,
+            connection_reason=self.get_connection_reason(url),
+            retry_initial_connection=True,
+        )
+        return True
 
     def _is_closing_without_redial(self, url: str | None) -> bool:
         if url is None or not self._dial_closing_for_good(url):
