@@ -2697,7 +2697,6 @@ class SendspinConnection:
     async def _run_message_loop(self) -> None:
         transport = self._transport
         assert transport is not None
-        cancelled = False
         try:
             while True:
                 msg, timestamp_us = await self._receive_timed(transport)
@@ -2747,7 +2746,6 @@ class SendspinConnection:
                     self._flag_noncompliance(f"{_peek_message_type(text)} {reason}")
                 await self._handle_message(message, timestamp_us)
         except asyncio.CancelledError:
-            cancelled = True
             self._logger.debug("Message loop cancelled")
         except ClientComplianceError:
             # Strict mode: hard-reject (no warm reconnect). Cleanup reads _closing.
@@ -2760,8 +2758,7 @@ class SendspinConnection:
                 self._pairing_message_queue.put_nowait(WSMessage(WSMsgType.CLOSE, None, ""))
             if self._writer_task and not self._writer_task.done():
                 self._writer_task.cancel()
-            if not cancelled:
-                self._connection_done.set()
+            self._connection_done.set()
 
     async def _receive_timed(self, transport: Transport) -> tuple[WSMessage, int]:
         """Return the next message and its receive time, taken before decryption."""
