@@ -611,6 +611,10 @@ class SendspinConnection:
                 category is not PskCategory.LONG_TERM
                 and not unpaired_access
                 and _admissible(category, activities, has_roles=has_roles, unpaired_access=True)
+                and (
+                    Activity.PAIRING not in activities
+                    or await self._pairing_acceptable(payload.pairing)
+                )
             ):
                 return GoodbyeReason.PAIRING_REQUIRED
             return GoodbyeReason.UNAUTHORIZED

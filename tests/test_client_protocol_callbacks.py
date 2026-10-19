@@ -16,7 +16,7 @@ from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.client import SendspinClient
 from aiosendspin.client.connection import SendspinConnection
-from aiosendspin.client.models import AudioFormat
+from aiosendspin.client.models import AudioFormat, PairingSupport
 from aiosendspin.clock import ManualClock
 from aiosendspin.models.artwork import (
     ArtworkChannel,
@@ -515,11 +515,40 @@ async def test_activation_admissibility(
     expected: GoodbyeReason | None,
 ) -> None:
     """server/activate enforcement reproduces the per-PSK activity-set table."""
-    connection = await _connection(category, unpaired_access=unpaired)
+    connection = await _connection(
+        category,
+        unpaired_access=unpaired,
+        pairing_support=PairingSupport(pairing_code_display=_show_pairing_code),
+    )
+    pairing = None
+    if Activity.PAIRING in activities:
+        pairing = (
+            ActivatePairing(method=PairMethod.PAIRING_PSK)
+            if category is PskCategory.PAIRING
+            else ActivatePairing(method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits")
+        )
     reason = await connection._apply_activation(  # noqa: SLF001
-        ServerActivatePayload(activities=activities, active_roles=roles)
+        ServerActivatePayload(activities=activities, active_roles=roles, pairing=pairing)
     )
     assert reason is expected
+
+
+async def _show_pairing_code(pairing_code: str | None, **_kwargs: object) -> None:
+    pass
+
+
+@pytest.mark.asyncio
+async def test_unpaired_activation_with_disallowed_pair_method_is_unauthorized() -> None:
+    """Unpaired access would not admit a disallowed pairing method, so it is not suggested."""
+    connection = await _sentinel_connection(unpaired_access=False)
+    reason = await connection._apply_activation(  # noqa: SLF001
+        ServerActivatePayload(
+            activities=[Activity.PLAYBACK, Activity.PAIRING],
+            active_roles=[],
+            pairing=ActivatePairing(method=PairMethod.PAIRING_PSK),
+        )
+    )
+    assert reason is GoodbyeReason.UNAUTHORIZED
 
 
 @pytest.mark.asyncio
