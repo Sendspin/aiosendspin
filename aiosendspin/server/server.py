@@ -60,6 +60,7 @@ MAX_RECONNECT_BACKOFF_S = 300.0
 # Only consider a connection stable if it lasts at least this long, otherwise
 # a successful but broken session may cause a reconnection every second.
 STABLE_SERVER_INITIATED_SESSION_S = 10.0
+_CLIENT_SERVICE_TYPE = "_sendspin._tcp.local."
 # Continued mDNS querying while no client is known, doubling up to RFC 6762's 60 minute cap.
 _MDNS_REQUERY_FIRST_S = 30.0
 _MDNS_REQUERY_MAX_S = 3600.0
@@ -179,6 +180,35 @@ def _get_first_valid_ip(addresses: list[str]) -> str | None:
         if not addr.is_link_local and not addr.is_unspecified:
             return addr_str
     return None
+
+
+def _service_url(info: AsyncServiceInfo) -> str | None:
+    """Return the WebSocket URL a discovered client advertises, if it advertises a usable one."""
+    address = _get_first_valid_ip(info.parsed_addresses())
+    if address is None:
+        return None
+
+    port = info.port
+    path = None
+    if info.properties:
+        for k, v in info.properties.items():
+            key = k.decode() if isinstance(k, bytes) else k
+            if key == "path" and v is not None:
+                path = v.decode() if isinstance(v, bytes) else v
+                break
+
+    if port is None:
+        return None
+    if path is None or not str(path).startswith("/"):
+        return None
+
+    host = f"[{address}]" if ip_address(address).version == 6 else address
+    return f"ws://{host}:{port}{path}"
+
+
+def _same_port_and_path(old_url: str, new_url: str) -> bool:
+    old_parts, new_parts = urlsplit(old_url), urlsplit(new_url)
+    return old_parts.port == new_parts.port and old_parts.path == new_parts.path
 
 
 def _ended_without_redial(conn: SendspinConnection) -> bool:
@@ -1395,10 +1425,9 @@ class SendspinServer:
     async def _start_mdns_discovery(self) -> None:
         assert self._zc is not None
 
-        service_type = "_sendspin._tcp.local."
         self._mdns_browser = AsyncServiceBrowser(
             self._zc.zeroconf,
-            service_type,
+            _CLIENT_SERVICE_TYPE,
             handlers=[self._on_mdns_service_state_change],
         )
         self._schedule_mdns_requery(_MDNS_REQUERY_FIRST_S)
@@ -1446,30 +1475,9 @@ class SendspinServer:
         if not info.load_from_cache(zeroconf):
             await info.async_request(zeroconf, 3000)
 
-        addresses = info.parsed_addresses()
-        if not addresses:
+        url = _service_url(info)
+        if url is None:
             return
-
-        address = _get_first_valid_ip(addresses)
-        if address is None:
-            return
-
-        port = info.port
-        path = None
-        if info.properties:
-            for k, v in info.properties.items():
-                key = k.decode() if isinstance(k, bytes) else k
-                if key == "path" and v is not None:
-                    path = v.decode() if isinstance(v, bytes) else v
-                    break
-
-        if port is None:
-            return
-        if path is None or not str(path).startswith("/"):
-            return
-
-        host = f"[{address}]" if ip_address(address).version == 6 else address
-        url = f"ws://{host}:{port}{path}"
         old_url = self._mdns_client_urls.get(name)
         if state_change is ServiceStateChange.Updated and (
             old_url in self._mdns_goodbye_urls or self._is_closing_without_redial(old_url)
@@ -1483,15 +1491,12 @@ class SendspinServer:
                     self.register_client_url(client_id, url)
             return
         if old_url is not None and old_url != url and old_url in self._connection_tasks:
-            old_parts = urlsplit(old_url)
             old_conn = self._dial_connections.get(old_url)
             # mDNS updates arrive record by record, so a live address may be missing from the list.
             connected = old_conn is not None and not old_conn._disconnecting  # noqa: SLF001
             if (
-                (connected or old_parts.hostname in addresses)
-                and old_parts.port == port
-                and old_parts.path == path
-            ):
+                connected or urlsplit(old_url).hostname in info.parsed_addresses()
+            ) and _same_port_and_path(old_url, url):
                 logger.debug(
                     "mDNS preferred address changed for %s (%s -> %s) "
                     "but current address still in use, keeping existing connection",
