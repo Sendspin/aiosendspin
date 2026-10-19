@@ -207,8 +207,8 @@ def _service_url(info: AsyncServiceInfo) -> str | None:
 
 
 def _same_port_and_path(old_url: str, new_url: str) -> bool:
-    old_parts, new_parts = urlsplit(old_url), urlsplit(new_url)
-    return old_parts.port == new_parts.port and old_parts.path == new_parts.path
+    old, new = urlsplit(old_url), urlsplit(new_url)
+    return (old.port, old.path, old.query) == (new.port, new.path, new.query)
 
 
 def _ended_without_redial(conn: SendspinConnection) -> bool:
