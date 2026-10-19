@@ -1029,18 +1029,28 @@ async def test_mdns_removal_cancels_connection_when_no_persistent_client() -> No
 
 
 @pytest.mark.parametrize(
-    ("addresses", "port", "path", "has_task", "expected_url", "expect_reconnect"),
+    ("addresses", "port", "path", "has_task", "connected", "expected_url", "expect_reconnect"),
     [
         # Address reorder, old IP still advertised, task alive -> keep existing.
-        (["10.0.0.3", "10.0.0.2"], 9999, "/sendspin", True, "ws://10.0.0.2:9999/sendspin", False),
+        (
+            ["10.0.0.3", "10.0.0.2"],
+            9999,
+            "/sendspin",
+            True,
+            False,
+            "ws://10.0.0.2:9999/sendspin",
+            False,
+        ),
+        # Partial list without the old IP while connected -> keep existing.
+        (["10.0.0.3"], 9999, "/sendspin", True, True, "ws://10.0.0.2:9999/sendspin", False),
         # Same IP, port/path changed -> reconnect.
-        (["10.0.0.2"], 10000, "/other", True, "ws://10.0.0.2:10000/other", True),
+        (["10.0.0.2"], 10000, "/other", True, True, "ws://10.0.0.2:10000/other", True),
         # Old IP gone from advertised set -> reconnect.
-        (["10.0.0.5"], 9999, "/sendspin", True, "ws://10.0.0.5:9999/sendspin", True),
+        (["10.0.0.5"], 9999, "/sendspin", True, False, "ws://10.0.0.5:9999/sendspin", True),
         # URL changed but no active task -> reconnect.
-        (["10.0.0.3"], 9999, "/sendspin", False, "ws://10.0.0.3:9999/sendspin", True),
+        (["10.0.0.3"], 9999, "/sendspin", False, False, "ws://10.0.0.3:9999/sendspin", True),
         # IPv6-only client -> bracketed literal.
-        (["fd00::3"], 9999, "/sendspin", False, "ws://[fd00::3]:9999/sendspin", True),
+        (["fd00::3"], 9999, "/sendspin", False, False, "ws://[fd00::3]:9999/sendspin", True),
     ],
 )
 @pytest.mark.asyncio
@@ -1050,6 +1060,7 @@ async def test_mdns_update_reconnect_decision(
     port: int,
     path: str,
     has_task: bool,  # noqa: FBT001
+    connected: bool,  # noqa: FBT001
     expected_url: str,
     expect_reconnect: bool,  # noqa: FBT001
 ) -> None:
@@ -1068,6 +1079,7 @@ async def test_mdns_update_reconnect_decision(
     if has_task:
         connection_task = asyncio.create_task(asyncio.sleep(3600))
         server._connection_tasks[old_url] = connection_task  # noqa: SLF001
+        server._dial_connections[old_url] = MagicMock(_disconnecting=not connected)  # noqa: SLF001
     server._dial = MagicMock()  # type: ignore[method-assign]  # noqa: SLF001
 
     try:

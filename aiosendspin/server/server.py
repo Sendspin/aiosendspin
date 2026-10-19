@@ -1484,14 +1484,17 @@ class SendspinServer:
             return
         if old_url is not None and old_url != url and old_url in self._connection_tasks:
             old_parts = urlsplit(old_url)
+            old_conn = self._dial_connections.get(old_url)
+            # mDNS updates arrive record by record, so a live address may be missing from the list.
+            connected = old_conn is not None and not old_conn._disconnecting  # noqa: SLF001
             if (
-                old_parts.hostname in addresses
+                (connected or old_parts.hostname in addresses)
                 and old_parts.port == port
                 and old_parts.path == path
             ):
                 logger.debug(
                     "mDNS preferred address changed for %s (%s -> %s) "
-                    "but current address still advertised, keeping existing connection",
+                    "but current address still in use, keeping existing connection",
                     name,
                     old_url,
                     url,
