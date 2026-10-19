@@ -1330,6 +1330,8 @@ async def test_reconnect_follows_mdns_address_that_expired_without_update(
             _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
 
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _DroppedConnection)
+    server.register_client_url("moving-client", first_url)
+    server.register_client_url("stale-client", final_url)
 
     await server._handle_service_added(  # noqa: SLF001
         MagicMock(), service_type, service_name, ServiceStateChange.Added
@@ -1340,6 +1342,7 @@ async def test_reconnect_follows_mdns_address_that_expired_without_update(
         await asyncio.sleep(0.01)
 
     assert dialed_urls == [first_url, unreachable_url, final_url]
+    assert server.get_client_id_for_url(final_url) == "moving-client"
     for url in (first_url, unreachable_url, final_url):
         server.disconnect_from_client(url)
         await _wait_for_connection_task_cleanup(server, url)

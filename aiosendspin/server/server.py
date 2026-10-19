@@ -1538,7 +1538,7 @@ class SendspinServer:
         logger.debug("mDNS address changed for %s (%s -> %s), reconnecting", name, url, new_url)
         self._mdns_client_urls[name] = new_url
         for client_id in [c for c, u in self._client_urls.items() if u == url]:
-            self._client_urls[client_id] = new_url
+            self._claim_client_url(client_id, new_url)
         self._dial(
             new_url,
             connection_reason=self.get_connection_reason(url),
