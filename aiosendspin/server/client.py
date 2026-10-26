@@ -53,7 +53,8 @@ _T = TypeVar("_T")
 CLIENT_CLEANUP_DELAY = 180.0
 
 # Reasons that trigger immediate client cleanup from the registry.
-# Note: ANOTHER_SERVER and CONCURRENT_ATTEMPT are intentionally excluded and never auto-cleaned up.
+# Note: ANOTHER_SERVER, CONCURRENT_ATTEMPT and UNPAIRED are intentionally excluded and never
+# auto-cleaned up.
 IMMEDIATE_CLEANUP_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.SHUTDOWN,
@@ -66,6 +67,7 @@ _RETAINED_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.ANOTHER_SERVER,
         GoodbyeReason.CONCURRENT_ATTEMPT,
+        GoodbyeReason.UNPAIRED,
     }
 )
 
@@ -717,7 +719,7 @@ class SendspinClient:
             self._client_id, goodbye_reason
         )
 
-        if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
+        if goodbye_reason in {GoodbyeReason.ANOTHER_SERVER, GoodbyeReason.UNPAIRED}:
             create_task(self._handle_takeover_disconnect())
         elif goodbye_reason == GoodbyeReason.CONCURRENT_ATTEMPT:
             # Another server holds the device, so a group start here must not dial it back.
@@ -736,7 +738,7 @@ class SendspinClient:
         self._roles_attached = False
 
     async def _handle_takeover_disconnect(self) -> None:
-        """Handle ANOTHER_SERVER disconnect by ungrouping the client from its group."""
+        """Handle ANOTHER_SERVER or UNPAIRED disconnect by ungrouping the client from its group."""
         old_group_id = self.group.group_id
         try:
             # ungroup() already leaves the client in a fresh stopped solo group.

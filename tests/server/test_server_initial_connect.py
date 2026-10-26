@@ -1472,13 +1472,14 @@ async def test_playback_request_skips_client_that_required_pairing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_playback_request_redials_client_that_switched_servers() -> None:
-    """A playback request redials a client whose last goodbye was ``another_server``."""
+@pytest.mark.parametrize("reason", [GoodbyeReason.ANOTHER_SERVER, GoodbyeReason.UNPAIRED])
+async def test_playback_request_redials_retained_client(reason: GoodbyeReason) -> None:
+    """A playback request redials a client after an ``another_server`` or ``unpaired`` goodbye."""
     server = _make_server(_PersistentSuccessfulSession())
     url = "ws://10.0.0.2:9999/sendspin"
     client = server.get_or_create_client("speaker")
     server.register_client_url("speaker", url)
-    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+    client.detach_connection(reason)
 
     assert server.request_client_playback_connection("speaker")
     assert server.get_connection_reason(url) is ConnectionReason.PLAYBACK
