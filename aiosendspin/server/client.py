@@ -719,7 +719,7 @@ class SendspinClient:
             self._client_id, goodbye_reason
         )
 
-        if goodbye_reason == GoodbyeReason.ANOTHER_SERVER:
+        if goodbye_reason in {GoodbyeReason.ANOTHER_SERVER, GoodbyeReason.UNPAIRED}:
             create_task(self._handle_takeover_disconnect())
         elif goodbye_reason == GoodbyeReason.CONCURRENT_ATTEMPT:
             # Another server holds the device, so a group start here must not dial it back.
@@ -738,7 +738,7 @@ class SendspinClient:
         self._roles_attached = False
 
     async def _handle_takeover_disconnect(self) -> None:
-        """Handle ANOTHER_SERVER disconnect by ungrouping the client from its group."""
+        """Handle ANOTHER_SERVER or UNPAIRED disconnect by ungrouping the client from its group."""
         old_group_id = self.group.group_id
         try:
             # ungroup() already leaves the client in a fresh stopped solo group.
