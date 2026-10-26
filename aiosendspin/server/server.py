@@ -77,7 +77,6 @@ _NO_PLAYBACK_RECLAIM_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.UNAUTHORIZED,
         GoodbyeReason.PAIRING_REQUIRED,
-        GoodbyeReason.UNPAIRED,
     }
 )
 
@@ -992,8 +991,8 @@ class SendspinServer:
         """Attempt to reconnect to a client for playback.
 
         Returns True if reconnection was initiated, False if no URL available.
-        Used when starting playback to reclaim clients that disconnected with 'another_server'
-        or 'concurrent_attempt'.
+        Used when starting playback to reclaim clients that disconnected with 'another_server',
+        'concurrent_attempt' or 'unpaired'.
 
         The client must reconnect within timeout_s seconds; otherwise it is
         fully unregistered from this server.
