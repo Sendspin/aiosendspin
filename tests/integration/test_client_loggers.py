@@ -71,7 +71,11 @@ async def test_connected_client_registers_no_named_logger() -> None:
             ):
                 await asyncio.sleep(0.01)
 
-        assert not [name for name in logging.Logger.manager.loggerDict if identity.peer_id in name]
+        assert not [
+            name
+            for name in logging.Logger.manager.loggerDict
+            if identity.peer_id in name or "unknown-127.0.0.1" in name
+        ]
     finally:
         await client.disconnect()
         await server.close()
