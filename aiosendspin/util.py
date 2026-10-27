@@ -7,7 +7,7 @@ import logging
 import socket
 import sys
 import warnings
-from collections.abc import Coroutine, MutableMapping
+from collections.abc import Coroutine
 from typing import Any
 
 import orjson
@@ -140,15 +140,18 @@ def warn_deprecated(api: str, reason: str) -> None:
 
 
 class PrefixLoggerAdapter(logging.LoggerAdapter[logging.Logger]):
-    """Per-client logger that, unlike ``getChild``, isn't kept for the life of the process."""
+    """Logger adapter that prefixes every message with a fixed tag."""
 
     def __init__(self, logger: logging.Logger, prefix: str) -> None:
         """Wrap ``logger`` with a fixed message prefix."""
         super().__init__(logger)
         self._prefix = prefix
 
-    def process(
-        self, msg: Any, kwargs: MutableMapping[str, Any]
-    ) -> tuple[Any, MutableMapping[str, Any]]:
-        """Prepend the prefix to the message."""
-        return f"[{self._prefix}] {msg}", kwargs
+    def log(self, level: int, msg: object, *args: object, **kwargs: Any) -> None:
+        """Log ``msg`` behind the prefix, which may contain ``%``."""
+        if not self.isEnabledFor(level):
+            return
+        prefix = self._prefix.replace("%", "%%") if args else self._prefix
+        kwargs["stacklevel"] = kwargs.get("stacklevel", 1) + 1
+        prefixed = f"[{prefix}] {msg}"
+        self.logger.log(level, prefixed, *args, **kwargs)
