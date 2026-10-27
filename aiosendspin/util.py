@@ -137,3 +137,21 @@ def warn_deprecated(api: str, reason: str) -> None:
     message = f"{api} is deprecated: {reason}"
     warnings.warn(message, DeprecationWarning, stacklevel=3)
     _LOGGER.warning(message)
+
+
+class PrefixLoggerAdapter(logging.LoggerAdapter[logging.Logger]):
+    """Logger adapter that prefixes every message with a fixed tag."""
+
+    def __init__(self, logger: logging.Logger, prefix: str) -> None:
+        """Wrap ``logger`` with a fixed message prefix."""
+        super().__init__(logger)
+        self._prefix = prefix
+
+    def log(self, level: int, msg: object, *args: object, **kwargs: Any) -> None:
+        """Log ``msg`` behind the prefix, which may contain ``%``."""
+        if not self.isEnabledFor(level):
+            return
+        prefix = self._prefix.replace("%", "%%") if args else self._prefix
+        kwargs["stacklevel"] = kwargs.get("stacklevel", 1) + 1
+        prefixed = f"[{prefix}] {msg}"
+        self.logger.log(level, prefixed, *args, **kwargs)

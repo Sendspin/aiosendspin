@@ -28,7 +28,7 @@ from aiosendspin.models.types import (
     has_role_family,
 )
 from aiosendspin.noise.trust_store import PskCategory
-from aiosendspin.util import create_task
+from aiosendspin.util import PrefixLoggerAdapter, create_task
 
 from .compliance import ClientComplianceError, describe_client, noncompliance_subject
 from .events import ClientEvent, ClientGroupChangedEvent
@@ -127,7 +127,7 @@ class SendspinClient:
         self.disconnect_behaviour = DisconnectBehaviour.UNGROUP
 
         self._event_cbs: list[Callable[[SendspinClient, ClientEvent], None]] = []
-        self._logger = logger.getChild(client_id)
+        self._logger = PrefixLoggerAdapter(logger, client_id)
 
         # Client-level availability (reported by client/state). Persists across reconnects.
         self._available: bool = True
@@ -516,7 +516,7 @@ class SendspinClient:
         self._server._signal_client_connected(self._client_id)  # noqa: SLF001
         if previous_info is not None and previous_info != client_info:
             self._server._signal_client_updated(self._client_id)  # noqa: SLF001
-        self._logger = logger.getChild(self._client_id)
+        self._logger = PrefixLoggerAdapter(logger, self._client_id)
         if not self._roles_warm_disconnected and not self._roles_cold_preinitialized:
             # First attach for this device: clear stale state, then reconcile from empty.
             self._hard_detach_roles()

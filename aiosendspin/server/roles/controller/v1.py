@@ -14,7 +14,7 @@ from aiosendspin.models.controller import ControllerCommandPayload
 from aiosendspin.models.core import LegacyServerStateClearMessage
 from aiosendspin.models.types import MediaCommand
 from aiosendspin.server.roles.base import Role
-from aiosendspin.util import create_task
+from aiosendspin.util import PrefixLoggerAdapter, create_task
 
 if TYPE_CHECKING:
     from aiosendspin.models.core import ClientCommandPayload
@@ -48,7 +48,7 @@ class ControllerV1Role(Role):
         self._stream_started = False
         self._buffer_tracker = None
         self._group_role: ControllerGroupRole | None = None
-        self._logger = logger.getChild(str(client.client_id))
+        self._logger = PrefixLoggerAdapter(logger, str(client.client_id))
 
     @property
     def role_id(self) -> str:

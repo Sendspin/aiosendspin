@@ -169,6 +169,7 @@ from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairin
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 from aiosendspin.util import (
     WARN_INTERVAL_S,
+    PrefixLoggerAdapter,
     _peek_message_type,
     create_task,
     finish_despite_cancel,
@@ -379,9 +380,9 @@ class SendspinConnection:
             if wsock_client is not None:
                 raise ValueError("Only one of request or wsock_client may be provided")
             self._wsock_server = web.WebSocketResponse(heartbeat=30, compress=False)
-            self._logger = logger.getChild(f"unknown-{request.remote}")
+            self._logger = PrefixLoggerAdapter(logger, f"unknown-{request.remote}")
         elif wsock_client is not None:
-            self._logger = logger.getChild("unknown-client")
+            self._logger = PrefixLoggerAdapter(logger, "unknown-client")
         else:
             raise ValueError("Either request or wsock_client must be provided")
 
@@ -1216,7 +1217,7 @@ class SendspinConnection:
         self._noise_psk = result.psk
         self._handshake_hash = result.handshake_hash
         self._pairing_index = 0
-        self._logger = logger.getChild(result.peer_id)
+        self._logger = PrefixLoggerAdapter(logger, result.peer_id)
         for reason in result.noncompliance:
             self._flag_noncompliance(reason)
         if result.credential_mismatch and self._pairing_attempt is not None:
@@ -1495,7 +1496,7 @@ class SendspinConnection:
         self._negotiated_roles = negotiate_roles(
             client_info.activatable_roles, strict=not self._server.allow_noncompliant_clients
         )
-        self._logger = logger.getChild(client_id)
+        self._logger = PrefixLoggerAdapter(logger, client_id)
         self._logger.debug("Received client/hello: %s", client_info)
         self._note_client_hello_wire(client_info)
         if unimplemented := self._unimplemented_roles(client_info.supported_roles):
