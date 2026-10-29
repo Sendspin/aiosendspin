@@ -159,11 +159,19 @@ async def test_delayed_cleanup_on_reconnectable_disconnect(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", [GoodbyeReason.ANOTHER_SERVER, GoodbyeReason.UNPAIRED])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        GoodbyeReason.ANOTHER_SERVER,
+        GoodbyeReason.UNPAIRED,
+        GoodbyeReason.PAIRING_REQUIRED,
+        GoodbyeReason.UNAUTHORIZED,
+    ],
+)
 async def test_no_cleanup_on_retained_disconnect(
     mock_server: _MockServer, client: SendspinClient, reason: GoodbyeReason
 ) -> None:
-    """Client remains in registry indefinitely after ANOTHER_SERVER or UNPAIRED disconnect."""
+    """Client remains in registry indefinitely after a retained goodbye."""
     client.detach_connection(reason)
 
     await asyncio.sleep(0)
@@ -173,11 +181,19 @@ async def test_no_cleanup_on_retained_disconnect(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", [GoodbyeReason.ANOTHER_SERVER, GoodbyeReason.UNPAIRED])
-async def test_takeover_or_unpaired_disconnect_ungroups_client(
+@pytest.mark.parametrize(
+    "reason",
+    [
+        GoodbyeReason.ANOTHER_SERVER,
+        GoodbyeReason.UNPAIRED,
+        GoodbyeReason.PAIRING_REQUIRED,
+        GoodbyeReason.UNAUTHORIZED,
+    ],
+)
+async def test_retained_disconnect_ungroups_client(
     mock_server: _MockServer, client: SendspinClient, reason: GoodbyeReason
 ) -> None:
-    """Takeover or unpaired disconnect ungroups the client out of its shared group."""
+    """A retained goodbye other than CONCURRENT_ATTEMPT ungroups the client."""
     other = SendspinClient(mock_server, client_id="player-2")
     SendspinGroup(mock_server, other)
     await client.group.add_client(other)
