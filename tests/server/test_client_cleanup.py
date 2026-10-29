@@ -159,11 +159,19 @@ async def test_delayed_cleanup_on_reconnectable_disconnect(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", [GoodbyeReason.ANOTHER_SERVER, GoodbyeReason.UNPAIRED])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        GoodbyeReason.ANOTHER_SERVER,
+        GoodbyeReason.UNPAIRED,
+        GoodbyeReason.PAIRING_REQUIRED,
+        GoodbyeReason.UNAUTHORIZED,
+    ],
+)
 async def test_no_cleanup_on_retained_disconnect(
     mock_server: _MockServer, client: SendspinClient, reason: GoodbyeReason
 ) -> None:
-    """Client remains in registry indefinitely after ANOTHER_SERVER or UNPAIRED disconnect."""
+    """Client remains in registry indefinitely after a retained goodbye."""
     client.detach_connection(reason)
 
     await asyncio.sleep(0)

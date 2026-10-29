@@ -53,8 +53,7 @@ _T = TypeVar("_T")
 CLIENT_CLEANUP_DELAY = 180.0
 
 # Reasons that trigger immediate client cleanup from the registry.
-# Note: ANOTHER_SERVER, CONCURRENT_ATTEMPT and UNPAIRED are intentionally excluded and never
-# auto-cleaned up.
+# Note: _RETAINED_GOODBYE_REASONS are intentionally excluded and never auto-cleaned up.
 IMMEDIATE_CLEANUP_REASONS: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.SHUTDOWN,
@@ -68,6 +67,8 @@ _RETAINED_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
         GoodbyeReason.ANOTHER_SERVER,
         GoodbyeReason.CONCURRENT_ATTEMPT,
         GoodbyeReason.UNPAIRED,
+        GoodbyeReason.PAIRING_REQUIRED,
+        GoodbyeReason.UNAUTHORIZED,
     }
 )
 
