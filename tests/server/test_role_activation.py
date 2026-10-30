@@ -21,8 +21,11 @@ from aiosendspin.models.core import (
     ClientHelloMessage,
     ClientHelloPayload,
     ClientStatePayload,
+    GroupUpdateServerMessage,
+    PairMethodDescriptor,
     ServerCommandMessage,
     ServerCommandPayload,
+    SupportedPairMethods,
     UnpairedAccess,
 )
 from aiosendspin.models.player import (
@@ -38,6 +41,7 @@ from aiosendspin.models.types import (
     BinaryMessageType,
     PairMethod,
     PictureFormat,
+    PlaybackStateType,
     PlayerCommand,
     Roles,
 )
@@ -124,6 +128,7 @@ async def _connect(
     hello: ClientHelloPayload,
     *,
     trusted: bool = True,
+    approved_roles: frozenset[str] = frozenset(),
     send_state: bool = True,
     category: PskCategory = PskCategory.SENTINEL,
     server: _MockServer | None = None,
@@ -133,7 +138,9 @@ async def _connect(
     if server is None:
         server = _MockServer(loop=loop, clock=LoopClock(loop))
     if trusted:
-        await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+        await server.pairing_store.add_trusted_unpaired(
+            TrustedUnpairedClient(client_id=CLIENT_ID, approved_roles=approved_roles)
+        )
     conn = SendspinConnection(server, wsock_client=AsyncMock())
     psk = generate_psk()
     conn._client_id = CLIENT_ID  # noqa: SLF001
@@ -179,6 +186,7 @@ async def test_removed_roles_are_torn_down_before_server_activate() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     # Anything still queued for a removed role must not follow the activation.
     conn.send_role_message("player", _volume_command())
 
@@ -199,6 +207,7 @@ async def test_long_term_pairing_ends_streams_before_rehandshake() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     transport = _FakePairingTransport()
     # The attempt's queued view shares the base transport's socket and Noise session.
     transport._ws = transport  # noqa: SLF001
@@ -238,6 +247,7 @@ async def test_removed_roles_send_legacy_null_state_before_server_activate() -> 
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
 
     await _set_trusted(conn, trusted=False)
 
@@ -253,6 +263,7 @@ async def test_activate_tears_down_removed_roles_first() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     conn._trusted_unpaired = False  # noqa: SLF001
 
     await conn._activate()  # noqa: SLF001
@@ -285,6 +296,7 @@ async def test_removed_artwork_role_cancels_its_transfer_before_stream_end() -> 
     artwork = _client(conn).roles_by_family("artwork")[0]
     assert isinstance(artwork, ArtworkV1Role)
     artwork._in_flight = 0  # noqa: SLF001
+    conn._streaming_roles.add("artwork")  # noqa: SLF001
     recorder = _RecordingTransport()
     conn._transport = recorder  # type: ignore[assignment]  # noqa: SLF001
 
@@ -379,7 +391,7 @@ async def test_activation_state_deviations_are_flagged() -> None:
     with patch.object(conn, "_flag_noncompliance") as flag:
         await conn._handle_client_state(ClientStatePayload(player=partial))  # noqa: SLF001
 
-    flag.assert_any_call("client/state after server/activate omitted required player timing fields")
+    flag.assert_any_call("client/state omitted required player timing fields")
     assert not client.awaits_role_state("player")
 
 
@@ -534,6 +546,161 @@ async def test_initial_state_completes_after_its_roles_were_removed() -> None:
     await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
 
     assert client.is_connected
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_unpair_goodbye_timeout_starts_once_server_unpair_is_sent() -> None:
+    """A server/unpair still queued behind a paused writer does not start the goodbye timeout."""
+    conn, fake = await _connect(_hello([Roles.CONTROLLER.value]), category=PskCategory.LONG_TERM)
+
+    conn.unpair()
+    assert conn._unpair_goodbye_timeout_handle is None  # noqa: SLF001
+
+    assert await _drain_priority(conn, fake) == ["server/unpair"]
+    assert conn._unpair_goodbye_timeout_handle is not None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_lenient_server_flags_a_missing_initial_state_of_stateless_roles() -> None:
+    """A controller-only client connects at once, and is flagged when no client/state follows."""
+    conn, _fake = await _connect(_hello([Roles.CONTROLLER.value]), send_state=False)
+    client = _client(conn)
+    assert client.is_connected
+    handle = conn._initial_state_timeout_handle  # noqa: SLF001
+    assert handle is not None
+    handle.cancel()
+
+    with patch.object(conn, "_flag_noncompliance") as flag:
+        conn._initial_state_timeout_callback()  # noqa: SLF001
+
+    flag.assert_called_once_with("did not send the required initial client/state in time")
+    assert client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_lenient_server_stops_waiting_once_stateless_roles_send_state() -> None:
+    """A controller-only client/state cancels the timeout that would flag it as missing."""
+    conn, _fake = await _connect(_hello([Roles.CONTROLLER.value]))
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+
+def _strict_server() -> _MockServer:
+    loop = asyncio.get_running_loop()
+    return _MockServer(loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False)
+
+
+def _strict_hello(roles: list[str]) -> ClientHelloPayload:
+    return dataclasses.replace(
+        _hello(roles),
+        supported_pair_methods=SupportedPairMethods(pairing_psk=PairMethodDescriptor()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_strict_server_waits_for_a_late_initial_state_without_a_deadline() -> None:
+    """A strict server holds a controller-only client until its initial client/state arrives."""
+    conn, _fake = await _connect(
+        _strict_hello([Roles.CONTROLLER.value]), send_state=False, server=_strict_server()
+    )
+    client = _client(conn)
+    assert not client.is_connected
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+    await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
+
+    assert client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_strict_server_holds_a_reactivated_role_without_a_deadline() -> None:
+    """A strict server keeps a re-added player held until its client/state object arrives."""
+    conn, _fake = await _connect(_strict_hello([Roles.PLAYER.value]), server=_strict_server())
+    await _set_trusted(conn, trusted=False)
+    await _set_trusted(conn, trusted=True)
+
+    assert _client(conn).awaits_role_state("player")
+    assert conn._activation_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_group_update_follows_the_first_activation_before_client_state() -> None:
+    """The first server/activate brings group/update, and changes follow before client/state."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    client = _client(conn)
+
+    def group_updates() -> list[GroupUpdateServerMessage]:
+        return [m for m in conn._normal_messages if isinstance(m, GroupUpdateServerMessage)]  # noqa: SLF001
+
+    assert not client.is_connected
+    assert len(group_updates()) == 1
+
+    client.group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
+    assert len(group_updates()) == 2
+
+    await conn._handle_client_state(_full_state())  # noqa: SLF001
+    assert client.is_connected
+    assert len(group_updates()) == 2
+
+
+@pytest.mark.asyncio
+async def test_initial_state_read_during_the_activation_is_not_awaited_again() -> None:
+    """A client/state read while the first server/activate goes out leaves nothing to flag."""
+    loop = asyncio.get_running_loop()
+    server = _MockServer(loop=loop, clock=LoopClock(loop))
+    await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    psk = generate_psk()
+    conn._client_id = CLIENT_ID  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk), psk=psk, category=PskCategory.SENTINEL, counterparty_id=CLIENT_ID
+    )
+    hello = _hello([Roles.PLAYER.value])
+    fake = _FakeTransport([WSMessage(WSMsgType.TEXT, ClientHelloMessage(hello).to_json(), "")])
+    conn._transport = fake  # type: ignore[assignment]  # noqa: SLF001
+    send_priority = conn._process_priority_messages  # noqa: SLF001
+
+    async def send_with_state(transport: object) -> bool:
+        if not conn._initial_state_received:  # noqa: SLF001
+            await conn._handle_client_state(_full_state())  # noqa: SLF001
+        return await send_priority(transport)  # type: ignore[arg-type]
+
+    conn._process_priority_messages = send_with_state  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await conn._exchange_hellos()  # noqa: SLF001
+
+    assert _client(conn).is_connected
+    assert conn._initial_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_strict_server_connects_stateless_roles_whose_state_came_while_pairing() -> None:
+    """A client/state sent during pairing on connect is the initial state of later roles."""
+    loop = asyncio.get_running_loop()
+    server = _MockServer(loop=loop, clock=LoopClock(loop), allow_noncompliant_clients=False)
+    await server.pairing_store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+    hello = dataclasses.replace(
+        _hello([Roles.CONTROLLER.value]),
+        supported_pair_methods=SupportedPairMethods(pairing_psk=PairMethodDescriptor()),
+    )
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    psk = generate_psk()
+    conn._client_id = CLIENT_ID  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk), psk=psk, category=PskCategory.PAIRING
+    )
+    conn._transport = _FakePairingTransport(  # noqa: SLF001
+        [WSMessage(WSMsgType.TEXT, ClientHelloMessage(hello).to_json(), "")]
+    )
+
+    async def pair_with_state(_transport: object) -> bool:
+        await conn._handle_client_state(ClientStatePayload(available=True))  # noqa: SLF001
+        return True
+
+    conn._pair_on_connect = pair_with_state  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await conn._exchange_hellos()  # noqa: SLF001
+    assert _client(conn).is_connected
     assert conn._initial_state_timeout_handle is None  # noqa: SLF001
 
 
@@ -720,11 +887,26 @@ async def test_unsent_stream_end_still_precedes_server_activate() -> None:
     player = _client(conn).role(Roles.PLAYER.value)
     assert isinstance(player, PlayerV1Role)
     player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
     player.on_stream_end()
 
     await _set_trusted(conn, trusted=False)
 
     assert await _drain_priority(conn, fake) == ["stream/end", "server/activate"]
+
+
+@pytest.mark.asyncio
+async def test_removed_role_sends_no_stream_end_for_an_unsent_stream_start() -> None:
+    """A removed role whose stream/start never left the queue gets no stream/end."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value]))
+    player = _client(conn).role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._send_stream_start_message()  # noqa: SLF001
+    assert player.stream_started
+
+    await _set_trusted(conn, trusted=False)
+
+    assert await _drain_priority(conn, fake) == ["server/activate"]
 
 
 @pytest.mark.asyncio
@@ -749,3 +931,34 @@ async def test_activation_timeout_does_not_run_while_the_releasing_state_is_appl
     assert handles_during_dispatch == [None]
     activated.assert_called_once_with(role)
     assert conn._activation_state_timeout_handle is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_source_activates_on_unpaired_connection_only_while_approved() -> None:
+    """A stored source approval activates source on connect, and revoking it applies live."""
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value, "source@v1"]), approved_roles=frozenset({"source"})
+    )
+    client = _client(conn)
+    assert {role.role_id for role in client.active_roles} == {Roles.PLAYER.value, "source@v1"}
+
+    await conn._server.pairing_store.add_trusted_unpaired(  # noqa: SLF001
+        TrustedUnpairedClient(client_id=CLIENT_ID)
+    )
+    await conn.refresh_trusted_unpaired()
+    assert [role.role_id for role in client.active_roles] == [Roles.PLAYER.value]
+
+
+@pytest.mark.asyncio
+async def test_revoking_source_approval_during_pairing_ends_pairing() -> None:
+    """Pairing keeps active roles, so revoking only source must end the attempt."""
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value, "source@v1"]), approved_roles=frozenset({"source"})
+    )
+    conn._in_pairing = True  # noqa: SLF001
+    await conn._server.pairing_store.add_trusted_unpaired(  # noqa: SLF001
+        TrustedUnpairedClient(client_id=CLIENT_ID)
+    )
+    with patch.object(conn, "end_pairing", new=AsyncMock()) as end_pairing:
+        await conn.refresh_trusted_unpaired()
+    end_pairing.assert_awaited_once()

@@ -15,6 +15,7 @@ from .constants import (
 from .driver import (
     DEFAULT_HANDSHAKE_TIMEOUT_S,
     HandshakeAbortedError,
+    HandshakeNoncomplianceError,
     HandshakeResult,
     HandshakeWebSocket,
     InitRejectedError,
@@ -52,6 +53,7 @@ from .models import (
 )
 from .pairing import (
     InvalidPairingCodeError,
+    PairingDialError,
     PairingError,
     run_dynamic_pairing_code_client,
     run_dynamic_pairing_code_server,
@@ -108,6 +110,7 @@ __all__ = [
     "FileClientPairingStore",
     "FileServerPairingStore",
     "HandshakeAbortedError",
+    "HandshakeNoncomplianceError",
     "HandshakeResult",
     "HandshakeWebSocket",
     "Identity",
@@ -122,6 +125,7 @@ __all__ = [
     "NoiseMsg2Payload",
     "NoiseSession",
     "PSKPairingToken",
+    "PairingDialError",
     "PairingError",
     "PairingPsk",
     "PskCategory",

@@ -133,7 +133,7 @@ async def test_stray_pairing_frame_is_discarded_quietly(
         payload=ServerPairAuthPayload(pake_msg_1=b64url_encode(b"\x00" * 32)),
     ).to_json()
     with caplog.at_level(logging.DEBUG):
-        await connection._handle_json_message(frame)  # noqa: SLF001
+        await connection._handle_json_message(frame, connection.now_us())  # noqa: SLF001
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert ws.sent == []
 
@@ -906,7 +906,8 @@ async def test_server_activate_mid_attempt_cancels_it_and_persists_nothing(
         # The ack the server sent before it saw nothing further is discarded quietly.
         with caplog.at_level(logging.DEBUG):
             await connection._handle_json_message(  # noqa: SLF001
-                ServerPairFinalizeMessage().to_json()
+                ServerPairFinalizeMessage().to_json(),
+                connection.now_us(),
             )
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert connection.connected
@@ -928,7 +929,8 @@ async def test_finalize_ack_persists_before_the_reader_moves_on() -> None:
         await _received_types(server_ews, 2)
 
         await connection._handle_json_message(  # noqa: SLF001
-            ServerPairFinalizeMessage().to_json()
+            ServerPairFinalizeMessage().to_json(),
+            connection.now_us(),
         )
 
         assert connection._pairing_task is None  # noqa: SLF001
@@ -953,7 +955,8 @@ async def test_malformed_pairing_message_fails_the_attempt_at_once() -> None:
         assert await _received_types(server_ews, 1) == ["client/pair-init"]
 
         await connection._handle_json_message(  # noqa: SLF001
-            json.dumps({"type": "server/pair-auth", "payload": {}})
+            json.dumps({"type": "server/pair-auth", "payload": {}}),
+            connection.now_us(),
         )
         async with asyncio.timeout(1):
             while connection._pairing_task is not None:  # noqa: ASYNC110, SLF001
@@ -990,11 +993,11 @@ async def test_attempt_runs_alongside_other_traffic(monkeypatch: pytest.MonkeyPa
                 client_transmitted=now_us, server_received=now_us, server_transmitted=now_us
             )
         )
-        await connection._handle_json_message(time_reply.to_json())  # noqa: SLF001
+        await connection._handle_json_message(time_reply.to_json(), connection.now_us())  # noqa: SLF001
         assert connection._time_filter.count == 1  # noqa: SLF001
 
         abort = PairAbortMessage(payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED))
-        await connection._handle_json_message(abort.to_json())  # noqa: SLF001
+        await connection._handle_json_message(abort.to_json(), connection.now_us())  # noqa: SLF001
         async with asyncio.timeout(1):
             assert await received.get() == abort.to_json()
     finally:
@@ -1014,7 +1017,7 @@ async def test_remote_abort_leaves_the_connection_in_pairing() -> None:
             _pairing_activation(PairMethod.PAIRING_PSK)
         )
         abort = PairAbortMessage(payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED))
-        await connection._handle_json_message(abort.to_json())  # noqa: SLF001
+        await connection._handle_json_message(abort.to_json(), connection.now_us())  # noqa: SLF001
         task = connection._pairing_task  # noqa: SLF001
         if task is not None:
             await asyncio.wait((task,))
@@ -1023,7 +1026,9 @@ async def test_remote_abort_leaves_the_connection_in_pairing() -> None:
         assert connection._pairing_task is None  # noqa: SLF001
         assert connection.is_pairing
         assert connection.connected
-        await connection._handle_json_message(ServerPairFinalizeMessage().to_json())  # noqa: SLF001
+        await connection._handle_json_message(  # noqa: SLF001
+            ServerPairFinalizeMessage().to_json(), connection.now_us()
+        )
         assert await store.record_by_server_id("server-1") is None
     finally:
         await connection.disconnect()
@@ -1093,7 +1098,9 @@ async def _assert_cancelled(connection: SendspinConnection, server_ews: Encrypte
     assert not client.pairing_window_open
 
     # A pairing message the server sent before seeing the abort is discarded.
-    await connection._handle_json_message(ServerPairFinalizeMessage().to_json())  # noqa: SLF001
+    await connection._handle_json_message(  # noqa: SLF001
+        ServerPairFinalizeMessage().to_json(), connection.now_us()
+    )
     assert connection.connected
 
     await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
@@ -1261,7 +1268,9 @@ async def test_cancel_pairing_after_finalize_lets_the_attempt_complete() -> None
         await client.cancel_pairing()
         assert connection._pairing_task is not None  # noqa: SLF001
 
-        await connection._handle_json_message(ServerPairFinalizeMessage().to_json())  # noqa: SLF001
+        await connection._handle_json_message(  # noqa: SLF001
+            ServerPairFinalizeMessage().to_json(), connection.now_us()
+        )
         await connection.send_goodbye(GoodbyeReason.SHUTDOWN)
 
         assert connection._pairing_task is None  # noqa: SLF001

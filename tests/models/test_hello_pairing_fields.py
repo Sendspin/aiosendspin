@@ -303,6 +303,23 @@ def test_unrecognized_pair_method_is_ignored_not_rejected() -> None:
     assert methods.ignored_methods == ["telepathy"]
 
 
+def test_unrecognized_descriptor_values_are_recorded() -> None:
+    """Identifiers dropped from formats, out_channels and locations are recorded for logging."""
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":{"pairing_psk":{"locations":["device","sticker",7]},'
+        '"dynamic_pairing_code":{"formats":["digits","hologram"],'
+        '"out_channels":["display","vibration"]}}}'
+    )
+    methods = ClientHelloPayload.from_json(raw).supported_pair_methods
+    assert methods is not None
+    assert methods.ignored_values == [
+        "pairing_psk.locations=sticker",
+        "dynamic_pairing_code.formats=hologram",
+        "dynamic_pairing_code.out_channels=vibration",
+    ]
+
+
 def test_both_pairing_code_methods_prefer_dynamic() -> None:
     """Offering both code methods is recorded, and the dynamic one is preferred."""
     raw = (
@@ -350,6 +367,22 @@ def test_both_offered_keeps_static_when_dynamic_is_unusable() -> None:
     assert methods.pairing_psk is not None
 
 
+def test_both_offered_keeps_static_when_dynamic_lacks_digits() -> None:
+    """A QR-only dynamic code leaves static usable on servers that cannot scan QR codes."""
+    raw = (
+        '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
+        '"supported_pair_methods":{"pairing_psk":{},"static_pairing_code":{},'
+        '"dynamic_pairing_code":{"formats":["qr_code"],"out_channels":["display"]}}}'
+    )
+    methods = ClientHelloPayload.from_json(raw).supported_pair_methods
+    assert methods is not None
+    assert methods.offered_both_pairing_code_methods is True
+    assert methods.static_pairing_code == PairMethodDescriptor()
+    assert methods.dynamic_pairing_code == DynamicPairMethodDescriptor(
+        out_channels=["display"], formats=["qr_code"]
+    )
+
+
 def test_structured_descriptor_values_are_ignored_not_rejected() -> None:
     """A value that is not an identifier at all is ignored, like any unrecognized one.
 
@@ -384,10 +417,12 @@ def test_pair_method_records_cannot_be_spoofed_over_the_wire() -> None:
     raw = (
         '{"client_id":"c1","name":"Client","version":1,"supported_roles":["controller@v1"],'
         '"supported_pair_methods":{"pairing_psk":{},"ignored_methods":["invented"],'
-        '"unusable_methods":["invented"],"offered_both_pairing_code_methods":true}}'
+        '"ignored_values":["invented"],"unusable_methods":["invented"],'
+        '"offered_both_pairing_code_methods":true}}'
     )
     methods = ClientHelloPayload.from_json(raw).supported_pair_methods
     assert methods is not None
     assert methods.ignored_methods is None
+    assert methods.ignored_values is None
     assert methods.unusable_methods is None
     assert methods.offered_both_pairing_code_methods is None

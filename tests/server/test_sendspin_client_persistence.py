@@ -52,6 +52,8 @@ class _DummyServer:
 
 
 class _DummyConnection:
+    receives_group_updates = True
+
     clears_role_state_with_null = False
 
     def __init__(self) -> None:

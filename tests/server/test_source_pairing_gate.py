@@ -1,4 +1,4 @@
-"""The source role may only be activated on a long-term paired connection."""
+"""The source role may only be activated on a long-term paired connection or once approved."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from aiosendspin.server.roles.registry import role_requires_pairing
 
 
 def _connection_with_psk(category: PskCategory | None) -> SendspinConnection:
-    # The activation filter only reads _noise_psk, so build a bare instance.
+    # The activation filter only reads _noise_psk and the approved roles, so build a bare instance.
     conn = SendspinConnection.__new__(SendspinConnection)
     conn._noise_psk = (  # noqa: SLF001
         None if category is None else ResolvedPsk("id", b"\x00" * 32, category)
     )
+    conn._approved_role_families = frozenset()  # noqa: SLF001
     return conn
 
 

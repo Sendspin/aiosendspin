@@ -17,6 +17,7 @@ from aiosendspin.models.types import PairAbortReason, PairingCodeFormat, PairMet
 from aiosendspin.util import finish_despite_cancel
 
 from . import pairing_code as pairing_code_mod
+from .constants import SENTINEL_PSK
 from .keys import PSK_SIZE, b64url_decode, b64url_encode, psk_id_for
 from .models import (
     ClientPairAuthMessage,
@@ -42,7 +43,7 @@ from .models import (
 )
 from .pairing_token import decode_pairing_code_token, encode_pairing_code_token
 from .session import NoiseCipherSuite
-from .trust_store import ServerPairingRecord
+from .trust_store import PAIRING_ROUND_LIMIT, ServerPairingRecord
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -88,6 +89,15 @@ class InvalidPairingCodeError(PairingError):
 
     Nothing was sent for it.
     """
+
+
+class PairingDialError(PairingError):
+    """The dial carrying a pairing attempt could not connect to the client."""
+
+    def __init__(self, cause: Exception) -> None:
+        """Record the connection error as the cause."""
+        super().__init__(f"could not connect to the client: {str(cause) or type(cause).__name__}")
+        self.__cause__ = cause
 
 
 class PairingAbortError(PairingError):
@@ -220,10 +230,17 @@ async def run_pairing_psk_server(
     on_pair_init: Callable[[], None] | None = None,
     # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
     on_legacy_finalize: Callable[[], None] | None = None,
+    pairing_psk: bytes | None = None,
+    on_noncompliance: Callable[[str], None] | None = None,
 ) -> ServerPairingRecord:
     """Run the server side of the Pairing PSK flow.
 
     ``on_pair_init`` is called for every ``client/pair-init`` received, whatever its index.
+    ``on_noncompliance`` is called for each field that is not canonical base64url, and for each
+    frame discarded before ``client/pair-init`` on the first pairing activation since the
+    handshake.
+    A ``client/pair-finalize`` delivering ``pairing_psk`` or the Sentinel PSK raises
+    ``PairingError``.
     ``client/pair-auth``, ``client/pair-confirm``, ``client/pair-finalize`` and
     ``client/pair-retry`` messages preceding the matching ``client/pair-init`` are discarded as
     leftovers, except that with ``on_legacy_finalize`` set, a finalize carrying only
@@ -232,6 +249,7 @@ async def run_pairing_psk_server(
     """
     finalize: ClientPairFinalizeMessage | None = None
     pair_init_seen = False
+    on_discard = _pre_init_leftover_flagger(pairing_index, on_noncompliance)
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
             # Pairing-code exchange messages are leftovers from a superseded attempt.
@@ -239,6 +257,7 @@ async def run_pairing_psk_server(
                 ws,
                 (ClientPairInitMessage, ClientPairPendingMessage, ClientPairFinalizeMessage),
                 discard=(ClientPairAuthMessage, ClientPairConfirmMessage, ClientPairRetryMessage),
+                on_discard=on_discard,
             )
             if isinstance(message, ClientPairFinalizeMessage):
                 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
@@ -251,7 +270,9 @@ async def run_pairing_psk_server(
                     on_legacy_finalize()
                     finalize = message
                     break
-                # A leftover from a cancelled attempt: discard silently.
+                # A leftover from a cancelled attempt: discard.
+                if on_discard is not None:
+                    on_discard(message)
                 continue
             if isinstance(message, ClientPairInitMessage):
                 pair_init_seen = True
@@ -277,6 +298,8 @@ async def run_pairing_psk_server(
             method=PairMethod.PAIRING_PSK,
             owner=owner,
             finalize=finalize,
+            pairing_psk=pairing_psk,
+            on_noncompliance=on_noncompliance,
         )
 
 
@@ -375,20 +398,29 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
     legacy_rounds: bool = False,
     # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
     legacy_pin: bool = False,
+    on_noncompliance: Callable[[str], None] | None = None,
 ) -> ServerPairingRecord:
     """Run the server side of the dynamic-pairing-code flow.
 
     Returns the persisted record.
+    ``on_noncompliance`` is called for each retry past the round limit, for each field that
+    is not canonical base64url, and for each frame discarded before ``client/pair-init`` on the
+    first pairing activation since the handshake.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds: one round under the ``sid`` without a round number. ``legacy_pin``
     serves a dynamic PIN client predating the pairing-code rename, which reveals ``nonce_B``
     unwrapped and derives its PIN under the old label.
     """
-    init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
+    init = await _receive_pair_init(
+        ws, pairing_index, on_pending=on_pair_pending, on_noncompliance=on_noncompliance
+    )
     if init.payload.commit_B is None:
         raise PairingError("client/pair-init missing commit_B for dynamic pairing code")
     commit_b = _decode_field(
-        init.payload.commit_B, "commit_B", expect_len=pairing_code_mod.COMMIT_SIZE
+        init.payload.commit_B,
+        "commit_B",
+        expect_len=pairing_code_mod.COMMIT_SIZE,
+        on_noncompliance=on_noncompliance,
     )
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
         nonce_a = pairing_code_mod.generate_nonce()
@@ -410,7 +442,7 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
                 if legacy_rounds
                 else _pake_sid(handshake_hash, pairing_index, round_number)
             )
-            cpace = await _run_server_pake(ws, prs, sid)
+            cpace = await _run_server_pake(ws, prs, sid, on_noncompliance=on_noncompliance)
             # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
             if legacy_rounds:
                 confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
@@ -419,11 +451,18 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
             if isinstance(reply, ClientPairConfirmMessage):
                 confirm = reply
                 break
+            if round_number >= PAIRING_ROUND_LIMIT and on_noncompliance is not None:
+                on_noncompliance("sent client/pair-retry past the pairing round limit")
             round_number += 1
             init_payload = ServerPairInitPayload()
 
         if not cpace.verify(
-            _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
+            _decode_field(
+                confirm.payload.client_kc,
+                "client_kc",
+                expect_len=_KC_TAG_SIZE,
+                on_noncompliance=on_noncompliance,
+            )
         ):
             await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
         # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
@@ -432,7 +471,10 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
             if confirm.payload.nonce_B is None or confirm.payload.wrapped_nonce_B is not None:
                 raise PairingError("client/pair-confirm must carry only nonce_B for dynamic PIN")
             nonce_b = _decode_field(
-                confirm.payload.nonce_B, "nonce_B", expect_len=pairing_code_mod.NONCE_SIZE
+                confirm.payload.nonce_B,
+                "nonce_B",
+                expect_len=pairing_code_mod.NONCE_SIZE,
+                on_noncompliance=on_noncompliance,
             )
         elif confirm.payload.wrapped_nonce_B is None:
             raise PairingError(
@@ -443,6 +485,7 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
                 confirm.payload.wrapped_nonce_B,
                 "wrapped_nonce_B",
                 expect_len=pairing_code_mod.NONCE_SIZE + _AEAD_TAG_SIZE,
+                on_noncompliance=on_noncompliance,
             )
             try:
                 nonce_b = _wrap_aead(
@@ -471,6 +514,7 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
             method=PairMethod.DYNAMIC_PAIRING_CODE,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             owner=owner,
+            on_noncompliance=on_noncompliance,
         )
 
 
@@ -531,10 +575,14 @@ async def run_static_pairing_code_server(
     owner: str | None = None,
     # DEPRECATED(spec-pr-237): remove in aiosendspin <version>
     legacy_rounds: bool = False,
+    on_noncompliance: Callable[[str], None] | None = None,
 ) -> ServerPairingRecord:
     """Run the server side of the static-pairing-code flow.
 
     Returns the persisted record.
+    ``on_noncompliance`` is called for each field that is not canonical base64url, and for each
+    frame discarded before ``client/pair-init`` on the first pairing activation since the
+    handshake.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds with the ``sid`` without a round number.
     """
@@ -544,7 +592,9 @@ async def run_static_pairing_code_server(
         if legacy_rounds
         else _pake_sid(handshake_hash, pairing_index, 1)
     )
-    init = await _receive_pair_init(ws, pairing_index, on_pending=on_pair_pending)
+    init = await _receive_pair_init(
+        ws, pairing_index, on_pending=on_pair_pending, on_noncompliance=on_noncompliance
+    )
     if init.payload.commit_B is not None:
         raise PairingError("client/pair-init carries commit_B for static pairing code")
     async with _server_timeout(SERVER_ATTEMPT_TIMEOUT_S, "the rest of the attempt"):
@@ -553,7 +603,9 @@ async def run_static_pairing_code_server(
         )
         if not pairing_code_mod.is_valid_static_pairing_code(pairing_code):
             raise InvalidPairingCodeError("static pairing code must be exactly 8 decimal digits")
-        cpace = await _run_server_pake(ws, pairing_code.encode("ascii"), sid)
+        cpace = await _run_server_pake(
+            ws, pairing_code.encode("ascii"), sid, on_noncompliance=on_noncompliance
+        )
 
         confirm = await _receive_pairing(ws, ClientPairConfirmMessage)
         if confirm.payload.wrapped_nonce_B is not None:
@@ -561,7 +613,12 @@ async def run_static_pairing_code_server(
                 "client/pair-confirm carries wrapped_nonce_B for static pairing code"
             )
         if not cpace.verify(
-            _decode_field(confirm.payload.client_kc, "client_kc", expect_len=_KC_TAG_SIZE)
+            _decode_field(
+                confirm.payload.client_kc,
+                "client_kc",
+                expect_len=_KC_TAG_SIZE,
+                on_noncompliance=on_noncompliance,
+            )
         ):
             await abort_pairing(ws, PairAbortReason.PAIRING_CODE_MISMATCH)
 
@@ -572,6 +629,7 @@ async def run_static_pairing_code_server(
             method=PairMethod.STATIC_PAIRING_CODE,
             wrap_key=_wrap_key(_PSK_WRAP_LABEL, sid, cpace),
             owner=owner,
+            on_noncompliance=on_noncompliance,
         )
 
 
@@ -588,7 +646,13 @@ def _entered_dynamic_prs(entered: str, pairing_format: PairingCodeFormat) -> byt
         raise InvalidPairingCodeError("malformed pairing token") from exc
 
 
-async def _run_server_pake(ws: EncryptedWebSocket, prs: bytes, sid: bytes) -> CPace:
+async def _run_server_pake(
+    ws: EncryptedWebSocket,
+    prs: bytes,
+    sid: bytes,
+    *,
+    on_noncompliance: Callable[[str], None] | None,
+) -> CPace:
     """Run the server's side of a CPace exchange through ``server/pair-confirm``."""
     try:
         cpace = CPace.start(role=CPaceRole.INITIATOR, prs=prs, sid=sid, ad=_PAKE_AD_SERVER)
@@ -601,7 +665,12 @@ async def _run_server_pake(ws: EncryptedWebSocket, prs: bytes, sid: bytes) -> CP
     )
 
     auth = await _receive_pairing(ws, ClientPairAuthMessage)
-    peer_share = _decode_field(auth.payload.pake_msg_2, "pake_msg_2", expect_len=_PAKE_SHARE_SIZE)
+    peer_share = _decode_field(
+        auth.payload.pake_msg_2,
+        "pake_msg_2",
+        expect_len=_PAKE_SHARE_SIZE,
+        on_noncompliance=on_noncompliance,
+    )
     try:
         cpace.derive(peer_share, _PAKE_AD_CLIENT)
     except CPaceError as exc:
@@ -677,6 +746,8 @@ async def _finalize_server(
     wrap_key: bytes | None = None,
     owner: str | None = None,
     finalize: ClientPairFinalizeMessage | None = None,
+    pairing_psk: bytes | None = None,
+    on_noncompliance: Callable[[str], None] | None,
 ) -> ServerPairingRecord:
     """Consume ``client/pair-finalize`` and finalize the record it carries.
 
@@ -694,6 +765,8 @@ async def _finalize_server(
             method=method,
             wrap_key=wrap_key,
             owner=owner,
+            pairing_psk=pairing_psk,
+            on_noncompliance=on_noncompliance,
         )
     )
     return record
@@ -708,12 +781,16 @@ async def _commit_finalize(
     method: PairMethod,
     wrap_key: bytes | None,
     owner: str | None,
+    pairing_psk: bytes | None,
+    on_noncompliance: Callable[[str], None] | None,
 ) -> ServerPairingRecord:
     """Store the record ``finalize`` carries and acknowledge it."""
     # Bounded here, since the caller's timeout and cancels cannot interrupt this step.
     async with _server_timeout(_SERVER_FINALIZE_TIMEOUT_S, "completion of the pairing finalize"):
         existing = await store.record_by_client_id(client_id)
-        psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key)
+        psk = _unwrap_psk(ws.session.suite, finalize.payload, wrap_key, on_noncompliance)
+        if psk in (SENTINEL_PSK, pairing_psk):
+            raise PairingError("client/pair-finalize reused the Sentinel or pairing PSK")
         if existing is None:
             record = ServerPairingRecord(
                 psk_id=psk_id_for(psk),
@@ -728,15 +805,24 @@ async def _commit_finalize(
                 existing.with_method(method), psk_id=psk_id_for(psk), psk=psk, owner=owner
             )
         await store.store_record(record)  # persist before acking
-        # The new record supersedes the client's lesser grants.
-        await store.unstage_pairing_psk(client_id)
-        await store.remove_trusted_unpaired(client_id)
-        await ws.send_str(ServerPairFinalizeMessage().to_json())
-        return record
+    # Ack the stored record first, and never time out as PairingTimeoutError past this point:
+    # the cancelling server/activate that follows one leaves the client without the record.
+    try:
+        async with asyncio.timeout(_SERVER_FINALIZE_TIMEOUT_S):
+            await ws.send_str(ServerPairFinalizeMessage().to_json())
+            # The new record supersedes the client's lesser grants.
+            await store.unstage_pairing_psk(client_id)
+            await store.remove_trusted_unpaired(client_id)
+    except TimeoutError as exc:
+        raise PairingError("completing the stored pairing record timed out") from exc
+    return record
 
 
 def _unwrap_psk(
-    suite: NoiseCipherSuite, payload: ClientPairFinalizePayload, wrap_key: bytes | None
+    suite: NoiseCipherSuite,
+    payload: ClientPairFinalizePayload,
+    wrap_key: bytes | None,
+    on_noncompliance: Callable[[str], None] | None,
 ) -> bytes:
     """Extract the PSK from ``client/pair-finalize``, unwrapping when ``wrap_key`` is set."""
     if payload.long_term_psk is not None and payload.wrapped_psk is not None:
@@ -744,11 +830,19 @@ def _unwrap_psk(
     if wrap_key is None:
         if payload.long_term_psk is None:
             raise PairingError("client/pair-finalize is missing long_term_psk")
-        return _decode_field(payload.long_term_psk, "long_term_psk", expect_len=PSK_SIZE)
+        return _decode_field(
+            payload.long_term_psk,
+            "long_term_psk",
+            expect_len=PSK_SIZE,
+            on_noncompliance=on_noncompliance,
+        )
     if payload.wrapped_psk is None:
         raise PairingError("client/pair-finalize is missing wrapped_psk")
     wrapped = _decode_field(
-        payload.wrapped_psk, "wrapped_psk", expect_len=PSK_SIZE + _AEAD_TAG_SIZE
+        payload.wrapped_psk,
+        "wrapped_psk",
+        expect_len=PSK_SIZE + _AEAD_TAG_SIZE,
+        on_noncompliance=on_noncompliance,
     )
     try:
         psk = _wrap_aead(suite, wrap_key).decrypt(_WRAP_NONCE, wrapped, None)
@@ -757,7 +851,13 @@ def _unwrap_psk(
     return psk
 
 
-def _decode_field(value: str, what: str, *, expect_len: int | None = None) -> bytes:
+def _decode_field(
+    value: str,
+    what: str,
+    *,
+    expect_len: int | None = None,
+    on_noncompliance: Callable[[str], None] | None = None,
+) -> bytes:
     """Base64url-decode a received pairing field, raising ``PairingError`` if malformed."""
     try:
         raw = b64url_decode(value)
@@ -765,6 +865,8 @@ def _decode_field(value: str, what: str, *, expect_len: int | None = None) -> by
         raise PairingError(f"malformed {what}: not valid base64url") from exc
     if expect_len is not None and len(raw) != expect_len:
         raise PairingError(f"malformed {what}: expected {expect_len} bytes, got {len(raw)}")
+    if on_noncompliance is not None and b64url_encode(raw) != value:
+        on_noncompliance(f"{what} is not canonical base64url")
     return raw
 
 
@@ -801,6 +903,7 @@ async def _receive_pairing[T: PairingMessage](
     expected: type[T],
     *,
     discard: tuple[type[PairingMessage], ...] = (),
+    on_discard: Callable[[PairingMessage], None] | None = None,
 ) -> T: ...
 
 
@@ -810,6 +913,7 @@ async def _receive_pairing[T: PairingMessage, U: PairingMessage](
     expected: tuple[type[T], type[U]],
     *,
     discard: tuple[type[PairingMessage], ...] = (),
+    on_discard: Callable[[PairingMessage], None] | None = None,
 ) -> T | U: ...
 
 
@@ -819,6 +923,7 @@ async def _receive_pairing[T: PairingMessage, U: PairingMessage, V: PairingMessa
     expected: tuple[type[T], type[U], type[V]],
     *,
     discard: tuple[type[PairingMessage], ...] = (),
+    on_discard: Callable[[PairingMessage], None] | None = None,
 ) -> T | U | V: ...
 
 
@@ -829,6 +934,7 @@ async def _receive_pairing(
     | tuple[type[PairingMessage], type[PairingMessage], type[PairingMessage]],
     *,
     discard: tuple[type[PairingMessage], ...] = (),
+    on_discard: Callable[[PairingMessage], None] | None = None,
 ) -> PairingMessage:
     """Receive the next pairing frame not of a ``discard`` type, requiring an ``expected`` type."""
     kinds = expected if isinstance(expected, tuple) else (expected,)
@@ -847,6 +953,8 @@ async def _receive_pairing(
             raise RemotePairingAbortError(message.payload.reason)
         if not isinstance(message, discard):
             break
+        if on_discard is not None:
+            on_discard(message)
     if not isinstance(message, kinds):
         raise PairingError(f"expected {expected_names}, got {type(message).__name__}")
     return message
@@ -856,6 +964,18 @@ def _expected_names(expected: type[PairingMessage] | tuple[type[PairingMessage],
     """Human-readable name(s) of the expected message type(s)."""
     kinds = expected if isinstance(expected, tuple) else (expected,)
     return " or ".join(kind.__name__ for kind in kinds)
+
+
+def _pre_init_leftover_flagger(
+    pairing_index: int, on_noncompliance: Callable[[str], None] | None
+) -> Callable[[PairingMessage], None] | None:
+    """Return a flagger for frames discarded before ``client/pair-init`` on the first activation."""
+    # Only an earlier pairing server/activate since the handshake can leave frames in flight.
+    if pairing_index > 1 or on_noncompliance is None:
+        return None
+    return lambda message: on_noncompliance(
+        f"sent {message.to_dict()['type']} before client/pair-init"
+    )
 
 
 async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
@@ -889,6 +1009,7 @@ async def _receive_pair_init(
     pairing_index: int,
     *,
     on_pending: Callable[[str | None], None] | None = None,
+    on_noncompliance: Callable[[str], None] | None = None,
 ) -> ClientPairInitMessage:
     """Receive this attempt's ``client/pair-init``.
 
@@ -896,6 +1017,7 @@ async def _receive_pair_init(
     It also discards any leftover pair-init/pair-pending/pair-auth/pair-confirm/pair-finalize/
     pair-retry from a superseded attempt.
     """
+    on_discard = _pre_init_leftover_flagger(pairing_index, on_noncompliance)
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
             # Messages without a pairing_index are leftovers from a superseded attempt.
@@ -908,6 +1030,7 @@ async def _receive_pair_init(
                     ClientPairFinalizeMessage,
                     ClientPairRetryMessage,
                 ),
+                on_discard=on_discard,
             )
             if message.payload.pairing_index > pairing_index:
                 raise PairingError(

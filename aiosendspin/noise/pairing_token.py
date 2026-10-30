@@ -76,7 +76,11 @@ def _encode(version: str, payload: bytes) -> str:
 
 
 def _decode(value: str, *, expect_version: str) -> bytes:
-    text = value.strip().upper().removeprefix(_TOKEN_PREFIX)
+    text = value.strip()
+    # Checked before upper-casing, which maps some non-ASCII letters to ASCII ones.
+    if not text.isascii():
+        raise ValueError("malformed pairing token")
+    text = text.upper().removeprefix(_TOKEN_PREFIX)
     if not text:
         raise ValueError("malformed pairing token")
     version, body = text[0], text[1:]

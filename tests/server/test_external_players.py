@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aiosendspin.clock import Clock, ManualClock
 from aiosendspin.models.core import ClientHelloPayload
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
@@ -30,6 +31,8 @@ from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
 
 class _DummyConnection:
+    receives_group_updates = True
+
     clears_role_state_with_null = False
 
     async def disconnect(self, *, retry_connection: bool = True) -> None:  # noqa: ARG002
@@ -117,7 +120,7 @@ def _custom_role_hello(client_id: str, role_id: str) -> ClientHelloPayload:
     )
 
 
-def _make_server() -> SendspinServer:
+def _make_server(clock: Clock | None = None) -> SendspinServer:
     loop = asyncio.get_running_loop()
     client_session = MagicMock()
     client_session.closed = True
@@ -128,6 +131,7 @@ def _make_server() -> SendspinServer:
         server_name="server",
         client_session=client_session,
         pairing_store=InMemoryServerPairingStore(),
+        clock=clock,
     )
 
 
@@ -395,7 +399,7 @@ async def test_add_external_preconnect_player_to_active_group_replays_cached_aud
 
     monkeypatch.setitem(ROLE_FACTORIES, "preconnectaudio@v1", _PreconnectAudioRole)
 
-    server = _make_server()
+    server = _make_server(ManualClock(now_us_value=1_000_000))
     callback_calls: list[ExternalStreamStartRequest] = []
 
     owner = SendspinClient(server, client_id="owner-preconnect")
@@ -635,6 +639,19 @@ async def test_deferred_unregister_suppressed_when_reconnect_attaches() -> None:
     )
 
     assert server.get_client("reconnecting") is not None
+
+
+@pytest.mark.asyncio
+async def test_deferred_unregister_completes_when_another_client_takes_the_url() -> None:
+    """A deferred unregister fires once a different client registers the URL."""
+    server = _make_server()
+    url = "ws://127.0.0.1:9006/sendspin"
+    await _defer_unregister_with_task(server, "reconnecting", url)
+
+    server.register_client_url("new-identity", url)
+    await _flush_asyncio_callbacks()
+
+    assert server.get_client("reconnecting") is None
 
 
 @pytest.mark.asyncio

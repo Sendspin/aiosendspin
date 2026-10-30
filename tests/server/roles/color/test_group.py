@@ -241,7 +241,7 @@ def test_cancel_scheduled_color_resends_current() -> None:
 
 
 def test_clear_discards_scheduled_color() -> None:
-    """clear() sends null at once and the scheduled palette never takes effect."""
+    """clear() discards the scheduled palette so it never takes effect."""
     group, clock = _make_scheduling_group()
     cgr = ColorGroupRole(group)
     cgr.set_color(Color(primary=(4, 5, 6)), timestamp_us=1_500_000)

@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import string
 
 from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.noise.keys import Identity, generate_psk
 from aiosendspin.noise.session import NoiseCipherSuite, NoiseSession
 from aiosendspin.noise.wire import EncryptedWebSocket
+
+_B64URL_ALPHABET = string.ascii_uppercase + string.ascii_lowercase + string.digits + "-_"
+
+
+def non_canonical_peer_id(peer_id: str) -> str:
+    """Return ``peer_id`` with an unused trailing bit set, so it decodes to the same key."""
+    return peer_id[:-1] + _B64URL_ALPHABET[_B64URL_ALPHABET.index(peer_id[-1]) | 1]
 
 
 class FakeWebSocket:

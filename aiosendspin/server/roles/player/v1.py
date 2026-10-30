@@ -126,7 +126,7 @@ class PlayerV1Role(Role):
         self._buffer_tracker = None
         # Initialize timing state for binary handling
         self._stream_start_time_us = None
-        self._last_late_log_s = 0.0
+        self._last_late_log_s = None
         self._late_skips_since_log = 0
         # Cached state reference (avoids repeated dict lookup + isinstance check)
         self._cached_state: PlayerPersistentState | None = None
@@ -194,11 +194,7 @@ class PlayerV1Role(Role):
     def get_binary_handling(self, message_type: int) -> BinaryHandling | None:
         """Return handling policy for AUDIO_CHUNK messages."""
         if message_type == BinaryMessageType.AUDIO_CHUNK.value:
-            return BinaryHandling(
-                drop_late=True,
-                grace_period_us=2_000_000,  # 2 seconds grace for initial buffering
-                buffer_track=True,
-            )
+            return BinaryHandling(drop_late=True, buffer_track=True)
         return None
 
     def get_buffer_tracker(self) -> BufferTracker | None:
@@ -317,7 +313,7 @@ class PlayerV1Role(Role):
             return
 
         # New stream boundary: clear prior stream timing/log state so
-        # late-drop grace period is measured from this stream's first chunk.
+        # late-drop timing is measured from this stream's first chunk.
         self.reset_binary_timing()
         self._pending_stream_start = True
 
@@ -530,6 +526,7 @@ class PlayerV1Role(Role):
         — a client that only declared the pre-rename 'set_static_delay' still
         receives a delay command it can act on.
         """
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if PlayerCommand.SET_OUTPUT_DELAY in self.state_supported_commands:
             command = PlayerCommand.SET_OUTPUT_DELAY
         elif PlayerCommand.SET_STATIC_DELAY in self.state_supported_commands:
@@ -606,14 +603,7 @@ class PlayerV1Role(Role):
             bit_depth=audio_format.bit_depth,
             channels=audio_format.channels,
         )
-        is_client_supported = any(
-            fmt.codec == codec
-            and fmt.sample_rate == audio_format.sample_rate
-            and fmt.bit_depth == audio_format.bit_depth
-            and fmt.channels == audio_format.channels
-            for fmt in support.supported_formats
-        )
-        if not is_client_supported:
+        if not any(client_format.matches(fmt) for fmt in support.supported_formats):
             return False
 
         # Check if server can encode this format
@@ -662,18 +652,24 @@ class PlayerV1Role(Role):
     # ---- Client message handling ----
 
     def initial_state_deviations(self, payload: ClientStatePayload) -> list[str]:
-        """Report required player fields missing from the initial client/state."""
-        player = payload.player
-        if player is None:
+        """Report a missing player object in the initial client/state."""
+        if payload.player is None:
             return ["has an active player role but no player state"]
+        return []
+
+    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
+        """Report player fields in a client/state that violate the spec."""
+        state = payload.player
+        if state is None:
+            return []
         reasons: list[str] = []
         if (
-            player.output_delay_ms is None
-            or player.required_lead_time_ms is None
-            or player.min_buffer_ms is None
+            state.output_delay_ms is None
+            or state.required_lead_time_ms is None
+            or state.min_buffer_ms is None
         ):
             reasons.append("omitted required player timing fields")
-        commands = player.supported_commands
+        commands = state.supported_commands
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         # A pre-#177 hello's commands count as declared; that client is already flagged.
         legacy_commands = self._legacy_hello_commands()
@@ -682,26 +678,18 @@ class PlayerV1Role(Role):
         elif commands is None:
             reasons.append("omitted required supported_commands")
             commands = []
-        if PlayerCommand.VOLUME in commands and player.volume is None:
+        if PlayerCommand.VOLUME in commands and state.volume is None:
             reasons.append("omitted volume despite declaring the volume command")
-        if PlayerCommand.MUTE in commands and player.muted is None:
+        if PlayerCommand.MUTE in commands and state.muted is None:
             reasons.append("omitted muted despite declaring the mute command")
-        return reasons
-
-    def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
-        """Report player fields in a client/state that violate the spec."""
-        state = payload.player
-        if state is None:
-            return []
-        reasons: list[str] = []
         if state.state is not None:
             reasons.append("used legacy player.state instead of top-level available")
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if state.legacy_delay_key:
             reasons.append(f"used the pre-rename '{state.legacy_delay_key}' key")
         if state.ignored_commands:
-            reasons.append(
-                "declared unrecognized supported_commands: " + ", ".join(state.ignored_commands)
-            )
+            reasons.append("declared unrecognized supported_commands")
+        # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
         if state.supported_commands and PlayerCommand.SET_STATIC_DELAY in state.supported_commands:
             reasons.append("declared the pre-rename 'set_static_delay' command")
         if state.format is not None and not self._is_declared_format(state.format):
@@ -804,11 +792,13 @@ class PlayerV1Role(Role):
             channels=preferred_supported.channels,
         )
         base_codec = self.preferred_codec or preferred_supported.codec
+        # Opus ignores bit_depth and encodes from 16-bit PCM.
+        base_bit_depth = 16 if base_codec == AudioCodec.OPUS else base_format.bit_depth
 
         requested = SupportedAudioFormat(
             codec=player_req.codec or base_codec,
             sample_rate=player_req.sample_rate or base_format.sample_rate,
-            bit_depth=player_req.bit_depth or base_format.bit_depth,
+            bit_depth=player_req.bit_depth or base_bit_depth,
             channels=player_req.channels or base_format.channels,
         )
         if not any(requested.matches(fmt) for fmt in supported):
@@ -973,6 +963,8 @@ class PlayerV1Role(Role):
                 "Client %s has no server-compatible formats",
                 self._client.client_id,
             )
+            self._preferred_format = None
+            self._preferred_codec = None
             return
 
         # Selection order: the operator override, then the client/state format, then the
@@ -989,17 +981,13 @@ class PlayerV1Role(Role):
         persistent_format = state.preferred_format_override
         persistent_codec = state.preferred_codec_override
         if persistent_format is not None and persistent_codec is not None:
-            matched_persistent = next(
-                (
-                    fmt
-                    for fmt in compatible
-                    if fmt.codec == persistent_codec
-                    and fmt.sample_rate == persistent_format.sample_rate
-                    and fmt.bit_depth == persistent_format.bit_depth
-                    and fmt.channels == persistent_format.channels
-                ),
-                None,
+            persistent = SupportedAudioFormat(
+                codec=persistent_codec,
+                sample_rate=persistent_format.sample_rate,
+                bit_depth=persistent_format.bit_depth,
+                channels=persistent_format.channels,
             )
+            matched_persistent = next((fmt for fmt in compatible if persistent.matches(fmt)), None)
             if matched_persistent is not None:
                 preferred_supported = matched_persistent
             else:
@@ -1036,13 +1024,15 @@ class PlayerV1Role(Role):
         frame_duration_us = 25_000
         channel_id = group.get_channel_for_player(self._client.client_id)
         channel_id_int = channel_id.int
+        # Opus ignores the declared bit_depth and encodes from 16-bit PCM.
+        bit_depth = 16 if audio_codec == AudioCodec.OPUS else audio_format.bit_depth
         transformer: FlacEncoder | OpusEncoder | PcmPassthrough
         if audio_codec == AudioCodec.FLAC:
             transformer = group.transformer_pool.get_or_create(
                 FlacEncoder,
                 channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
-                bit_depth=audio_format.bit_depth,
+                bit_depth=bit_depth,
                 channels=audio_format.channels,
                 frame_duration_us=frame_duration_us,
             )
@@ -1051,7 +1041,7 @@ class PlayerV1Role(Role):
                 OpusEncoder,
                 channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
-                bit_depth=audio_format.bit_depth,
+                bit_depth=bit_depth,
                 channels=audio_format.channels,
                 frame_duration_us=frame_duration_us,
             )
@@ -1060,14 +1050,14 @@ class PlayerV1Role(Role):
                 PcmPassthrough,
                 channel_id=channel_id_int,
                 sample_rate=audio_format.sample_rate,
-                bit_depth=audio_format.bit_depth,
+                bit_depth=bit_depth,
                 channels=audio_format.channels,
                 frame_duration_us=frame_duration_us,
             )
 
         self._audio_requirements = AudioRequirements(
             sample_rate=audio_format.sample_rate,
-            bit_depth=audio_format.bit_depth,
+            bit_depth=bit_depth,
             channels=audio_format.channels,
             transformer=transformer,
             channel_id=channel_id,

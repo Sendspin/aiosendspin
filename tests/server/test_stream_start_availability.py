@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from tests.server.test_group_add_client import _DummyConnection, _DummyServer, _make_player
 from tests.server.test_group_add_client import _hello as _owner_hello
 from tests.server.test_role_activation import (
+    _ALTERNATE_FORMAT,
     _ARTWORK_CHANNEL,
     _PLAYER_STATE,
     _client,
@@ -249,6 +251,105 @@ async def test_reconnecting_player_keeps_its_group_and_resumes_audio(
     queued = _queued_player_entries(conn)
     assert len([e for e in queued if isinstance(e.json_message, StreamStartMessage)]) == 1
     assert any(entry.binary is not None for entry in queued)
+    stream.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hello_mid_commit", [False, True], ids=["between_commits", "mid_commit"])
+async def test_warm_reconnect_resumes_without_a_gap_when_audio_precedes_the_state(
+    hello_mid_commit: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audio committed between the reconnect hello and its client/state reaches the replay."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    server = conn._server  # noqa: SLF001
+    monkeypatch.setattr(
+        server, "request_client_playback_connection", lambda _client_id: False, raising=False
+    )
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+    stream = _client(conn).group.start_stream()
+    for _ in range(3):
+        await _commit(stream)
+    await conn.disconnect()
+    await _commit(stream)
+
+    async def reconnect() -> SendspinConnection:
+        new_conn, _fake = await _connect(
+            _hello([Roles.PLAYER.value]),
+            send_state=False,
+            server=server,  # type: ignore[arg-type]
+        )
+        return new_conn
+
+    if hello_mid_commit:
+        original_resample = stream._resample_for_roles  # noqa: SLF001
+        reconnected: list[SendspinConnection] = []
+
+        async def resample_during_reconnect(*args: Any, **kwargs: Any) -> Any:
+            if not reconnected:
+                reconnected.append(await reconnect())
+            return await original_resample(*args, **kwargs)
+
+        monkeypatch.setattr(stream, "_resample_for_roles", resample_during_reconnect)
+        await _commit(stream)
+        conn = reconnected[0]
+    else:
+        conn = await reconnect()
+        for _ in range(2):
+            await _commit(stream)
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+    await _commit(stream)
+
+    binary = [entry for entry in _queued_player_entries(conn) if entry.binary is not None]
+    assert len(binary) > 1
+    for previous, entry in pairwise(binary):
+        assert previous.binary is not None
+        assert entry.timestamp_us == previous.timestamp_us + (previous.binary.duration_us or 0)
+    stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_warm_reconnect_with_a_new_format_starts_near_the_playhead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconnect that changes format replays from the playhead, not from audio committed since."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False)
+    server = conn._server  # noqa: SLF001
+    monkeypatch.setattr(
+        server, "request_client_playback_connection", lambda _client_id: False, raising=False
+    )
+    monkeypatch.setattr(server, "_signal_client_updated", lambda _client_id: None, raising=False)
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+    stream = _client(conn).group.start_stream()
+    for _ in range(20):
+        await _commit(stream)
+    await conn.disconnect()
+
+    hello = _hello([Roles.PLAYER.value])
+    assert hello.player_support is not None
+    hello = dataclasses.replace(
+        hello,
+        player_support=dataclasses.replace(
+            hello.player_support, supported_formats=[_ALTERNATE_FORMAT]
+        ),
+    )
+    conn, _fake = await _connect(hello, send_state=False, server=server)  # type: ignore[arg-type]
+    await _commit(stream)
+    now_us = server.clock.now_us()
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload(available=True, player=_PLAYER_STATE)
+    )
+    await asyncio.gather(*stream._catchup_tasks.values())  # noqa: SLF001
+
+    binary = [entry for entry in _queued_player_entries(conn) if entry.binary is not None]
+    assert binary
+    assert min(entry.timestamp_us for entry in binary) < now_us + 1_000_000
     stream.stop()
 
 

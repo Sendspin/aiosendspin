@@ -206,6 +206,39 @@ class TestGroupStartStream:
         assert metadata_role.metadata.playback_speed == 0
 
     @pytest.mark.asyncio
+    async def test_group_stop_keep_progress_freezes_position_in_one_message(
+        self,
+        mock_server: MagicMock,
+        mock_client: MagicMock,
+    ) -> None:
+        """stop(keep_progress=True) should send only the position at the stop, at speed 0."""
+        group = SendspinGroup(mock_server, mock_client)
+        metadata_role = group.group_role("metadata")
+        assert isinstance(metadata_role, MetadataGroupRole)
+
+        group.start_stream()
+        metadata_role.set_metadata(
+            Metadata(
+                title="Test",
+                track_progress=30_000,
+                track_duration=180_000,
+                playback_speed=1000,
+            )
+        )
+        member = MagicMock()
+        metadata_role._members = [member]  # noqa: SLF001
+        mock_server.loop.time.return_value = 1010.0
+
+        await group.stop(keep_progress=True)
+
+        member.send_message.assert_called_once()
+        metadata = member.send_message.call_args.args[0].payload.metadata
+        assert metadata.timestamp == 1_010_000_000
+        assert metadata.progress.track_progress == 40_000
+        assert metadata.progress.playback_speed == 0
+        assert group.state == PlaybackStateType.STOPPED
+
+    @pytest.mark.asyncio
     async def test_group_stop_without_progress_leaves_metadata_untouched(
         self,
         mock_server: MagicMock,

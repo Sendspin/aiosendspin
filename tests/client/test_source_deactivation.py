@@ -295,7 +295,8 @@ async def test_source_state_sent_when_clock_first_synchronizes() -> None:
             client_transmitted=900_000,
             server_received=950_000,
             server_transmitted=960_000,
-        )
+        ),
+        conn.now_us(),
     )
 
     assert orjson.loads(ws.sent[-1])["payload"] == {"available": True, "source": {}}

@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Bounds per-frame spectrum cost.
+_N_DISP_BINS_MAX = 1024
+
 # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
 _deprecation_logged = False
 
@@ -237,6 +240,22 @@ class VisualizerDraftR1Role(Role):
             normalized_types = [v for v in raw_types if isinstance(v, str)]
             if "spectrum" in normalized_types and payload.get("spectrum") is None:
                 normalized_types = [v for v in normalized_types if v != "spectrum"]
+            spectrum = payload.get("spectrum")
+            n_disp_bins = spectrum.get("n_disp_bins") if isinstance(spectrum, dict) else None
+            if (
+                "spectrum" in normalized_types
+                and isinstance(n_disp_bins, int)
+                and n_disp_bins > _N_DISP_BINS_MAX
+            ):
+                _LOGGER.debug(
+                    "Client %s requested %d spectrum bins, above the limit of %d: "
+                    "omitting spectrum",
+                    self._client.client_id,
+                    n_disp_bins,
+                    _N_DISP_BINS_MAX,
+                )
+                normalized_types = [v for v in normalized_types if v != "spectrum"]
+                del payload["spectrum"]
             if not normalized_types:
                 normalized_types = ["loudness", "f_peak"]
             payload["types"] = normalized_types

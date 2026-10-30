@@ -69,7 +69,7 @@ class ClientHelloVisualizerSupport(SendspinModel):
                     deduped.append(value)
             payload = dict(payload)
             payload["types"] = deduped
-        return payload
+        return super().__pre_deserialize__(payload)
 
     def __post_init__(self) -> None:
         """Validate support object constraints."""

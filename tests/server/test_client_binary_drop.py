@@ -46,6 +46,7 @@ async def test_stream_end_drops_queued_binary_before_sending() -> None:
     wsock.send_str = AsyncMock()
     conn = SendspinConnection(server, wsock_client=wsock)
     conn._transport = wsock  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
 
     writer = asyncio.create_task(conn._writer())  # noqa: SLF001
     try:

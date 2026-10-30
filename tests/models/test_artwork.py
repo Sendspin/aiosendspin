@@ -69,6 +69,15 @@ def test_client_state_artwork_rejects_nonpositive_dimensions() -> None:
         ArtworkChannel.from_dict({**_ALBUM, "width": 0})
 
 
+def test_client_state_artwork_ignores_dimensions_of_none_channel() -> None:
+    """A none channel's unused dimensions do not reject the client/state."""
+    payload = ClientStatePayload.from_dict(
+        {"available": True, "artwork": {"channels": [{"source": "none", "width": 0, "height": -1}]}}
+    )
+    assert payload.artwork is not None
+    assert payload.artwork.channels[0].source is ArtworkSource.NONE
+
+
 def test_stream_start_artwork_none_channel_serializes_bare() -> None:
     """A none channel in stream/start carries only its source."""
     artwork = StreamStartArtwork(

@@ -203,6 +203,8 @@ class FlacEncoder:
         self._chunks_encoded_total: int = 0
         self._last_input_timestamp_us: int | None = None
         self._dur_residue: int = 0
+        # Open now so frame_duration_us reports the block size FFmpeg picks.
+        self._ensure_initialized()
 
     @property
     def frame_duration_us(self) -> int:
@@ -230,7 +232,7 @@ class FlacEncoder:
         )
 
     def _ensure_initialized(self) -> None:
-        """Lazily initialize encoder on first use."""
+        """Open the encoder if it is not open yet."""
         if self._initialized:
             return
 
@@ -411,6 +413,8 @@ class OpusEncoder:
         # Read encoder lookahead from OpusHead after opening.
         self._lookahead_us: int = 0
         self._dur_residue: int = 0
+        # Open now so frame_duration_us reports the frame size libopus picks.
+        self._ensure_initialized()
 
     @property
     def frame_duration_us(self) -> int:
@@ -438,7 +442,7 @@ class OpusEncoder:
         )
 
     def _ensure_initialized(self) -> None:
-        """Lazily initialize encoder on first use."""
+        """Open the encoder if it is not open yet."""
         if self._initialized:
             return
 

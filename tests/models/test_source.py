@@ -95,6 +95,7 @@ def test_client_state_carries_source_signal() -> None:
     assert payload.source.signal is SignalState.PRESENT
 
 
+# DEPRECATED(spec-pr-115): remove in aiosendspin <version>
 def test_client_state_preserves_legacy_flag_positional_argument() -> None:
     """Source state does not displace existing client/state positional arguments."""
     payload = ClientStatePayload(True, None, True)  # noqa: FBT003
@@ -139,6 +140,7 @@ def test_client_stream_start_header_optional_for_all_codecs() -> None:
         assert src.codec_header is None
 
 
+# DEPRECATED(spec-pr-163): remove in aiosendspin <version>
 def test_superseded_stream_message_names_still_parse() -> None:
     """A source on the pre-rename wire is understood, and says which name it used."""
     start = ClientMessage.from_json(
@@ -155,7 +157,10 @@ def test_superseded_stream_message_names_still_parse() -> None:
 
 def test_stream_messages_are_emitted_under_the_current_names() -> None:
     """What this client sends is the spelling the spec now uses."""
-    assert orjson.loads(ClientStreamEndMessage().to_json())["type"] == "client-stream/end"
+    assert orjson.loads(ClientStreamEndMessage().to_json()) == {
+        "type": "client-stream/end",
+        "payload": {},
+    }
     payload = ClientStreamStartPayload(
         source=ClientStreamStartSource(
             codec=AudioCodec.PCM, sample_rate=48000, bit_depth=16, channels=2

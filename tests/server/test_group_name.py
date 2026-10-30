@@ -50,6 +50,8 @@ class _DummyServer:
 
 
 class _RecordingConnection:
+    receives_group_updates = True
+
     def __init__(self) -> None:
         self.messages: list[object] = []
 
@@ -156,19 +158,21 @@ async def test_clearing_the_name_restores_the_derived_default() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_update_reaches_a_client_still_coming_up() -> None:
-    """A member mid-bring-up is not told anything before its own connect update.
+async def test_no_update_reaches_a_client_before_its_first_activation() -> None:
+    """A member is told nothing before its first server/activate, and every change after it.
 
     It is attached to its group during the hello exchange, so a group change in that
-    window would otherwise reach it ahead of the state it is brought up with.
+    window would otherwise reach it ahead of the activation.
     """
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     client = SendspinClient(server, client_id="c1")
     server.register(client)
     SendspinGroup(server, client)
+    connection = _RecordingConnection()
+    connection.receives_group_updates = False
     client.attach_connection(
-        _RecordingConnection(),
+        connection,
         client_info=ClientHelloPayload(client_id="c1", name="Kitchen Speaker", supported_roles=[]),
         negotiated_roles=[],
         active_roles=[],
@@ -177,11 +181,12 @@ async def test_no_update_reaches_a_client_still_coming_up() -> None:
     client.group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
     assert _group_updates(client) == []
 
-    client.mark_connected()
+    connection.receives_group_updates = True
+    client.group._set_playback_state(PlaybackStateType.STOPPED)  # noqa: SLF001
 
     updates = _group_updates(client)
     assert len(updates) == 1
-    assert updates[0].payload.playback_state is PlaybackStateType.PLAYING
+    assert updates[0].payload.playback_state is PlaybackStateType.STOPPED
 
 
 @pytest.mark.asyncio
@@ -208,11 +213,8 @@ async def test_replacing_a_stale_founder_keeps_the_group_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_client_regrouped_while_coming_up_waits_for_its_connect_update() -> None:
-    """Leaving a group mid-bring-up does not tell the client about its new solo group early.
-
-    It learns that group from its own connect update, once its first client/state lands.
-    """
+async def test_a_client_regrouped_while_coming_up_learns_its_solo_group() -> None:
+    """Leaving a group before the first client/state still tells the client its new solo group."""
     loop = asyncio.get_running_loop()
     server = _DummyServer(loop=loop, clock=LoopClock(loop))
     founder = SendspinClient(server, client_id="c1")
@@ -228,11 +230,8 @@ async def test_a_client_regrouped_while_coming_up_waits_for_its_connect_update()
     )
 
     await group.remove_client(client)
+
     assert client.group is not group
-    assert _group_updates(client) == []
-
-    client.mark_connected()
-
     updates = _group_updates(client)
     assert len(updates) == 1
     assert updates[0].payload.group_id == client.group.group_id

@@ -99,15 +99,16 @@ class VisualizerFeatureExtractor:
         sample_rate: int,
         channels: int,
         config: StreamStartVisualizer,
+        last_emit_ts_us: int | None = None,
     ) -> None:
-        """Create a feature extractor for negotiated stream config."""
+        """Create a feature extractor, keeping its first frame one hop after `last_emit_ts_us`."""
         self._sample_rate = sample_rate
         self._channels = channels
         self._config = config
 
-        # Hop is derived from rate_max. Zero/negative means "one frame per chunk":
+        # Hop is derived from rate_max, rounded up. Zero/negative means "one frame per chunk":
         # cursor is reset to chunk_end after every chunk.
-        self._hop_us: int = 1_000_000 // config.rate_max if config.rate_max > 0 else 0
+        self._hop_us: int = -(-1_000_000 // config.rate_max) if config.rate_max > 0 else 0
         self._window_samples: int = min(self._window_samples_for_rate(sample_rate), sample_rate)
 
         # Rolling mono buffer + ts of its first sample.
@@ -115,6 +116,7 @@ class VisualizerFeatureExtractor:
         self._buffer_start_ts_us: int | None = None
         # Cursor: ts of the NEXT frame to emit. Set on first chunk.
         self._next_emit_ts_us: int | None = None
+        self._last_emit_ts_us = last_emit_ts_us
 
         # Per-FFT-size caches for values that are constant once the window
         # size settles (recomputing them every frame is pure overhead on
@@ -140,6 +142,11 @@ class VisualizerFeatureExtractor:
         self._pitch_register: float | None = None
         self._pitch_last_ts_us: int | None = None
 
+    @property
+    def last_emit_ts_us(self) -> int | None:
+        """Timestamp of the last periodic frame, None before the first."""
+        return self._last_emit_ts_us
+
     @staticmethod
     def _window_samples_for_rate(sample_rate: int) -> int:
         """Scale the FFT window with sample rate, rounded to the next power of two.
@@ -159,6 +166,7 @@ class VisualizerFeatureExtractor:
         self._buffer = np.zeros(0, dtype=np.float32)
         self._buffer_start_ts_us = None
         self._next_emit_ts_us = None
+        self._last_emit_ts_us = None
         self._spectrum_ema = None
         self._loudness_ema = None
         self._f_peak_last_idx = None
@@ -196,8 +204,10 @@ class VisualizerFeatureExtractor:
             self._buffer = mono.copy()
             self._buffer_start_ts_us = timestamp_us
             # Anchor first emit at chunk end so the first frame's window
-            # covers the whole chunk.
+            # covers the whole chunk, and at least one hop after the last frame.
             self._next_emit_ts_us = chunk_end_ts_us
+            if self._last_emit_ts_us is not None:
+                self._next_emit_ts_us = max(chunk_end_ts_us, self._last_emit_ts_us + self._hop_us)
         else:
             self._buffer = np.concatenate([self._buffer, mono])
 
@@ -216,6 +226,7 @@ class VisualizerFeatureExtractor:
                 self._next_emit_ts_us += self._hop_us
                 continue
             frames.append(self._compute_frame(window, emit_ts))
+            self._last_emit_ts_us = emit_ts
             if self._hop_us <= 0:
                 self._next_emit_ts_us = chunk_end_ts_us + 1
                 break
@@ -630,7 +641,7 @@ class VisualizerFeatureExtractor:
             return np.zeros(n_bins, dtype=np.uint16)
 
         lo = max(0, f_min)
-        hi = min(int(self._sample_rate / 2), f_max)
+        hi = f_max
         if hi <= lo:
             return np.zeros(n_bins, dtype=np.uint16)
 
@@ -661,12 +672,7 @@ class VisualizerFeatureExtractor:
         db = 20.0 * np.log10(ratio)
         db_floor = -60.0
         t = (db - db_floor) / -db_floor
-        t = np.maximum(t, 0.0)
-        # Soft floor: bottom 10% (≈6 dB) folds into a quadratic fade so bins
-        # crossing the floor don't snap between 0 and a positive value.
-        soft = 10.0 * t * t
-        t = np.where(t < 0.1, soft, t)
-        t = np.minimum(t, 1.0)
+        t = np.clip(t, 0.0, 1.0)
         return (t * 65535.0).astype(np.uint16)
 
     def _frequency_bin_edges(

@@ -98,6 +98,19 @@ async def test_unrecognized_method_is_logged_but_not_flagged(
 
 
 @pytest.mark.asyncio
+async def test_unrecognized_descriptor_value_is_logged_but_not_flagged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A descriptor value from a newer revision is conformant, so it is logged, not flagged."""
+    conn, client = _conn_with_client()
+    hello = _hello({"pairing_psk": {"locations": ["device", "sticker"]}})
+    with caplog.at_level(logging.INFO):
+        conn._note_client_hello_wire(hello)  # noqa: SLF001
+    client.flag_noncompliance.assert_not_called()
+    assert any("pairing_psk.locations=sticker" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_unusable_method_is_reported_apart_from_an_unknown_one(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

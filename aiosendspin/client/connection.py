@@ -6,13 +6,13 @@ import asyncio
 import base64
 import logging
 import struct
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 
 from aiosendspin.models import BinaryMessageType, pack_binary_header_raw
@@ -123,6 +123,7 @@ from aiosendspin.noise.pairing import (
 from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
+from aiosendspin.util import WARN_INTERVAL_S, _peek_message_type
 
 from .models import AudioFormat, PCMFormat, ServerInfo
 from .time_sync import SendspinTimeFilter
@@ -355,6 +356,8 @@ class SendspinConnection:
         self._artwork_pending = {}
         self._artwork_shown = set()
         self._pending_state = {}
+        self._dropped_binary_counts: dict[str, int] = {}
+        self._last_dropped_binary_log_s: dict[str, float] = {}
 
     @property
     def connected(self) -> bool:
@@ -608,6 +611,10 @@ class SendspinConnection:
                 category is not PskCategory.LONG_TERM
                 and not unpaired_access
                 and _admissible(category, activities, has_roles=has_roles, unpaired_access=True)
+                and (
+                    Activity.PAIRING not in activities
+                    or await self._pairing_acceptable(payload.pairing)
+                )
             ):
                 return GoodbyeReason.PAIRING_REQUIRED
             return GoodbyeReason.UNAUTHORIZED
@@ -752,7 +759,7 @@ class SendspinConnection:
                 raise
             self._client.record_pairing_window_attempt(self, paired=True)
             return
-        pairing_format = await self._validate_pairing_format(pairing.format)
+        pairing_format = PairingCodeFormat(pairing.format)
         try:
             # Dynamic pairing code is held back only at the round limit, until an operator action.
             if await store.is_pairing_round_limit_reached():
@@ -858,32 +865,28 @@ class SendspinConnection:
         """Whether the client currently admits unpaired access (from pairing config)."""
         return (await self._client.pairing_store.get_pairing_config()).unpaired_access_enabled
 
-    async def _validate_pairing(self, pairing: ActivatePairing | None) -> ActivatePairing:
-        """Reject a pairing whose method the matched PSK disallows or the client did not offer."""
+    async def _pairing_acceptable(self, pairing: ActivatePairing | None) -> bool:
+        """Whether the matched PSK allows ``pairing`` and the client offers its method/format."""
         assert self._noise_psk is not None
-        method = pairing.method if pairing is not None else None
+        if pairing is None:
+            return False
         # pairing_psk iff the matched PSK is the Pairing PSK; a pairing-code method otherwise.
-        method_fits_psk = (method is PairMethod.PAIRING_PSK) == (
+        method_fits_psk = (pairing.method is PairMethod.PAIRING_PSK) == (
             self._noise_psk.category is PskCategory.PAIRING
         )
-        supported = await self._supported_pair_methods()
-        if pairing is None or not method_fits_psk or method not in supported:
+        if not method_fits_psk or pairing.method not in await self._supported_pair_methods():
+            return False
+        if pairing.method is not PairMethod.DYNAMIC_PAIRING_CODE:
+            return True
+        # A format identifier from a newer spec revision is never offered.
+        return pairing.format in {f.value for f in await self._dynamic_pairing_formats()}
+
+    async def _validate_pairing(self, pairing: ActivatePairing | None) -> ActivatePairing:
+        """Reject a pairing the matched PSK disallows or the client did not offer."""
+        if not await self._pairing_acceptable(pairing):
             await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
+        assert pairing is not None
         return pairing
-
-    async def _validate_pairing_format(self, pairing_format: str | None) -> PairingCodeFormat:
-        """Validate that the activation selects a currently offered dynamic format.
-
-        An identifier from a newer spec revision does not parse, so it aborts like any
-        other format this client does not offer.
-        """
-        try:
-            selected = PairingCodeFormat(pairing_format)
-        except ValueError:
-            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
-        if selected not in await self._dynamic_pairing_formats():
-            await self._abort_pairing(PairAbortReason.METHOD_NOT_SUPPORTED)
-        return selected
 
     async def _dynamic_pairing_formats(self) -> tuple[PairingCodeFormat, ...]:
         """Return formats currently offered by this client."""
@@ -1435,10 +1438,14 @@ class SendspinConnection:
         self._exchange_in_progress = False
 
     async def _reader_loop(self) -> None:
-        assert self._ws is not None
+        ws = self._ws
+        assert ws is not None
         try:
-            async for msg in self._ws:
-                await self._handle_ws_message(msg)
+            while True:
+                msg, received_us = await ws.receive_timed(self._client.clock)
+                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    break
+                await self._handle_ws_message(msg, received_us)
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -1446,30 +1453,20 @@ class SendspinConnection:
         finally:
             await self.disconnect()
 
-    async def _handle_ws_message(self, msg: WSMessage) -> None:
+    async def _handle_ws_message(self, msg: WSMessage, received_us: int) -> None:
         if msg.type is WSMsgType.TEXT:
-            await self._handle_json_message(msg.data)
+            await self._handle_json_message(msg.data, received_us)
         elif msg.type is WSMsgType.BINARY:
             self._handle_binary_message(msg.data)
         elif msg.type is WSMsgType.ERROR:
             logger.error("WebSocket error: %s", self._ws.exception() if self._ws else "unknown")
             await self.disconnect()
 
-    @staticmethod
-    def _peek_message_type(data: str) -> str | None:
-        """Return the envelope ``type`` of ``data``, or ``None`` if it has none."""
-        try:
-            decoded = orjson.loads(data)
-        except orjson.JSONDecodeError:
-            return None
-        message_type = decoded.get("type") if isinstance(decoded, dict) else None
-        return message_type if isinstance(message_type, str) else None
-
-    async def _handle_json_message(self, data: str) -> None:
+    async def _handle_json_message(self, data: str, received_us: int) -> None:
         try:
             message = ServerMessage.from_json(data)
         except Exception:
-            message_type = self._peek_message_type(data)
+            message_type = _peek_message_type(data)
             if message_type in _PAIRING_MESSAGE_TYPES:
                 # A malformed one still reaches the attempt, which fails on it.
                 await self._route_pairing_message(data, message_type)
@@ -1483,7 +1480,7 @@ class SendspinConnection:
             case ServerActivateMessage(payload=payload):
                 await self._handle_server_activate(payload)
             case ServerTimeMessage(payload=payload):
-                await self._handle_server_time(payload)
+                await self._handle_server_time(payload, received_us)
             case StreamStartMessage():
                 await self._handle_stream_start(message)
             case StreamClearMessage():
@@ -1514,7 +1511,7 @@ class SendspinConnection:
 
     def _handle_binary_message(self, payload: bytes) -> None:
         if len(payload) < 1:
-            logger.warning("Empty binary message")
+            self._warn_dropped_binary("Empty binary message")
             return
 
         raw_type = payload[0]
@@ -1524,7 +1521,7 @@ class SendspinConnection:
         try:
             message_type = BinaryMessageType(raw_type)
         except ValueError:
-            logger.warning("Unknown binary message type: %s", raw_type)
+            self._warn_dropped_binary("Unknown binary message type: %s", raw_type)
             return
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
@@ -1551,7 +1548,9 @@ class SendspinConnection:
 
         if message_type is BinaryMessageType.AUDIO_CHUNK:
             if len(payload) < PLAYER_AUDIO_HEADER_SIZE:
-                logger.warning("Dropping truncated audio chunk of %d bytes", len(payload))
+                self._warn_dropped_binary(
+                    "Dropping truncated audio chunk of %d bytes", len(payload)
+                )
                 return
             header = unpack_player_audio_header(payload)
             self._handle_audio_chunk(
@@ -1565,6 +1564,21 @@ class SendspinConnection:
             self._handle_visualization_frame(message_type, payload[1:])
         else:
             logger.debug("Ignoring unsupported binary message type: %s", message_type)
+
+    def _warn_dropped_binary(self, msg: str, *args: object) -> None:
+        """Warn on the first ``msg``, then report repeats at debug level with a count."""
+        count = self._dropped_binary_counts.get(msg, 0) + 1
+        now_s = time.monotonic()
+        last_log_s = self._last_dropped_binary_log_s.get(msg)
+        if last_log_s is None:
+            logger.warning(msg, *args)
+        elif now_s - last_log_s < WARN_INTERVAL_S:
+            self._dropped_binary_counts[msg] = count
+            return
+        else:
+            logger.debug("%s: %s message(s) since last report", msg % args, count)
+        self._dropped_binary_counts[msg] = 0
+        self._last_dropped_binary_log_s[msg] = now_s
 
     async def _handle_handshake(self, data: str) -> None:
         """Run a server-initiated re-handshake, ending any pairing attempt still in progress."""
@@ -1610,18 +1624,17 @@ class SendspinConnection:
         if self._time_task is None or self._time_task.done():
             self._time_task = self._client.loop.create_task(self._time_sync_loop())
 
-    async def _handle_server_time(self, payload: ServerTimePayload) -> None:
+    async def _handle_server_time(self, payload: ServerTimePayload, received_us: int) -> None:
         was_synchronized = self._time_filter.is_synchronized
-        now_us = self.now_us()
         offset = (
             (payload.server_received - payload.client_transmitted)
-            + (payload.server_transmitted - now_us)
+            + (payload.server_transmitted - received_us)
         ) / 2
         delay = (
-            (now_us - payload.client_transmitted)
+            (received_us - payload.client_transmitted)
             - (payload.server_transmitted - payload.server_received)
         ) / 2
-        self._time_filter.update(round(offset), round(delay), now_us)
+        self._time_filter.update(round(offset), round(delay), received_us)
         for name, pending in self._pending_state.items():
             pending.apply_handle.cancel()
             pending.apply_handle = self._call_at_server_time(
@@ -1862,6 +1875,7 @@ class SendspinConnection:
             payload = replace(payload, player=None)
         if payload.player is not None:
             player_cmd = payload.player
+            # DEPRECATED(spec-pr-164): remove in aiosendspin <version>
             if (
                 player_cmd.command
                 in (PlayerCommand.SET_OUTPUT_DELAY, PlayerCommand.SET_STATIC_DELAY)

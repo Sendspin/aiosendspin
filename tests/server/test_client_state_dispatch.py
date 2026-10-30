@@ -188,18 +188,6 @@ async def test_initial_state_complete_state_is_not_flagged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_initial_state_rejects_when_flagged() -> None:
-    """A never-sent initial state hard-disconnects when the flag raises."""
-    conn, client = _conn_with_client()
-    client.flag_noncompliance.side_effect = ClientComplianceError("nope")
-    conn.disconnect = AsyncMock()  # type: ignore[method-assign]
-    conn._initial_state_timeout_callback()  # noqa: SLF001
-    await asyncio.sleep(0)
-    conn.disconnect.assert_awaited_once_with(retry_connection=False)
-    client.mark_connected.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_missing_initial_state_marks_connected_when_lenient() -> None:
     """A never-sent initial state is tolerated: the client is marked connected."""
     conn, client = _conn_with_client()
@@ -558,7 +546,13 @@ async def test_unrecognized_player_command_is_flagged_and_state_still_applies() 
                 "type": "client/state",
                 "payload": {
                     "available": False,
-                    "player": {"volume": 40, "supported_commands": ["volume", "teleport"]},
+                    "player": {
+                        "volume": 40,
+                        "output_delay_ms": 0,
+                        "required_lead_time_ms": 100,
+                        "min_buffer_ms": 200,
+                        "supported_commands": ["volume", "teleport"],
+                    },
                 },
             }
         ).decode()
@@ -567,7 +561,7 @@ async def test_unrecognized_player_command_is_flagged_and_state_still_applies() 
     await conn._handle_message(message, timestamp_us=0)  # noqa: SLF001
 
     flagged = [call.args[0] for call in client.flag_noncompliance.call_args_list]
-    assert flagged == ["client/state declared unrecognized supported_commands: teleport"]
+    assert flagged == ["client/state declared unrecognized supported_commands"]
     client.handle_availability_change.assert_awaited_once_with(available=False)
     (applied,) = role.on_client_state.call_args.args
     assert applied.player.volume == 40

@@ -25,15 +25,15 @@ def _connection(sent: list[str], *, connected: bool = True) -> SendspinConnectio
     return conn
 
 
-async def test_send_leave_sends_payloadless_client_leave() -> None:
-    """send_leave emits only the message type and keeps the reported availability."""
+async def test_send_leave_sends_client_leave() -> None:
+    """send_leave emits client/leave with an empty payload and keeps the reported availability."""
     sent: list[str] = []
     conn = _connection(sent)
     available_before = conn._reported_available  # noqa: SLF001
 
     await conn.send_leave()
 
-    assert [orjson.loads(message) for message in sent] == [{"type": "client/leave"}]
+    assert [orjson.loads(message) for message in sent] == [{"type": "client/leave", "payload": {}}]
     assert conn._reported_available is available_before  # noqa: SLF001
 
 

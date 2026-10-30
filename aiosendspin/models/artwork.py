@@ -81,10 +81,12 @@ def unpack_artwork_announce(data: bytes) -> ArtworkAnnounce:
     return ArtworkAnnounce(channel, timestamp_us, total_size)
 
 
+# DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 # Pre-rename dimension keys, superseded by `width`/`height`.
 _DIMENSION_ALIASES = {"media_width": "width", "media_height": "height"}
 
 
+# DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def _rewrite_legacy_dimensions(d: dict[str, Any]) -> dict[str, Any]:
     """Rewrite pre-rename dimension keys onto width/height, recording which were used."""
     normalized = dict(d)
@@ -114,18 +116,22 @@ class ArtworkChannel(SendspinModel):
     """Width in pixels of the delivered image. Required unless `source` is `none`."""
     height: int | None = None
     """Height in pixels of the delivered image. Required unless `source` is `none`."""
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     legacy_dimension_keys: list[str] | None = None
     """Pre-rename dimension keys the parser rewrote, recorded for the server to flag.
     Not part of the wire schema (omitted when None)."""
 
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Accept the pre-rename `media_width`/`media_height` spelling."""
-        return _rewrite_legacy_dimensions(d)
+        return super().__pre_deserialize__(_rewrite_legacy_dimensions(d))
 
     def __post_init__(self) -> None:
         """Validate field values."""
-        if self.source is not ArtworkSource.NONE and None in (self.format, self.width, self.height):
+        if self.source is ArtworkSource.NONE:
+            return
+        if None in (self.format, self.width, self.height):
             raise ValueError(
                 f"format, width and height are required for source {self.source.value}"
             )
@@ -223,14 +229,16 @@ class StreamRequestFormatArtwork(SendspinModel):
     """Requested width in pixels."""
     height: int | None = None
     """Requested height in pixels."""
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     legacy_dimension_keys: list[str] | None = None
     """Pre-rename dimension keys the parser rewrote, recorded for the role to flag.
     Not part of the wire schema (omitted when None)."""
 
+    # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Accept the pre-rename `media_width`/`media_height` spelling."""
-        return _rewrite_legacy_dimensions(d)
+        return super().__pre_deserialize__(_rewrite_legacy_dimensions(d))
 
     def __post_init__(self) -> None:
         """Validate field values."""

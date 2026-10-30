@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from aiohttp import WSMessage, WSMsgType
 
+from aiosendspin.clock import ManualClock
 from aiosendspin.noise.constants import (
     FRAGMENT_FLAG_FIRST,
     FRAGMENT_FLAG_LAST,
@@ -244,6 +245,42 @@ async def test_receive_reassembles_fragmented_round_trip() -> None:
     assert len(seen) == 1
     assert seen[0].type is WSMsgType.BINARY
     assert seen[0].data == payload
+
+
+async def test_receive_timed_takes_final_frame_arrival_before_decryption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fragmented message is timed when its final frame arrives, not after decrypting it."""
+    clock = ManualClock()
+    arrivals: list[int] = []
+
+    class _ArrivalWebSocket(FakeWebSocket):
+        async def receive(self) -> WSMessage:
+            msg = await super().receive()
+            clock.advance_us(1_000)
+            arrivals.append(clock.now_us())
+            return msg
+
+    initiator, responder = make_paired_sessions()
+    sender_ws = FakeWebSocket()
+    await EncryptedWebSocket(sender_ws, initiator).send_bytes(
+        b"\x04" + bytes(2 * MAX_TRANSPORT_PLAINTEXT)
+    )
+    decrypt = responder.decrypt
+
+    def decrypt_slowly(data: bytes) -> bytes:
+        clock.advance_us(100)
+        return decrypt(data)
+
+    monkeypatch.setattr(responder, "decrypt", decrypt_slowly)
+    receiver_ws = _ArrivalWebSocket()
+    for ct in sender_ws.sent:
+        await receiver_ws.push(WSMessage(WSMsgType.BINARY, ct, ""))
+
+    _, received_us = await EncryptedWebSocket(receiver_ws, responder).receive_timed(clock)
+
+    assert len(arrivals) > 1
+    assert received_us == arrivals[-1]
 
 
 async def test_receive_reassembles_fragmented_json_into_text() -> None:

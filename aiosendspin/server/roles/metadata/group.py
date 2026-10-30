@@ -40,9 +40,13 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
         return current.track_progress_at(current_time_us)
 
     def freeze_progress(self) -> None:
-        """Snapshot current progress and stop further client-side progress extrapolation."""
+        """Snapshot current progress and stop further client-side progress extrapolation.
+
+        A scheduled metadata update is cancelled even when there is no position to freeze.
+        """
         metadata = self.metadata
         if metadata is None or (current_progress := self.track_progress) is None:
+            self.cancel_scheduled()
             return
 
         self.set_metadata(

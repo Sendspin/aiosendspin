@@ -23,7 +23,7 @@ class AudioTransformer(Protocol):
 
     @property
     def frame_duration_us(self) -> int:
-        """Static frame duration used for `TransformKey` identity.
+        """Static frame duration, used for `TransformKey` identity and the send-ahead.
 
         Per-frame wire duration is emitted by `process` / `flush` and may
         vary by ±1µs at non-divisible rates.
@@ -35,7 +35,8 @@ class AudioTransformer(Protocol):
 
         Args:
             pcm: Raw PCM audio data (already resampled to target format).
-            timestamp_us: Playback timestamp in microseconds.
+            timestamp_us: Playback timestamp in microseconds, minus the timeline jumps
+                this transformer has followed.
             duration_us: Duration of this chunk in microseconds.
 
         Returns:

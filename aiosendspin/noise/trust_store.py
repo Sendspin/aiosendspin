@@ -138,7 +138,7 @@ class ServerPairingRecord:
             "psk_id": self.psk_id,
             "psk": b64url_encode(self.psk),
             "client_id": self.client_id,
-            "pair_methods": [m.value for m in self.pair_methods],
+            "pair_methods": [_LEGACY_PAIR_METHOD_NAMES.get(m, m.value) for m in self.pair_methods],
             "created_at": self.created_at.isoformat(),
             "owner": self.owner,
         }
@@ -298,12 +298,15 @@ class TrustedUnpairedClient:
 
     client_id: str
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    approved_roles: frozenset[str] = frozenset()
+    """Pairing-required role families the operator explicitly approved."""
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to a JSON-friendly dict (timestamp ISO-8601)."""
         return {
             "client_id": self.client_id,
             "created_at": self.created_at.isoformat(),
+            "approved_roles": sorted(self.approved_roles),
         }
 
     @classmethod
@@ -312,6 +315,7 @@ class TrustedUnpairedClient:
         return cls(
             client_id=_str(data, "client_id"),
             created_at=datetime.fromisoformat(_str(data, "created_at")),
+            approved_roles=frozenset(_str_list(data, "approved_roles")),
         )
 
 
@@ -959,6 +963,20 @@ def _str(data: Mapping[str, object], key: str) -> str:
     return value
 
 
+def _str_list(data: Mapping[str, object], key: str) -> list[str]:
+    value = data.get(key, [])
+    if not isinstance(value, list):
+        msg = f"{key!r} must be a list, got {type(value).__name__}"
+        raise TypeError(msg)
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            msg = f"{key!r} entries must be strings, got {type(item).__name__}"
+            raise TypeError(msg)
+        items.append(item)
+    return items
+
+
 def _opt_str(data: Mapping[str, object], key: str) -> str | None:
     value = data.get(key)
     if value is None:
@@ -970,9 +988,17 @@ def _opt_str(data: Mapping[str, object], key: str) -> str | None:
 
 
 # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+# Remove one release after _LEGACY_PAIR_METHOD_NAMES, so saves first rewrite stored files with
+# the new names. Without this map, loading skips records that use the old names.
 _LEGACY_PAIR_METHODS: Final[dict[str, PairMethod]] = {
     "dynamic_pin": PairMethod.DYNAMIC_PAIRING_CODE,
     "static_pin": PairMethod.STATIC_PAIRING_CODE,
+}
+
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+# Stored records keep the pre-rename names so aiosendspin 9.x can still read them.
+_LEGACY_PAIR_METHOD_NAMES: Final[dict[PairMethod, str]] = {
+    method: name for name, method in _LEGACY_PAIR_METHODS.items()
 }
 
 

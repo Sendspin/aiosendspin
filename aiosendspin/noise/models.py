@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from mashumaro.types import Discriminator
 
-from aiosendspin.models.base import SendspinConfig, SendspinModel
+from aiosendspin.models.base import SendspinConfig, SendspinModel, note_wire_deviation
 from aiosendspin.models.types import PairAbortReason, ServerErrorReason, ServerMessage
 
 
@@ -157,8 +157,11 @@ class PairAbortPayload(SendspinModel):
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Read the pre-rename ``pin_mismatch`` reason as ``pairing_code_mismatch``."""
         if d.get("reason") == "pin_mismatch":
-            return {**d, "reason": PairAbortReason.PAIRING_CODE_MISMATCH.value}
-        return d
+            note_wire_deviation("sent the pre-rename pin_mismatch reason")
+            return super().__pre_deserialize__(
+                {**d, "reason": PairAbortReason.PAIRING_CODE_MISMATCH.value}
+            )
+        return super().__pre_deserialize__(d)
 
 
 @dataclass
@@ -304,6 +307,16 @@ class ClientPairRetryMessage(PairingMessage):
 
     payload: ClientPairRetryPayload = field(default_factory=ClientPairRetryPayload)
     type: Literal["client/pair-retry"] = "client/pair-retry"
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Record a payload other than an object, which the wire requires as ``{}``."""
+        payload = d.get("payload")
+        if payload is None:
+            note_wire_deviation("omitted the required payload object")
+        elif not isinstance(payload, dict):
+            note_wire_deviation("sent a payload that is not an object")
+        return super().__pre_deserialize__(d)
 
 
 @dataclass

@@ -59,6 +59,8 @@ class _DummyServer:
 
 
 class _DummyConnection:
+    receives_group_updates = True
+
     def __init__(self) -> None:
         self.role_messages: list[tuple[str, object]] = []
 

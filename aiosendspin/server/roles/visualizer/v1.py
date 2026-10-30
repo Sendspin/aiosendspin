@@ -117,6 +117,10 @@ _FFT_DRIVEN_TYPES: frozenset[SupportedVisualizerType] = frozenset(
         "pitch",
     }
 )
+# Highest periodic frame rate the server emits, matching common high-refresh displays.
+_RATE_MAX_CAP = 120
+# Bounds per-frame spectrum cost, at the 48 kHz FFT's frequency bin count.
+_N_DISP_BINS_MAX = 1024
 # Periodic frames for a beat-wanting client are held to this lead ahead of the
 # playhead. Keeping the wire-ts cursor near the playhead means a beat schedule
 # landing mid-stream (a flow-mode track change re-pushes the whole schedule)
@@ -147,7 +151,7 @@ class VisualizerV1Role(Role):
         # the current stream. Gates `beat` in the negotiated types.
         self._has_beats_landed: bool = False
         # Server-side capability metadata for downbeat tracking, set via
-        # `set_tracks_downbeats()` before `stream/start` is sent.
+        # `set_tracks_downbeats()`.
         self._tracks_downbeats: bool = False
         # Last-emitted timestamp across all visualizer binaries. The spec
         # requires non-decreasing timestamp order within the role; beats
@@ -231,6 +235,12 @@ class VisualizerV1Role(Role):
     def set_tracks_downbeats(self, *, tracks: bool) -> None:
         """Mark whether the upstream beat detector identifies bar starts."""
         self._tracks_downbeats = bool(tracks)
+        if (
+            self._stream_started
+            and self._request is not None
+            and self._build_stream_config() != self._stream_config
+        ):
+            self._reissue_stream_start()
 
     def set_beat_availability(self, availability: BeatAvailability) -> None:
         """Declare whether beats will arrive for the current source.
@@ -242,7 +252,6 @@ class VisualizerV1Role(Role):
         """
         if self._beat_availability is availability:
             return
-        previous_beat_in_types = self._beat_in_negotiated_types()
         self._beat_availability = availability
         if availability is BeatAvailability.UNAVAILABLE:
             self._pending_beats.clear()
@@ -261,7 +270,7 @@ class VisualizerV1Role(Role):
             or not self._stream_started
         ):
             return
-        if previous_beat_in_types != self._beat_in_negotiated_types():
+        if self._build_stream_config() != self._stream_config:
             self._reissue_stream_start()
 
     def _ensure_buffer_tracker(self) -> None:
@@ -380,6 +389,7 @@ class VisualizerV1Role(Role):
             sample_rate=req.sample_rate,
             channels=req.channels,
             config=self._stream_config,
+            last_emit_ts_us=None if self._extractor is None else self._extractor.last_emit_ts_us,
         )
 
     def on_audio_chunk(self, chunk: AudioChunk) -> None:
@@ -761,7 +771,9 @@ class VisualizerV1Role(Role):
         if "spectrum" in state.types and state.spectrum is None:
             reasons.append("requested visualizer 'spectrum' without a spectrum configuration")
         if state.rate_max <= 0:
-            reasons.append(f"sent a non-positive visualizer rate_max: {state.rate_max}")
+            reasons.append("sent a non-positive visualizer rate_max")
+        if state.non_string_types_used:
+            reasons.append("visualizer types contained non-string entries")
         return reasons
 
     def on_client_state(self, payload: ClientStatePayload) -> None:
@@ -882,6 +894,18 @@ class VisualizerV1Role(Role):
         if "spectrum" in types and request.spectrum is None:
             # Flagged as a deviation; a lenient server streams the other types.
             types.remove("spectrum")
+        if (
+            "spectrum" in types
+            and request.spectrum is not None
+            and request.spectrum.n_disp_bins > _N_DISP_BINS_MAX
+        ):
+            _LOGGER.debug(
+                "Client %s requested %d spectrum bins, above the limit of %d: omitting spectrum",
+                self._client.client_id,
+                request.spectrum.n_disp_bins,
+                _N_DISP_BINS_MAX,
+            )
+            types.remove("spectrum")
         # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
         # `pitch` rides spec-reserved binary type 21. Only a lenient server streams
         # it, and only to a connection whose hello carried the pre-#195 stream
@@ -929,12 +953,15 @@ class VisualizerV1Role(Role):
         render a `peak`-based fallback without flicker.
 
         Exception: beat-only clients (`types == ["beat"]`) get `beat`
-        from the start — there is no FFT-driven type to fall back to.
+        from the start unless beats are UNAVAILABLE, as there is no
+        FFT-driven type to fall back to.
         """
         if self._request is None:
             raise ValueError("request must be known before building stream config")
         client_types = list(self._request.types)
-        beat_only = client_types == ["beat"]
+        beat_only = (
+            client_types == ["beat"] and self._beat_availability is not BeatAvailability.UNAVAILABLE
+        )
         if beat_only or self._beat_in_negotiated_types():
             exposed_types = client_types
         else:
@@ -951,7 +978,12 @@ class VisualizerV1Role(Role):
             if without_pitch:
                 exposed_types = without_pitch
         return StreamStartVisualizer.from_request(
-            replace(self._request, types=exposed_types), tracks_downbeats=self._tracks_downbeats
+            replace(
+                self._request,
+                types=exposed_types,
+                rate_max=min(self._request.rate_max, _RATE_MAX_CAP),
+            ),
+            tracks_downbeats=self._tracks_downbeats,
         )
 
     # DEPRECATED(spec-pr-86): remove in aiosendspin <version>

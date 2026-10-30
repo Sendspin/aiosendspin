@@ -213,7 +213,9 @@ async def test_historical_injection_enables_seamless_late_join() -> None:
         )
 
     # Step 3: Connect a client on the new channel
-    _, conn_new = _make_connected_player(server, group, "new-player", channel_id=new_channel)
+    client_new, conn_new = _make_connected_player(
+        server, group, "new-player", channel_id=new_channel
+    )
     join_now_us = clock.now_us()
 
     # Step 4: Commit with both historical (new channel) and live (main channel)
@@ -225,7 +227,12 @@ async def test_historical_injection_enables_seamless_late_join() -> None:
     assert conn_new.sent_binary, "New channel client should have received historical + live audio"
     first_chunk_ts = unpack_player_audio_header(conn_new.sent_binary[0]).timestamp_us
     assert first_chunk_ts >= join_now_us
-    assert first_chunk_ts - join_now_us <= 1_000_000
+    role_new = client_new.role("player@v1")
+    assert role_new is not None
+    req_new = role_new.get_audio_requirements()
+    assert req_new is not None
+    assert req_new.transformer is not None
+    assert first_chunk_ts - join_now_us <= 1_000_000 + req_new.transformer.frame_duration_us
 
 
 @pytest.mark.asyncio

@@ -27,8 +27,7 @@ from tests.conftest import sine_pcm_16bit
 
 
 class _ServerSideConnection:
-    def record_source_start(self) -> None:
-        pass
+    pass
 
 
 class _ServerSideClient:
@@ -49,6 +48,9 @@ class _ServerSideClient:
 
     def _signal_event(self, event: Any) -> None:
         self.events.append(event)
+
+    def flag_noncompliance(self, reason: str) -> None:
+        raise AssertionError(reason)
 
     def awaits_role_state(self, _role_family: str) -> bool:
         return False

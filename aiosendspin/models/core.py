@@ -51,6 +51,7 @@ from .types import (
     ClientMessage,
     ConnectionReason,
     GoodbyeReason,
+    MediaCommand,
     PairingCodeFormat,
     PairMethod,
     PlaybackStateType,
@@ -137,7 +138,12 @@ _PAIR_METHOD_VALUE_FILTERS: dict[str, dict[str, frozenset[str]]] = {
 
 # Records the parser writes onto the container; never read from the wire.
 _PAIR_METHOD_SIDECARS: frozenset[str] = frozenset(
-    {"ignored_methods", "unusable_methods", "offered_both_pairing_code_methods"}
+    {
+        "ignored_methods",
+        "ignored_values",
+        "unusable_methods",
+        "offered_both_pairing_code_methods",
+    }
 )
 
 
@@ -183,9 +189,10 @@ def _uses_legacy_pin_methods(entries: Any) -> bool:
 
 def _filter_descriptor_values(
     descriptor: dict[str, Any], value_filters: dict[str, frozenset[str]]
-) -> dict[str, Any]:
-    """Drop descriptor values this implementation does not recognize."""
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Drop unrecognized descriptor values, also returning each dropped identifier and its field."""
     filtered = dict(descriptor)
+    ignored: list[tuple[str, str]] = []
     for field_name, allowed in value_filters.items():
         if field_name not in filtered:
             continue
@@ -193,12 +200,25 @@ def _filter_descriptor_values(
         # A field of the wrong type offers nothing usable, same as one filtered empty. Values
         # are matched as identifiers, so anything that is not one is simply not recognized —
         # tested before membership, since an unhashable value cannot be looked up at all.
-        filtered[field_name] = (
-            [v for v in values if isinstance(v, str) and v in allowed]
-            if isinstance(values, list)
-            else []
-        )
-    return filtered
+        if not isinstance(values, list):
+            filtered[field_name] = []
+            continue
+        identifiers = [v for v in values if isinstance(v, str)]
+        filtered[field_name] = [v for v in identifiers if v in allowed]
+        ignored.extend((field_name, v) for v in identifiers if v not in allowed)
+    return filtered, ignored
+
+
+def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
+    """Whether a recognized method's descriptor has the wrong shape, before value filtering."""
+    locations = descriptor.get("locations")
+    if locations is not None and not isinstance(locations, list):
+        return True
+    if method != PairMethod.DYNAMIC_PAIRING_CODE.value:
+        return False
+    return descriptor.get("formats") == [] or not all(
+        isinstance(descriptor.get(key), list) for key in ("formats", "out_channels")
+    )
 
 
 @dataclass
@@ -255,8 +275,11 @@ class SupportedPairMethods(SendspinModel):
     for the server to log. Not part of the wire schema (omitted when None)."""
     offered_both_pairing_code_methods: bool | None = None
     """Whether the client offered both pairing-code methods, recorded for the server to log.
-    The static one is dropped in favor of a usable dynamic one. Not part of the wire schema
-    (omitted when None)."""
+    The static one is dropped in favor of a dynamic one offering digits. Not part of the wire
+    schema (omitted when None)."""
+    ignored_values: list[str] | None = None
+    """Descriptor values this implementation does not recognize, as ``method.field=value``,
+    recorded for the server to log. Not part of the wire schema (omitted when None)."""
 
     class Config(SendspinConfig):
         """Omit methods the client does not offer."""
@@ -265,14 +288,16 @@ class SupportedPairMethods(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Drop unrecognized methods and values, preferring dynamic over static pairing code."""
+        """Drop unrecognized methods and values, preferring dynamic code with digits over static."""
         normalized = {k: v for k, v in d.items() if k in _PAIR_METHOD_VALUE_FILTERS}
         ignored = sorted(set(d) - set(normalized) - _PAIR_METHOD_SIDECARS)
+        ignored_values: list[str] = []
         for key, value_filters in _PAIR_METHOD_VALUE_FILTERS.items():
             descriptor = normalized.get(key)
             if not isinstance(descriptor, dict):
                 continue
-            normalized[key] = _filter_descriptor_values(descriptor, value_filters)
+            normalized[key], dropped = _filter_descriptor_values(descriptor, value_filters)
+            ignored_values.extend(f"{key}.{field}={value}" for field, value in dropped)
         both = (
             PairMethod.STATIC_PAIRING_CODE.value in normalized
             and PairMethod.DYNAMIC_PAIRING_CODE.value in normalized
@@ -281,17 +306,22 @@ class SupportedPairMethods(SendspinModel):
         unusable = isinstance(dynamic, dict) and not (
             dynamic.get("formats") and dynamic.get("out_channels")
         )
+        # Every server can enter a digits code, but only some can scan a QR code.
+        offers_digits = isinstance(dynamic, dict) and PairingCodeFormat.DIGITS.value in (
+            dynamic.get("formats") or ()
+        )
         if unusable:
             del normalized[PairMethod.DYNAMIC_PAIRING_CODE.value]
-        elif both:
+        elif both and offers_digits:
             del normalized[PairMethod.STATIC_PAIRING_CODE.value]
         # Always overwrite so a client cannot spoof the records via the wire.
         normalized["ignored_methods"] = ignored or None
+        normalized["ignored_values"] = ignored_values or None
         normalized["unusable_methods"] = (
             [PairMethod.DYNAMIC_PAIRING_CODE.value] if unusable else None
         )
         normalized["offered_both_pairing_code_methods"] = both or None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
 
 assert set(_PAIR_METHOD_VALUE_FILTERS) <= {f.name for f in fields(SupportedPairMethods)}
@@ -362,6 +392,12 @@ class ClientHelloPayload(SendspinModel):
     legacy_pin_methods_used: bool | None = None
     """Whether supported_pair_methods named the pre-rename PIN methods, recorded for the
     server to pair over the PIN wire. Not part of the wire schema (omitted when None)."""
+    malformed_pair_method_descriptor: bool | None = None
+    """Whether a recognized pair method's descriptor had the wrong shape, recorded for the
+    server to flag. Not part of the wire schema (omitted when None)."""
+    unpaired_access_incomplete: bool | None = None
+    """Whether unpaired_access or its enabled field was omitted, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -401,7 +437,19 @@ class ClientHelloPayload(SendspinModel):
         normalized["trust_level_used"] = "trust_level" in normalized or None
         # Always overwrite so a client cannot spoof the record via the wire.
         normalized["legacy_support_keys_used"] = legacy_keys or None
-        return normalized
+        normalized["malformed_pair_method_descriptor"] = (
+            isinstance(pair_methods, dict)
+            and any(
+                _is_malformed_descriptor(method, descriptor)
+                for method, descriptor in pair_methods.items()
+                if method in _PAIR_METHOD_VALUE_FILTERS and isinstance(descriptor, dict)
+            )
+        ) or None
+        unpaired_access = normalized.get("unpaired_access")
+        normalized["unpaired_access_incomplete"] = (
+            not isinstance(unpaired_access, dict) or "enabled" not in unpaired_access
+        ) or None
+        return super().__pre_deserialize__(normalized)
 
     def __post_init__(self) -> None:
         """Match support configs to supported roles, recording each mismatch."""
@@ -505,6 +553,7 @@ class ClientStatePayload(SendspinModel):
     """
     player: PlayerStatePayload | None = None
     """Player state - only if client has player role."""
+    # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
     legacy_state_used: bool | None = None
     """Set when the parser read a legacy top-level `state` field, recorded for the server
     to flag. Not part of the wire schema (omitted when None)."""
@@ -524,12 +573,13 @@ class ClientStatePayload(SendspinModel):
         Application-specific role objects are nested under `application_objects`.
         """
         d = collect_application_objects(d)
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         legacy_state = "state" in d
         if d.get("available") is None and legacy_state:
             d["available"] = d["state"] != "external_source"
         # Always overwrite so a client cannot spoof the record via the wire.
         d["legacy_state_used"] = legacy_state or None
-        return d
+        return super().__pre_deserialize__(d)
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -558,11 +608,24 @@ class ClientCommandPayload(SendspinModel):
     """Controller commands - only if client has controller role."""
     application_objects: dict[str, Any] = field(default_factory=dict)
     """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+    unrecognized_command_used: bool | None = None
+    """Whether the controller object named an unrecognized command, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Nest application-specific role objects under `application_objects`."""
-        return collect_application_objects(d)
+        """Drop a controller object with an unrecognized command, and nest application objects."""
+        controller = d.get("controller")
+        unrecognized = isinstance(controller, dict) and is_unknown_enum_value(
+            controller.get("command"), MediaCommand
+        )
+        normalized = {k: v for k, v in d.items() if k != "controller"} if unrecognized else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return super().__pre_deserialize__(
+            collect_application_objects(
+                normalized | {"unrecognized_command_used": unrecognized or None}
+            )
+        )
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -603,7 +666,7 @@ class ClientGoodbyePayload(SendspinModel):
         normalized = d | {"unrecognized_reason": reason if unrecognized else None}
         if unrecognized:
             normalized["reason"] = None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -621,10 +684,34 @@ class ClientGoodbyeMessage(ClientMessage):
 
 # Client -> Server: client/leave
 @dataclass
+class ClientLeavePayload(SendspinModel):
+    """Empty ``client/leave`` payload."""
+
+
+@dataclass
 class ClientLeaveMessage(ClientMessage):
     """Message sent by the client to leave its current group."""
 
+    payload: ClientLeavePayload = field(default_factory=ClientLeavePayload)
     type: Literal["client/leave"] = "client/leave"
+    payload_missing: bool | None = None
+    """Set when the message carried no payload object, recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a payload that is not an object, recording that it was missing."""
+        payload_missing = not isinstance(d.get("payload"), dict)
+        normalized = {k: v for k, v in d.items() if k != "payload"} if payload_missing else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return super().__pre_deserialize__(
+            normalized | {"payload_missing": payload_missing or None}
+        )
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
 
 
 # Server -> Client: server/hello
@@ -752,7 +839,7 @@ class ServerActivatePayload(SendspinModel):
             normalized["activities"] = activities
         # Always overwrite so a server cannot spoof the record via the wire.
         normalized["ignored_activities"] = ignored or None
-        return normalized
+        return super().__pre_deserialize__(normalized)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -868,7 +955,7 @@ class ServerStatePayload(SendspinModel):
         if null_roles := sorted(key for key, value in d.items() if value is None):
             msg = f"server/state role objects must not be null, got {null_roles}"
             raise ValueError(msg)
-        return collect_application_objects(d)
+        return super().__pre_deserialize__(collect_application_objects(d))
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -960,8 +1047,10 @@ class GroupUpdateServerPayload(SendspinModel):
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Drop a playback state this implementation does not recognize."""
         if is_unknown_enum_value(d.get("playback_state"), PlaybackStateType):
-            return {k: v for k, v in d.items() if k != "playback_state"}
-        return d
+            return super().__pre_deserialize__(
+                {k: v for k, v in d.items() if k != "playback_state"}
+            )
+        return super().__pre_deserialize__(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
@@ -1000,7 +1089,7 @@ class ServerCommandPayload(SendspinModel):
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Nest application-specific role objects under `application_objects`."""
-        return collect_application_objects(d)
+        return super().__pre_deserialize__(collect_application_objects(d))
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
@@ -1091,7 +1180,7 @@ class StreamStartPayload(SendspinModel):
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
         """Nest application-specific role objects under `application_objects`."""
-        return collect_application_objects(d)
+        return super().__pre_deserialize__(collect_application_objects(d))
 
     def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
         """Send application-specific role objects as top-level payload keys."""
