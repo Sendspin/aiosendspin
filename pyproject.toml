@@ -57,7 +57,7 @@ dev = [
   "pytest-timeout==2.4.0",
   "pytest-xdist==3.8.0",
   "tomli==2.5.0",
-  "ruff==0.17.0",
+  "ruff==0.17.2",
 ]
 
 [tool.setuptools.packages.find]
