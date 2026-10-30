@@ -13,6 +13,10 @@ if sys.platform == "linux" and hasattr(time, "CLOCK_MONOTONIC_RAW"):
 
     def _raw_now_us() -> int:
         return time.clock_gettime_ns(_RAW_CLOCK_ID) // 1_000
+elif sys.platform == "win32":
+    # Before Python 3.13, time.monotonic on Windows ticks only every ~15.6 ms.
+    def _raw_now_us() -> int:
+        return time.perf_counter_ns() // 1_000
 else:
 
     def _raw_now_us() -> int:
@@ -28,7 +32,7 @@ class Clock(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RawMonotonicClock:
-    """Clock backed by CLOCK_MONOTONIC_RAW on Linux, monotonic elsewhere.
+    """Clock backed by CLOCK_MONOTONIC_RAW on Linux, perf_counter on Windows, monotonic elsewhere.
 
     Unlike CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW is not slewed by NTP/adjtime,
     so elapsed-microsecond measurements reflect hardware ticks. This matters
