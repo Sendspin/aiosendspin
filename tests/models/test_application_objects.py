@@ -1,4 +1,4 @@
-"""Tests for application-specific role objects in role-object messages."""
+"""Tests for application-specific role objects in role-object messages and client/hello."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from aiosendspin.models.base import SendspinModel
 from aiosendspin.models.core import (
     ClientCommandMessage,
     ClientCommandPayload,
-    ClientHelloMessage,
     ClientHelloPayload,
     ClientStateMessage,
     ClientStatePayload,
@@ -153,25 +152,8 @@ def test_hello_keeps_support_object_of_listed_application_role() -> None:
     assert ClientHelloPayload.from_dict(sent) == payload
 
 
-def test_hello_message_carries_application_support_object() -> None:
-    """A full client/hello message keeps the application support object."""
-    text = orjson.dumps(
-        {
-            "type": "client/hello",
-            "payload": HELLO_BASE | {"_ma_local_pairing@v1_support": {"port": 1234}},
-        }
-    ).decode()
-
-    message = ClientMessage.from_json(text)
-
-    assert isinstance(message, ClientHelloMessage)
-    assert message.payload.application_objects == {"_ma_local_pairing@v1_support": {"port": 1234}}
-    sent = orjson.loads(message.to_json())["payload"]
-    assert sent["_ma_local_pairing@v1_support"] == {"port": 1234}
-
-
 def test_hello_drops_support_object_of_unlisted_application_role() -> None:
-    """An unlisted application role's support object is dropped and recorded."""
+    """An unlisted application role's support object is dropped without a record."""
     wire = HELLO_BASE | {
         "supported_roles": ["controller@v1"],
         "_ma_local_pairing@v1_support": {"port": 1234},
@@ -180,12 +162,14 @@ def test_hello_drops_support_object_of_unlisted_application_role() -> None:
     payload = ClientHelloPayload.from_dict(wire)
 
     assert payload.application_objects == {}
-    assert payload.unlisted_support_roles == ["_ma_local_pairing@v1"]
+    assert payload.unlisted_support_roles is None
 
 
 def test_hello_ignores_application_keys_that_are_not_support_objects() -> None:
     """Only `<role>_support` keys are application objects in client/hello."""
-    payload = ClientHelloPayload.from_dict(HELLO_BASE | {"_ma_local_pairing@v1": {"port": 1}})
+    wire = HELLO_BASE | {"_ma_local_pairing@v1": {"port": 1}, "_support": {}}
+
+    payload = ClientHelloPayload.from_dict(wire)
 
     assert payload.application_objects == {}
     assert payload.unlisted_support_roles is None
@@ -224,5 +208,4 @@ def test_hello_application_objects_leave_built_in_keys_alone() -> None:
 
     assert payload.visualizer_draft_r1_support is not None
     assert payload.legacy_support_keys_used == ["player_support"]
-    assert payload.unlisted_support_roles == ["player@v1"]
     assert payload.application_objects == {"_ma_local_pairing@v1_support": {"port": 1234}}

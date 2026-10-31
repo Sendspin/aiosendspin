@@ -503,17 +503,13 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append(Roles.SOURCE.value)
             self.source_support = None
 
-        # client/hello admits only support objects of listed application-specific roles.
-        kept: dict[str, Any] = {}
-        for key, value in self.application_objects.items():
-            role = key.removesuffix("_support")
-            if role == key:
-                continue
-            if role in self.supported_roles:
-                kept[key] = value
-            else:
-                unlisted.append(role)
-        self.application_objects = kept
+        # Keep only support objects of listed roles. The rest go unrecorded: the library
+        # does not implement these roles, so it leaves compliance to the application.
+        self.application_objects = {
+            key: value
+            for key, value in self.application_objects.items()
+            if key.endswith("_support") and key.removesuffix("_support") in self.supported_roles
+        }
 
         # Overwrite so a client cannot spoof the records via the wire.
         self.unlisted_support_roles = unlisted or None
