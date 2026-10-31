@@ -4732,3 +4732,80 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
             f"timestamps out of order across format change: "
             f"{prev.timestamp_us} -> {nxt.timestamp_us}"
         )
+
+
+def _pcm_passthrough_role(group: _DummyGroup) -> _DummyRole:
+    transformer = group.transformer_pool.get_or_create(
+        PcmPassthrough,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=25_000,
+    )
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+    return role
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_delivers_partial_tail_frame(mock_loop: Any) -> None:
+    """flush_audio() sends the end of the input that does not fill a whole frame."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 1500 frames: one full 25 ms frame (1200) plus a 300-frame tail.
+    pcm = bytes(range(256)) * 23 + bytes(range(112))
+    assert len(pcm) == 6000
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    assert len(role.received) == 1
+
+    await stream.flush_audio()
+
+    assert len(role.received) == 2
+    first, tail = role.received
+    assert tail.timestamp_us == first.timestamp_us + first.duration_us
+    assert first.data + tail.data[:1200] == pcm
+    assert tail.data[1200:] == bytes(len(tail.data) - 1200)
+    cached = stream._role_chunk_cache  # noqa: SLF001
+    assert sum(len(chunks) for chunks in cached.values()) == 2
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_without_buffered_audio_sends_nothing(mock_loop: Any) -> None:
+    """flush_audio() is a no-op when the input ended on a frame boundary."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_after_stop_sends_nothing(mock_loop: Any) -> None:
+    """stop() discards the buffered tail, so a later flush_audio() delivers nothing."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    stream.stop()
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
