@@ -31,7 +31,7 @@ from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from collections.abc import Set as AbstractSet
 
     import av
@@ -1780,7 +1780,7 @@ class PushStream:
                 )
         return transformed
 
-    async def _transform_and_deliver(  # noqa: PLR0915
+    async def _transform_and_deliver(
         self,
         roles_by_pcm: dict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
@@ -1876,6 +1876,14 @@ class PushStream:
             if not self._is_generation_active(commit_generation):
                 return {}
 
+        return self._cache_and_deliver(transformed, roles_by_transform)
+
+    def _cache_and_deliver(
+        self,
+        transformed: dict[TransformKey, list[tuple[bytes, int, int]]],
+        roles_by_transform: Mapping[TransformKey, list[Role]],
+    ) -> dict[TransformKey, list[CachedChunk]]:
+        """Deliver encoded frames to their roles and return them for the late-join cache."""
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
         active_roles = {role for _client, role in self._get_audio_roles()}
         joining_keys = {
@@ -2826,6 +2834,70 @@ class PushStream:
         self._catchup_tasks.clear()
         self._catchup_state.clear()
         self._catchup_roles.clear()
+
+    async def flush_audio(self) -> None:
+        """
+        Deliver audio still buffered in the encoders after the final commit.
+
+        Encoders emit fixed-duration frames, so the end of the input stays buffered
+        until more audio arrives. When a stream ends naturally, call this once after
+        the last commit_audio() and before waiting for players to drain and calling
+        stop(), so players receive the end of the audio. The last frame is padded
+        with silence. stop() and clear() discard the buffered audio instead.
+
+        Does nothing if the stream is stopped.
+        """
+        if self._is_stopped:
+            return
+        flush_generation = self._stream_generation
+
+        async with self._commit_dsp_lock:
+            if not self._is_generation_active(flush_generation):
+                return
+            transformers: dict[TransformKey, AudioTransformer] = {}
+            roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
+            for _client, role in self._get_audio_roles():
+                req = role.get_audio_requirements()
+                if req is None or req.transformer is None:
+                    continue
+                tkey = self._build_transform_key(req, req.channel_id or MAIN_CHANNEL, role)
+                if self._catchup_state.get(tkey) == "catching_up":
+                    continue
+                roles_by_transform[tkey].append(role)
+                transformers.setdefault(tkey, req.transformer)
+            if not transformers:
+                return
+
+            flushed = await _run_off_loop(self._flush_transforms, transformers, flush_generation)
+            if not self._is_generation_active(flush_generation):
+                return
+            for cache_key, chunks in self._cache_and_deliver(flushed, roles_by_transform).items():
+                self._role_chunk_cache[cache_key].extend(chunks)
+            self._prune_role_chunk_cache()
+
+    def _flush_transforms(
+        self,
+        transformers: Mapping[TransformKey, AudioTransformer],
+        flush_generation: int,
+    ) -> dict[TransformKey, list[tuple[bytes, int, int]]]:
+        """Flush every transformer and timestamp its tail frames. Runs on a worker thread."""
+        flushed: dict[TransformKey, list[tuple[bytes, int, int]]] = {}
+        with self._transformer_lock:
+            if not self._is_generation_active(flush_generation):
+                return flushed
+            for tkey, transformer in transformers.items():
+                # The tail continues the transformer's own timeline.
+                pending_us = transformer.pending_timestamp_us
+                frames = transformer.flush()
+                if not frames or pending_us is None:
+                    continue
+                ts = pending_us + self._transform_ts_offset_us.get(tkey, 0)
+                tail: list[tuple[bytes, int, int]] = []
+                for data, dur in frames:
+                    tail.append((data, ts, dur))
+                    ts += dur
+                flushed[tkey] = tail
+        return flushed
 
     def stop(self, *, keep_stream: bool = False) -> None:
         """
