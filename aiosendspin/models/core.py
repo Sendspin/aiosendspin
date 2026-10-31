@@ -398,6 +398,9 @@ class ClientHelloPayload(SendspinModel):
     unpaired_access_incomplete: bool | None = None
     """Whether unpaired_access or its enabled field was omitted, recorded for the server to
     flag. Not part of the wire schema (omitted when None)."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Support objects of application-specific roles, keyed by their `_`-prefixed wire key
+    (e.g. `_myapp_display@v1_support`)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
@@ -410,8 +413,11 @@ class ClientHelloPayload(SendspinModel):
 
     @classmethod
     def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
-        """Rewrite legacy unversioned support keys to versioned aliases, recording which."""
-        normalized = dict(d)
+        """Rewrite legacy unversioned support keys to versioned aliases, recording which.
+
+        Application-specific role objects are nested under `application_objects`.
+        """
+        normalized = collect_application_objects(d)
         legacy_keys: list[str] = []
         for legacy_key, versioned_key in cls._SUPPORT_KEY_ALIASES.items():
             if legacy_key not in normalized:
@@ -497,6 +503,14 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append(Roles.SOURCE.value)
             self.source_support = None
 
+        # Keep only support objects of listed roles. The rest go unrecorded: the library
+        # does not implement these roles, so it leaves compliance to the application.
+        self.application_objects = {
+            key: value
+            for key, value in self.application_objects.items()
+            if key.endswith("_support") and key.removesuffix("_support") in self.supported_roles
+        }
+
         # Overwrite so a client cannot spoof the records via the wire.
         self.unlisted_support_roles = unlisted or None
         self.missing_support_roles = missing or None
@@ -506,6 +520,10 @@ class ClientHelloPayload(SendspinModel):
         """Listed role versions, in client order, less those missing their support object."""
         missing = self.missing_support_roles or ()
         return [role for role in self.supported_roles if role not in missing]
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""
