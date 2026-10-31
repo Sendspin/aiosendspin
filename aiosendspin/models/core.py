@@ -395,12 +395,12 @@ class ClientHelloPayload(SendspinModel):
     malformed_pair_method_descriptor: bool | None = None
     """Whether a recognized pair method's descriptor had the wrong shape, recorded for the
     server to flag. Not part of the wire schema (omitted when None)."""
-    application_objects: dict[str, Any] = field(default_factory=dict)
-    """Support objects of application-specific roles, keyed by their `_`-prefixed wire key
-    (e.g. `_myapp_display@v1_support`)."""
     unpaired_access_incomplete: bool | None = None
     """Whether unpaired_access or its enabled field was omitted, recorded for the server to
     flag. Not part of the wire schema (omitted when None)."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Support objects of application-specific roles, keyed by their `_`-prefixed wire key
+    (e.g. `_myapp_display@v1_support`)."""
 
     # Static mapping: unversioned support key -> actual alias key.
     _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
