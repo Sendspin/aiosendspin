@@ -4809,3 +4809,89 @@ async def test_flush_audio_after_stop_sends_nothing(mock_loop: Any) -> None:
     await stream.flush_audio()
 
     assert len(role.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail(mock_loop: Any) -> None:
+    """flush_audio() also delivers the samples a resampler still holds back."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms at 44.1 kHz resampled to the role's 48 kHz: 4800 output frames.
+    pcm = b"\x00\x10" * 2 * 4410
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    committed_frames = sum(len(chunk.data) for chunk in role.received) // 4
+    assert committed_frames < 4800
+
+    await stream.flush_audio()
+
+    data = b"".join(chunk.data for chunk in role.received)
+    frames = [data[i : i + 4] for i in range(0, len(data), 4)]
+    last_signal_frame = max(
+        i for i, frame in enumerate(frames) if int.from_bytes(frame[:2], "little") > 64
+    )
+    # Without draining the resampler, its filter tail (about 17 frames here) is replaced
+    # by the silence padding the final frame.
+    assert last_signal_frame >= 4795
+    for prev, nxt in pairwise(role.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_defers_joins_until_tail_is_cached(mock_loop: Any) -> None:
+    """A player joining while the tail is being flushed still receives the tail."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    loop = asyncio.get_running_loop()
+    flushing = asyncio.Event()
+    gate = threading.Event()
+    flush_pipelines = stream._flush_pipelines  # noqa: SLF001
+
+    def gated_flush_pipelines(*args: Any) -> Any:
+        loop.call_soon_threadsafe(flushing.set)
+        gate.wait(5)
+        return flush_pipelines(*args)
+
+    stream._flush_pipelines = gated_flush_pipelines  # type: ignore[method-assign]  # noqa: SLF001
+    flush_task = asyncio.create_task(stream.flush_audio())
+    await asyncio.wait_for(flushing.wait(), 5)
+
+    joiner = _pcm_passthrough_role(group)
+    stream.on_role_join(joiner)
+    assert joiner.received == []
+
+    gate.set()
+    await flush_task
+
+    assert len(role.received) == 2
+    assert [chunk.data for chunk in joiner.received] == [chunk.data for chunk in role.received]
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_caches_tail_for_warm_reattached_player(mock_loop: Any) -> None:
+    """A reattached player waiting for its initial state gets the tail in its replay cache."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    client = group.clients[0]
+    client.is_connected = False
+    client.has_warm_disconnected_roles = False  # type: ignore[attr-defined]
+    client.has_cold_preinitialized_roles = False  # type: ignore[attr-defined]
+    client.has_warm_reattached_roles = True
+
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+    cached = stream._role_chunk_cache  # noqa: SLF001
+    assert sum(len(chunks) for chunks in cached.values()) == 2
