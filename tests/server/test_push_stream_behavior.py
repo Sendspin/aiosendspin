@@ -4139,6 +4139,50 @@ async def test_explicit_play_start_us_overrides_stale_channel_timing() -> None:
     assert stream._channel_timing[MAIN_CHANNEL] == expected_after_advance  # noqa: SLF001
 
 
+def _indexed_pcm(first_index: int, frames: int) -> bytes:
+    """Return s16 stereo PCM whose left sample holds each frame's index."""
+    return b"".join(
+        (first_index + i).to_bytes(2, "little", signed=True) + bytes(2) for i in range(frames)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_start_us", "expected_indices"),
+    [
+        pytest.param(10_020_000 - 1, [*range(1920)], id="within_tolerance_continues"),
+        # 5 ms early = 240 consumed frames; the rest of the chunk is kept.
+        pytest.param(10_015_000, [*range(960), *range(1200, 1920)], id="overlap_skips_head"),
+        pytest.param(10_000_000, [*range(960)], id="fully_consumed_dropped"),
+    ],
+)
+async def test_explicit_commit_overlapping_cursor(
+    second_start_us: int, expected_indices: list[int]
+) -> None:
+    """An explicit start before the cursor only drops audio that was already consumed."""
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(
+        loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=1_000_000), group=group
+    )
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    for first_index, start_us in ((0, 10_000_000), (960, second_start_us)):
+        stream.prepare_audio(_indexed_pcm(first_index, 960), fmt)
+        await stream.commit_audio(play_start_us=start_us)
+    stream.stop()
+
+    received = sorted(role.received, key=lambda c: c.timestamp_us)
+    data = b"".join(c.data for c in received)
+    indices = [
+        int.from_bytes(data[i : i + 2], "little", signed=True) for i in range(0, len(data), 4)
+    ]
+    assert indices == expected_indices
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
 @pytest.mark.asyncio
 async def test_send_ahead_uses_largest_member_budget() -> None:
     """Live grouped players use a common floor: max(lead, min_buffer) + static across members."""

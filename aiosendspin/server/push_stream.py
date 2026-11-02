@@ -424,6 +424,31 @@ def _create_resampler_state(
     )
 
 
+def _unconsumed_input(
+    resampler_state: _ResamplerState,
+    source_pcm: bytes,
+    source_format: AudioFormat,
+    input_timestamp_us: int,
+) -> tuple[bytes, int] | None:
+    """Return the input past the resampler's cursor, or None if it was already consumed."""
+    cursor_us = resampler_state.pending_input_timestamp_us
+    # Within the jump tolerance the resampler continues its timeline, so nothing is consumed yet.
+    if cursor_us is None or cursor_us - input_timestamp_us <= _TIMELINE_JUMP_TOLERANCE_US:
+        return source_pcm, input_timestamp_us
+    sample_rate = source_format.sample_rate
+    frame_stride = source_format.bit_depth // 8 * source_format.channels
+    frames = len(source_pcm) // frame_stride
+    input_end_us = input_timestamp_us + frames * 1_000_000 // sample_rate
+    if input_end_us - cursor_us <= _TIMELINE_JUMP_TOLERANCE_US:
+        return None
+    # Round up so no kept frame starts before the cursor.
+    skip = -((input_timestamp_us - cursor_us) * sample_rate // 1_000_000)
+    return (
+        source_pcm[skip * frame_stride :],
+        input_timestamp_us + skip * 1_000_000 // sample_rate,
+    )
+
+
 def _resample_pcm_standalone(
     resampler_state: _ResamplerState,
     source_pcm: bytes,
@@ -1635,14 +1660,10 @@ class PushStream:
             if state is None:
                 state = _create_resampler_state(resampler_key, source_format, target_format)
                 self._cache_resampler(state)
-            elif (
-                state.pending_input_timestamp_us is not None
-                and state.pending_input_timestamp_us > input_timestamp_us
-            ):
-                # Resampler already consumed this chunk (e.g. catch-up task
-                # pre-processed the PCM cache and promoted the warmed graph).
-                # Re-pushing the same input would duplicate samples in the
-                # encoder buffer and shift content vs labels. Emit no output.
+            # A catch-up hand-off may have consumed this input already; re-pushing it
+            # would duplicate samples and shift content vs labels.
+            unconsumed = _unconsumed_input(state, source_pcm, source_format, input_timestamp_us)
+            if unconsumed is None:
                 empty = _ResampledPCM(
                     pcm_data=b"",
                     output_start_ts=state.pending_timestamp_us or input_timestamp_us,
@@ -1653,9 +1674,10 @@ class PushStream:
                 shared_results_by_resampler[resampler_key] = empty
                 results[pcm_key] = empty
                 continue
+            unconsumed_pcm, unconsumed_ts = unconsumed
 
             resampled = await _run_off_loop(
-                _resample_pcm_standalone, state, source_pcm, source_format, input_timestamp_us
+                _resample_pcm_standalone, state, unconsumed_pcm, source_format, unconsumed_ts
             )
             if not self._is_generation_active(commit_generation):
                 # clear() emptied the cache while we were off-loop; do not repopulate it.
@@ -2468,19 +2490,20 @@ class PushStream:
                     target_format,
                 )
                 resamplers[current_resampler_key] = resampler_state
-            elif (
-                resampler_state.pending_input_timestamp_us is not None
-                and resampler_state.pending_input_timestamp_us > chunk.timestamp_us
-            ):
-                # Drop a chunk starting before the input already consumed, like live delivery.
+            # Skip input the resampler already consumed, like live delivery.
+            unconsumed = _unconsumed_input(
+                resampler_state, chunk.pcm_data, source_format, chunk.timestamp_us
+            )
+            if unconsumed is None:
                 continue
+            unconsumed_pcm, unconsumed_ts = unconsumed
             prev_resampler_key = current_resampler_key
 
             resampled = _resample_pcm_standalone(
                 resampler_state,
-                chunk.pcm_data,
+                unconsumed_pcm,
                 source_format,
-                chunk.timestamp_us,
+                unconsumed_ts,
             )
             if not resampled.pcm_data:
                 continue
