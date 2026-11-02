@@ -2928,6 +2928,7 @@ class PushStream:
         a later commit starts a fresh one.
         """
         groups: dict[tuple[UUID, int, int, int], _FlushGroup] = {}
+        detached: dict[_ResamplerKey, _ResamplerState] = {}
         roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
         # Reattached roles are flushed without delivery, so their late-join replay has the tail.
         for _client, role in [*self._get_audio_roles(), *self._get_warm_reattached_audio_roles()]:
@@ -2947,15 +2948,22 @@ class PushStream:
                     sample_rate=req.sample_rate,
                     bit_depth=req.bit_depth,
                     channels=req.channels,
-                    resampler=self._detach_resampler_for_flush(channel_id, req),
+                    resampler=self._detach_resampler_for_flush(channel_id, req, detached),
                 )
             group.transformers.setdefault(tkey, req.transformer)
         return list(groups.values()), roles_by_transform
 
     def _detach_resampler_for_flush(
-        self, channel_id: UUID, req: AudioRequirements
+        self,
+        channel_id: UUID,
+        req: AudioRequirements,
+        detached: dict[_ResamplerKey, _ResamplerState],
     ) -> _ResamplerState | None:
-        """Remove and return the live resampler feeding `req`, if it holds back audio."""
+        """Remove and return the live resampler feeding `req`, if it holds back audio.
+
+        Float sources share one resampler across bit depths, so `detached` keeps the
+        ones already removed for earlier groups.
+        """
         source_format = self._channel_committed_format.get(channel_id)
         if source_format is None:
             return None
@@ -2973,10 +2981,13 @@ class PushStream:
             target_bit_depth=target_format.bit_depth,
             target_sample_type=target_format.sample_type,
         )
+        if key in detached:
+            return detached[key]
         state = self._resamplers.get(key)
         if state is None or state.is_passthrough or state.graph is None:
             return None
         del self._resamplers[key]
+        detached[key] = state
         return state
 
     def _flush_pipelines(
@@ -2986,14 +2997,18 @@ class PushStream:
     ) -> dict[TransformKey, list[tuple[bytes, int, int]]]:
         """Drain each resampler into its encoders, then flush the encoders. Worker thread."""
         flushed: defaultdict[TransformKey, list[tuple[bytes, int, int]]] = defaultdict(list)
+        drained_by_resampler: dict[_ResamplerKey, _ResampledPCM] = {}
         with self._transformer_lock:
             if not self._is_generation_active(flush_generation):
                 return {}
             for group in groups:
                 tail = None
                 if group.resampler is not None:
+                    resampler_key = group.resampler.key
+                    if resampler_key not in drained_by_resampler:
+                        drained_by_resampler[resampler_key] = _flush_resampler(group.resampler)
                     tail = _trim_and_quantize_tail(
-                        _flush_resampler(group.resampler),
+                        drained_by_resampler[resampler_key],
                         group.resampler.target_av_frame_stride,
                         self._resamplers,
                         channel_id=group.channel_id,

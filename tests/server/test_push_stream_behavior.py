@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 import sys
 import threading
 from collections import deque
@@ -4734,19 +4735,19 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
         )
 
 
-def _pcm_passthrough_role(group: _DummyGroup) -> _DummyRole:
+def _pcm_passthrough_role(group: _DummyGroup, bit_depth: int = 16) -> _DummyRole:
     transformer = group.transformer_pool.get_or_create(
         PcmPassthrough,
         channel_id=MAIN_CHANNEL.int,
         sample_rate=48000,
-        bit_depth=16,
+        bit_depth=bit_depth,
         channels=2,
         frame_duration_us=25_000,
     )
     role = _DummyRole(
         AudioRequirements(
             sample_rate=48000,
-            bit_depth=16,
+            bit_depth=bit_depth,
             channels=2,
             transformer=transformer,
             channel_id=MAIN_CHANNEL,
@@ -4837,6 +4838,34 @@ async def test_flush_audio_drains_resampler_tail(mock_loop: Any) -> None:
     assert last_signal_frame >= 4795
     for prev, nxt in pairwise(role.received):
         assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_shared_resampler_for_each_bit_depth(mock_loop: Any) -> None:
+    """Players at different bit depths sharing a float resampler all get its tail."""
+    group = _DummyGroup(clients=[])
+    role_16 = _pcm_passthrough_role(group, bit_depth=16)
+    role_24 = _pcm_passthrough_role(group, bit_depth=24)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms of float32 at 44.1 kHz resampled to the roles' 48 kHz: 4800 output frames.
+    pcm = struct.pack("<f", 0.125) * 2 * 4410
+    stream.prepare_audio(
+        pcm, AudioFormat(sample_rate=44100, bit_depth=32, channels=2, sample_type="float")
+    )
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    for role, sample_bytes in ((role_16, 2), (role_24, 3)):
+        data = b"".join(chunk.data for chunk in role.received)
+        frame_bytes = 2 * sample_bytes
+        last_signal_frame = max(
+            i // frame_bytes
+            for i in range(0, len(data), frame_bytes)
+            if int.from_bytes(data[i : i + sample_bytes], "little", signed=True)
+            > 1 << (8 * sample_bytes - 5)
+        )
+        assert last_signal_frame >= 4795
 
 
 @pytest.mark.asyncio
