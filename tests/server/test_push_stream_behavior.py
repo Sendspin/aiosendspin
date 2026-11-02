@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 import sys
 import threading
 from collections import deque
@@ -14,6 +15,7 @@ from uuid import UUID
 
 import pytest
 
+from aiosendspin.audio.codecs import create_decoder
 from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
@@ -725,9 +727,9 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
 async def test_stop_resets_transformers_without_delivering_tail_frames(mock_loop: Any) -> None:
     """stop() resets transformers but never delivers flushed tail frames.
 
-    Flushed frames carry timestamp_us=0, which has no scheduling
-    semantics, so emitting them would only pollute the client's
-    buffer tracker without serving any playback purpose.
+    flush_audio() delivers the tail while it can still play, so
+    emitting it here would only pollute the client's buffer tracker
+    without serving any playback purpose.
     """
     reset_calls = 0
 
@@ -4732,3 +4734,269 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
             f"timestamps out of order across format change: "
             f"{prev.timestamp_us} -> {nxt.timestamp_us}"
         )
+
+
+def _pcm_passthrough_role(group: _DummyGroup, bit_depth: int = 16) -> _DummyRole:
+    transformer = group.transformer_pool.get_or_create(
+        PcmPassthrough,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=48000,
+        bit_depth=bit_depth,
+        channels=2,
+        frame_duration_us=25_000,
+    )
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=bit_depth,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+    return role
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_delivers_partial_tail_frame(mock_loop: Any) -> None:
+    """flush_audio() sends the end of the input that does not fill a whole frame."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 1500 frames: one full 25 ms frame (1200) plus a 300-frame tail.
+    pcm = bytes(range(256)) * 23 + bytes(range(112))
+    assert len(pcm) == 6000
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    assert len(role.received) == 1
+
+    await stream.flush_audio()
+
+    assert len(role.received) == 2
+    first, tail = role.received
+    assert tail.timestamp_us == first.timestamp_us + first.duration_us
+    assert first.data + tail.data[:1200] == pcm
+    assert tail.data[1200:] == bytes(len(tail.data) - 1200)
+    cached = stream._role_chunk_cache  # noqa: SLF001
+    assert sum(len(chunks) for chunks in cached.values()) == 2
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_without_buffered_audio_sends_nothing(mock_loop: Any) -> None:
+    """flush_audio() is a no-op when the input ended on a frame boundary."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_after_stop_sends_nothing(mock_loop: Any) -> None:
+    """stop() discards the buffered tail, so a later flush_audio() delivers nothing."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    stream.stop()
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail(mock_loop: Any) -> None:
+    """flush_audio() also delivers the samples a resampler still holds back."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms at 44.1 kHz resampled to the role's 48 kHz: 4800 output frames.
+    pcm = b"\x00\x10" * 2 * 4410
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    committed_frames = sum(len(chunk.data) for chunk in role.received) // 4
+    assert committed_frames < 4800
+
+    await stream.flush_audio()
+
+    data = b"".join(chunk.data for chunk in role.received)
+    frames = [data[i : i + 4] for i in range(0, len(data), 4)]
+    last_signal_frame = max(
+        i for i, frame in enumerate(frames) if int.from_bytes(frame[:2], "little") > 64
+    )
+    # Without draining the resampler, its filter tail is replaced by the silence padding
+    # the final frame.
+    assert last_signal_frame >= 4795
+    for prev, nxt in pairwise(role.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail_of_historical_audio(mock_loop: Any) -> None:
+    """flush_audio() drains the resampler of a channel that only received historical audio."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms at 44.1 kHz resampled to the role's 48 kHz: 4800 output frames.
+    pcm = b"\x00\x10" * 2 * 4410
+    stream.prepare_historical_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    data = b"".join(chunk.data for chunk in role.received)
+    frames = [data[i : i + 4] for i in range(0, len(data), 4)]
+    last_signal_frame = max(
+        i for i, frame in enumerate(frames) if int.from_bytes(frame[:2], "little") > 64
+    )
+    assert last_signal_frame >= 4795
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_shared_resampler_for_each_bit_depth(mock_loop: Any) -> None:
+    """Players at different bit depths sharing a float resampler all get its tail."""
+    group = _DummyGroup(clients=[])
+    role_16 = _pcm_passthrough_role(group, bit_depth=16)
+    role_24 = _pcm_passthrough_role(group, bit_depth=24)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms of float32 at 44.1 kHz resampled to the roles' 48 kHz: 4800 output frames.
+    pcm = struct.pack("<f", 0.125) * 2 * 4410
+    stream.prepare_audio(
+        pcm, AudioFormat(sample_rate=44100, bit_depth=32, channels=2, sample_type="float")
+    )
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    for role, sample_bytes in ((role_16, 2), (role_24, 3)):
+        data = b"".join(chunk.data for chunk in role.received)
+        frame_bytes = 2 * sample_bytes
+        last_signal_frame = max(
+            i // frame_bytes
+            for i in range(0, len(data), frame_bytes)
+            if int.from_bytes(data[i : i + sample_bytes], "little", signed=True)
+            > 1 << (8 * sample_bytes - 5)
+        )
+        assert last_signal_frame >= 4795
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_delivers_flac_tail_on_every_channel(mock_loop: Any) -> None:
+    """FLAC players on every channel decode the whole input after flush_audio()."""
+    second_channel = UUID("00000000-0000-0000-0000-0000000000a2")
+    group = _DummyGroup(clients=[])
+    players: list[tuple[FlacEncoder, _DummyRole]] = []
+    for channel_id in (MAIN_CHANNEL, second_channel):
+        transformer = group.transformer_pool.get_or_create(
+            FlacEncoder,
+            channel_id=channel_id.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
+        role = _DummyRole(
+            AudioRequirements(
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+                transformer=transformer,
+                channel_id=channel_id,
+                frame_duration_us=25_000,
+            )
+        )
+        players.append((transformer, role))
+    group.clients.append(_DummyClient([role for _, role in players]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # Two full FLAC frames plus a partial one.
+    frame_count = 2 * players[0][0].frame_samples + 1000
+    pcm = (bytes(range(1, 241)) * (frame_count // 60 + 1))[: frame_count * 4]
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(pcm, fmt)
+    stream.prepare_audio(pcm, fmt, channel_id=second_channel)
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    for transformer, role in players:
+        decoder = create_decoder(
+            "flac",
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            codec_header=transformer.get_header(),
+        )
+        decoded = b"".join(decoder.decode(chunk.data) for chunk in role.received)
+        decoded += decoder.flush()
+        assert decoded[: len(pcm)] == pcm
+        assert decoded[len(pcm) :] == bytes(len(decoded) - len(pcm))
+        for prev, nxt in pairwise(role.received):
+            assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_defers_joins_until_tail_is_cached(mock_loop: Any) -> None:
+    """A player joining while the tail is being flushed still receives the tail."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    loop = asyncio.get_running_loop()
+    flushing = asyncio.Event()
+    gate = threading.Event()
+    flush_pipelines = stream._flush_pipelines  # noqa: SLF001
+
+    def gated_flush_pipelines(*args: Any) -> Any:
+        loop.call_soon_threadsafe(flushing.set)
+        gate.wait(5)
+        return flush_pipelines(*args)
+
+    stream._flush_pipelines = gated_flush_pipelines  # type: ignore[method-assign]  # noqa: SLF001
+    flush_task = asyncio.create_task(stream.flush_audio())
+    await asyncio.wait_for(flushing.wait(), 5)
+
+    joiner = _pcm_passthrough_role(group)
+    stream.on_role_join(joiner)
+    assert joiner.received == []
+
+    gate.set()
+    await flush_task
+
+    assert len(role.received) == 2
+    assert [chunk.data for chunk in joiner.received] == [chunk.data for chunk in role.received]
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_caches_tail_for_warm_reattached_player(mock_loop: Any) -> None:
+    """A reattached player waiting for its initial state gets the tail in its replay cache."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    client = group.clients[0]
+    client.is_connected = False
+    client.has_warm_disconnected_roles = False  # type: ignore[attr-defined]
+    client.has_cold_preinitialized_roles = False  # type: ignore[attr-defined]
+    client.has_warm_reattached_roles = True
+
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+    cached = stream._role_chunk_cache  # noqa: SLF001
+    assert sum(len(chunks) for chunks in cached.values()) == 2
