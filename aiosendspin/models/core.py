@@ -211,8 +211,7 @@ def _filter_descriptor_values(
 
 def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
     """Whether a recognized method's descriptor has the wrong shape, before value filtering."""
-    locations = descriptor.get("locations")
-    if locations is not None and not isinstance(locations, list):
+    if "locations" in descriptor and not isinstance(descriptor["locations"], list):
         return True
     if method != PairMethod.DYNAMIC_PAIRING_CODE.value:
         return False
@@ -275,8 +274,8 @@ class SupportedPairMethods(SendspinModel):
     for the server to log. Not part of the wire schema (omitted when None)."""
     offered_both_pairing_code_methods: bool | None = None
     """Whether the client offered both pairing-code methods, recorded for the server to log.
-    The static one is dropped in favor of a dynamic one offering digits. Not part of the wire
-    schema (omitted when None)."""
+    The static one is dropped in favor of a dynamic one offering digits, but stays usable.
+    Not part of the wire schema (omitted when None)."""
     ignored_values: list[str] | None = None
     """Descriptor values this implementation does not recognize, as ``method.field=value``,
     recorded for the server to log. Not part of the wire schema (omitted when None)."""

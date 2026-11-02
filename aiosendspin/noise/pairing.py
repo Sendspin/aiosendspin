@@ -72,8 +72,12 @@ _SERVER_FINALIZE_TIMEOUT_S: float = 30.0
 SERVER_ATTEMPT_TIMEOUT_S: float = 180.0
 SERVER_FIRST_MESSAGE_TIMEOUT_S: float = 60.0
 SERVER_GESTURE_TIMEOUT_S: float = 360.0
-# Longest client/pair-pending message handed to on_pair_pending; longer ones are truncated.
+# Longest client/pair-pending message in UTF-8 bytes. Longer ones are truncated.
 PAIR_PENDING_MESSAGE_MAX_LEN = 200
+# A client sends these only after its attempt's first message, so earlier ones are leftovers.
+_LEFTOVER_ABORT_REASONS = frozenset(
+    {PairAbortReason.ATTEMPT_TIMEOUT, PairAbortReason.PAIRING_CODE_MISMATCH}
+)
 
 
 class PairingError(Exception):
@@ -147,7 +151,7 @@ class PairingAttempt:
     """Called when the client reports the attempt gesture-gated or held back.
 
     Receives the client's operator message, truncated to ``PAIR_PENDING_MESSAGE_MAX_LEN``
-    characters, or ``None`` when it sent none.
+    bytes in UTF-8, or ``None`` when it sent none.
     """
     owner: str | None = None
     """Application-defined authorization id the resulting record is bound to."""
@@ -236,9 +240,9 @@ async def run_pairing_psk_server(
     """Run the server side of the Pairing PSK flow.
 
     ``on_pair_init`` is called for every ``client/pair-init`` received, whatever its index.
-    ``on_noncompliance`` is called for each field that is not canonical base64url, and for each
+    ``on_noncompliance`` is called for each field that is not canonical base64url, for each
     frame discarded before ``client/pair-init`` on the first pairing activation since the
-    handshake.
+    handshake, and for each ``pairing_index`` below 1.
     A ``client/pair-finalize`` delivering ``pairing_psk`` or the Sentinel PSK raises
     ``PairingError``.
     ``client/pair-auth``, ``client/pair-confirm``, ``client/pair-finalize`` and
@@ -250,6 +254,7 @@ async def run_pairing_psk_server(
     finalize: ClientPairFinalizeMessage | None = None
     pair_init_seen = False
     on_discard = _pre_init_leftover_flagger(pairing_index, on_noncompliance)
+    discard_aborts = _LEFTOVER_ABORT_REASONS if pairing_index > 1 else frozenset()
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
             # Pairing-code exchange messages are leftovers from a superseded attempt.
@@ -258,6 +263,7 @@ async def run_pairing_psk_server(
                 (ClientPairInitMessage, ClientPairPendingMessage, ClientPairFinalizeMessage),
                 discard=(ClientPairAuthMessage, ClientPairConfirmMessage, ClientPairRetryMessage),
                 on_discard=on_discard,
+                discard_aborts=discard_aborts,
             )
             if isinstance(message, ClientPairFinalizeMessage):
                 # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
@@ -283,7 +289,8 @@ async def run_pairing_psk_server(
                     f"{type(message).__name__} pairing_index is ahead of the server's count"
                 )
             if message.payload.pairing_index < pairing_index:
-                # A leftover from a superseded pairing server/activate: discard silently.
+                _flag_pairing_index_below_one(message, on_noncompliance)
+                # A leftover from a superseded pairing server/activate: discard it.
                 continue
             if isinstance(message, ClientPairPendingMessage):
                 raise PairingError("client/pair-pending is not part of the Pairing PSK flow")
@@ -404,8 +411,9 @@ async def run_dynamic_pairing_code_server(  # noqa: PLR0913
 
     Returns the persisted record.
     ``on_noncompliance`` is called for each retry past the round limit, for each field that
-    is not canonical base64url, and for each frame discarded before ``client/pair-init`` on the
-    first pairing activation since the handshake.
+    is not canonical base64url, for each frame discarded before ``client/pair-init`` on the
+    first pairing activation since the handshake, for an over-length pending message, and for
+    each ``pairing_index`` below 1.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds: one round under the ``sid`` without a round number. ``legacy_pin``
     serves a dynamic PIN client predating the pairing-code rename, which reveals ``nonce_B``
@@ -580,9 +588,9 @@ async def run_static_pairing_code_server(
     """Run the server side of the static-pairing-code flow.
 
     Returns the persisted record.
-    ``on_noncompliance`` is called for each field that is not canonical base64url, and for each
+    ``on_noncompliance`` is called for each field that is not canonical base64url, for each
     frame discarded before ``client/pair-init`` on the first pairing activation since the
-    handshake.
+    handshake, for an over-length pending message, and for each ``pairing_index`` below 1.
     Raises ``InvalidPairingCodeError`` for malformed operator input. ``legacy_rounds`` serves a
     client predating rounds with the ``sid`` without a round number.
     """
@@ -904,6 +912,7 @@ async def _receive_pairing[T: PairingMessage](
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> T: ...
 
 
@@ -914,6 +923,7 @@ async def _receive_pairing[T: PairingMessage, U: PairingMessage](
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> T | U: ...
 
 
@@ -924,6 +934,7 @@ async def _receive_pairing[T: PairingMessage, U: PairingMessage, V: PairingMessa
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> T | U | V: ...
 
 
@@ -935,6 +946,7 @@ async def _receive_pairing(
     *,
     discard: tuple[type[PairingMessage], ...] = (),
     on_discard: Callable[[PairingMessage], None] | None = None,
+    discard_aborts: AbstractSet[PairAbortReason] = frozenset(),
 ) -> PairingMessage:
     """Receive the next pairing frame not of a ``discard`` type, requiring an ``expected`` type."""
     kinds = expected if isinstance(expected, tuple) else (expected,)
@@ -950,6 +962,8 @@ async def _receive_pairing(
         except (ValueError, LookupError) as exc:
             raise PairingError(f"malformed message awaiting {expected_names}") from exc
         if isinstance(message, PairAbortMessage):
+            if message.payload.reason in discard_aborts:
+                continue
             raise RemotePairingAbortError(message.payload.reason)
         if not isinstance(message, discard):
             break
@@ -976,6 +990,15 @@ def _pre_init_leftover_flagger(
     return lambda message: on_noncompliance(
         f"sent {message.to_dict()['type']} before client/pair-init"
     )
+
+
+def _flag_pairing_index_below_one(
+    message: ClientPairInitMessage | ClientPairPendingMessage,
+    on_noncompliance: Callable[[str], None] | None,
+) -> None:
+    """Flag a ``pairing_index`` no pairing ``server/activate`` can have produced."""
+    if message.payload.pairing_index < 1 and on_noncompliance is not None:
+        on_noncompliance(f"sent {message.to_dict()['type']} with a pairing_index below 1")
 
 
 async def receive_pairing_abort(ws: EncryptedWebSocket) -> NoReturn:
@@ -1015,9 +1038,11 @@ async def _receive_pair_init(
 
     It allows one gesture-extending ``client/pair-pending``.
     It also discards any leftover pair-init/pair-pending/pair-auth/pair-confirm/pair-finalize/
-    pair-retry from a superseded attempt.
+    pair-retry from a superseded attempt, and its pair/abort with a reason in
+    ``_LEFTOVER_ABORT_REASONS`` when an earlier pairing activation exists since the handshake.
     """
     on_discard = _pre_init_leftover_flagger(pairing_index, on_noncompliance)
+    discard_aborts = _LEFTOVER_ABORT_REASONS if pairing_index > 1 else frozenset()
     async with _server_timeout(SERVER_FIRST_MESSAGE_TIMEOUT_S, "client/pair-init"):
         while True:
             # Messages without a pairing_index are leftovers from a superseded attempt.
@@ -1031,6 +1056,7 @@ async def _receive_pair_init(
                     ClientPairRetryMessage,
                 ),
                 on_discard=on_discard,
+                discard_aborts=discard_aborts,
             )
             if message.payload.pairing_index > pairing_index:
                 raise PairingError(
@@ -1038,14 +1064,23 @@ async def _receive_pair_init(
                 )
             if message.payload.pairing_index == pairing_index:
                 break
-            # A leftover from a superseded pairing server/activate: discard silently.
+            _flag_pairing_index_below_one(message, on_noncompliance)
+            # A leftover from a superseded pairing server/activate: discard it.
     if isinstance(message, ClientPairInitMessage):
         return message
+    pending_message = message.payload.message
+    if pending_message is not None:
+        encoded = pending_message.encode()
+        if len(encoded) > PAIR_PENDING_MESSAGE_MAX_LEN:
+            if on_noncompliance is not None:
+                on_noncompliance(
+                    "sent a client/pair-pending message over "
+                    f"{PAIR_PENDING_MESSAGE_MAX_LEN} bytes in UTF-8"
+                )
+            # Drop a character the cut splits.
+            pending_message = encoded[:PAIR_PENDING_MESSAGE_MAX_LEN].decode(errors="ignore")
     if on_pending is not None:
-        pending_message = message.payload.message
-        on_pending(
-            pending_message[:PAIR_PENDING_MESSAGE_MAX_LEN] if pending_message is not None else None
-        )
+        on_pending(pending_message)
     # In-order delivery leaves no room for leftovers after the matching pair-pending:
     # the next pairing frame must be this attempt's client/pair-init.
     async with _server_timeout(SERVER_GESTURE_TIMEOUT_S, "gesture-gated client/pair-init"):

@@ -12,8 +12,9 @@ import orjson
 import pytest
 
 from aiosendspin.models.core import ClientHelloPayload, DeviceInfo
-from aiosendspin.models.types import ConnectionReason
+from aiosendspin.models.types import ConnectionReason, PairMethod
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
+from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     PskCategory,
@@ -460,6 +461,11 @@ _OPUS_FORMAT = {"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth
             id="non-list-locations",
         ),
         pytest.param(
+            {"supported_pair_methods": {"pairing_psk": {"locations": None}}},
+            "client/hello sent a malformed pair-method descriptor",
+            id="null-locations",
+        ),
+        pytest.param(
             {
                 "supported_pair_methods": {
                     "pairing_psk": {},
@@ -503,3 +509,60 @@ async def test_strict_server_rejects_hello_deviation_before_attach(
 
     assert str(excinfo.value) == reason
     assert server.get_client("dev") is None
+
+
+@pytest.mark.parametrize(
+    ("pair_methods", "method", "legacy_hello", "strict"),
+    [
+        pytest.param(None, PairMethod.STATIC_PAIRING_CODE, False, False, id="no-pair-methods"),
+        pytest.param(
+            {"static_pairing_code": {}},
+            PairMethod.PAIRING_PSK,
+            False,
+            False,
+            id="no-pairing-psk",
+        ),
+        pytest.param(
+            {
+                "pairing_psk": {},
+                "static_pairing_code": {},
+                "dynamic_pairing_code": {"formats": ["digits"], "out_channels": ["display"]},
+            },
+            PairMethod.STATIC_PAIRING_CODE,
+            False,
+            True,
+            id="both-pairing-code-methods-strict",
+        ),
+        pytest.param(
+            {"pairing_psk": {}},
+            PairMethod.STATIC_PAIRING_CODE,
+            True,
+            False,
+            id="management-capable",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_server_passes_through_a_method_the_parsed_hello_lacks(
+    pair_methods: dict[str, object] | None, method: PairMethod, *, legacy_hello: bool, strict: bool
+) -> None:
+    """The server keeps the pass-through for a method the hello offered or may offer."""
+    server = _make_server(allow_noncompliant_clients=not strict)
+    payload: dict[str, object] = {"name": "Kitchen", "supported_roles": []}
+    if pair_methods is not None:
+        payload["supported_pair_methods"] = pair_methods
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    conn._client_info = ClientHelloPayload.from_dict(payload)  # noqa: SLF001
+    psk = generate_psk()
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk), psk=psk, category=PskCategory.LONG_TERM, counterparty_id="dev"
+    )
+    conn._legacy_hello = legacy_hello  # noqa: SLF001
+    attempt = (
+        PairingAttempt(method=method, pairing_psk=psk, client_id="dev")
+        if method is PairMethod.PAIRING_PSK
+        else PairingAttempt(method=method, pairing_code_provider=AsyncMock(return_value="1234"))
+    )
+
+    conn._refuse_unadvertised_pairing(attempt)  # noqa: SLF001
+    await server.close()

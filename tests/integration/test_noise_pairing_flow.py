@@ -892,59 +892,10 @@ async def test_live_pairing_updates_connection_security_trust() -> None:
             await client.disconnect()
 
 
-async def test_live_pairing_method_enabled_after_hello_still_pairs() -> None:
-    """A method enabled after client/hello can still pair: the client arbitrates, not the hello."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    client_identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-    config = await client_store.get_pairing_config()
-    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
-
-    shown: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-
-    async def display(pairing_code: str | None, **_kwargs: object) -> None:
-        if pairing_code is not None and not shown.done():
-            shown.set_result(pairing_code)
-
-    async def provide() -> str:
-        return await shown
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=client_identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(pairing_code_display=display),
-        )
-        try:
-            await client.connect(url)
-            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            assert conn._client_info is not None  # noqa: SLF001
-            info = conn._client_info  # noqa: SLF001
-            assert info.supported_pair_methods is not None
-            assert info.supported_pair_methods.dynamic_pairing_code is None
-
-            config = await client_store.get_pairing_config()
-            await client_store.store_pairing_config(
-                replace(config, dynamic_pairing_code_enabled=True)
-            )
-            await conn.initiate_pairing(
-                PairingAttempt(
-                    method=PairMethod.DYNAMIC_PAIRING_CODE,
-                    pairing_code_provider=provide,
-                    pairing_format=PairingCodeFormat.DIGITS,
-                )
-            )
-            await _await_long_term_record(client_store, server.id)
-        finally:
-            await client.disconnect()
-
-
-async def test_strict_server_refuses_a_method_enabled_after_hello() -> None:
-    """A strict server picks only methods the client/hello advertised."""
-    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+@pytest.mark.parametrize("strict", [False, True])
+async def test_server_refuses_a_method_enabled_after_hello(*, strict: bool) -> None:
+    """The server picks only methods the client/hello advertised."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=not strict)
     client_identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
     config = await client_store.get_pairing_config()
@@ -978,9 +929,10 @@ async def test_strict_server_refuses_a_method_enabled_after_hello() -> None:
             await client.disconnect()
 
 
-async def test_strict_pairing_dial_never_activates_an_unadvertised_method() -> None:
-    """A strict server never activates an unadvertised method on a pairing dial."""
-    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+@pytest.mark.parametrize("strict", [False, True])
+async def test_pairing_dial_never_activates_an_unadvertised_method(*, strict: bool) -> None:
+    """The server never activates an unadvertised method on a pairing dial."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=not strict)
     identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
     config = await client_store.get_pairing_config()
@@ -1231,47 +1183,6 @@ async def test_live_pairing_unoffered_format_fails_before_activation() -> None:
                         pairing_format=PairingCodeFormat.QR_CODE,
                     )
                 )
-        finally:
-            await client.disconnect()
-
-
-async def test_live_pairing_unadvertised_format_client_aborts(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """With no descriptor to gate on, an unoffered format reaches the client, which aborts."""
-    server_store = InMemoryServerPairingStore()
-    server = _make_server(server_store)
-    client_identity = Identity.generate()
-    client_store = InMemoryClientPairingStore()
-    config = await client_store.get_pairing_config()
-    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
-
-    async with _serve(server) as url:
-        client = make_sdk_client(
-            identity=client_identity,
-            pairing_store=client_store,
-            client_name="c",
-            roles=[Roles.CONTROLLER],
-            pairing_support=PairingSupport(
-                pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
-            ),
-        )
-        try:
-            await client.connect(url)
-            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
-            await client_store.store_pairing_config(
-                replace(config, dynamic_pairing_code_enabled=True)
-            )
-            with pytest.raises(PairingAbortError) as exc_info:
-                await conn.initiate_pairing(
-                    PairingAttempt(
-                        method=PairMethod.DYNAMIC_PAIRING_CODE,
-                        pairing_code_provider=lambda: asyncio.sleep(0),
-                        pairing_format=PairingCodeFormat.QR_CODE,
-                    )
-                )
-            assert exc_info.value.reason is PairAbortReason.METHOD_NOT_SUPPORTED
-            assert "Unhandled exception" not in caplog.text
         finally:
             await client.disconnect()
 
@@ -2306,9 +2217,6 @@ async def test_non_closing_abort_leaves_pairing() -> None:
     server = _make_server(InMemoryServerPairingStore())
     identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
-    config = await client_store.get_pairing_config()
-    # Offers no dynamic pairing code, so the attempt aborts with method_not_supported.
-    await client_store.store_pairing_config(replace(config, dynamic_pairing_code_enabled=False))
 
     async def provide() -> str:
         return "000000"
@@ -2319,10 +2227,18 @@ async def test_non_closing_abort_leaves_pairing() -> None:
             pairing_store=client_store,
             client_name="c",
             roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(
+                pairing_code_display=lambda _code, **_kwargs: asyncio.sleep(0)
+            ),
         )
         try:
             await client.connect(url)
             conn = await _find_connection_by_client_id(server, identity.peer_id)
+            # Withdrawn after the hello, so the client aborts with method_not_supported.
+            config = await client_store.get_pairing_config()
+            await client_store.store_pairing_config(
+                replace(config, dynamic_pairing_code_enabled=False)
+            )
             with pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
                     PairingAttempt(
@@ -2557,11 +2473,46 @@ async def test_strict_server_discards_a_pairing_frame_after_a_pairing() -> None:
             await client.disconnect()
 
 
-@pytest.mark.parametrize(("pairing_index", "closes"), [(1, True), (0, False)])
-async def test_strict_server_rejects_a_pair_init_ahead_of_its_count_outside_an_attempt(
-    pairing_index: int, *, closes: bool
-) -> None:
-    """Outside an attempt only a pair-init ahead of the server's count is a protocol error."""
+async def test_strict_server_accepts_a_reply_before_the_pairing_activate_send_returns() -> None:
+    """A strict server accepts a pair-init routed while its pairing activation send finishes."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    send_str = EncryptedWebSocket.send_str
+
+    async def slow_activation_send_str(self: EncryptedWebSocket, data: str) -> None:
+        await send_str(self, data)
+        if '"server/activate"' in data and '"pairing":' in data:
+            await asyncio.sleep(0.1)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with patch.object(EncryptedWebSocket, "send_str", slow_activation_send_str):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=client_identity.peer_id,
+                    )
+                )
+            await _await_paired_session(client)
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
+async def test_strict_server_rejects_a_pair_init_after_the_pairing_rehandshake() -> None:
+    """A pair-init with no pairing activation since the re-handshake closes a strict server."""
     server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
     client_identity = Identity.generate()
     client_store = InMemoryClientPairingStore()
@@ -2589,16 +2540,10 @@ async def test_strict_server_rejects_a_pair_init_ahead_of_its_count_outside_an_a
             await _await_paired_session(client)
             assert client._admitted_connection is not None  # noqa: SLF001
             await client._admitted_connection._send_message(  # noqa: SLF001
-                ClientPairInitMessage(
-                    payload=ClientPairInitPayload(pairing_index=pairing_index)
-                ).to_json(),
+                ClientPairInitMessage(payload=ClientPairInitPayload(pairing_index=0)).to_json(),
                 force=True,
             )
-            if closes:
-                await _wait_until(lambda: not client.connected)
-            else:
-                await asyncio.sleep(0.1)  # a fatal frame would have torn the connection down
-                assert client.connected
+            await _wait_until(lambda: not client.connected)
         finally:
             await client.disconnect()
 
@@ -5171,9 +5116,7 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
     # by the client once it sees the activation.
     client_store = InMemoryClientPairingStore()
     config = await client_store.get_pairing_config()
-    await client_store.store_pairing_config(
-        replace(config, unpaired_access_enabled=True, dynamic_pairing_code_enabled=False)
-    )
+    await client_store.store_pairing_config(replace(config, unpaired_access_enabled=True))
     pairing = generate_psk()
     await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
 
@@ -5216,6 +5159,11 @@ async def test_pairing_attempts_that_abort_never_admit_playback() -> None:
             assert conn._noise_psk is not None  # noqa: SLF001
             assert conn._noise_psk.category is PskCategory.PAIRING  # noqa: SLF001
 
+            # Withdrawn after the hello, so the client aborts once it sees the activation.
+            config = await client_store.get_pairing_config()
+            await client_store.store_pairing_config(
+                replace(config, dynamic_pairing_code_enabled=False)
+            )
             with pytest.raises(PairingAbortError):
                 await conn.initiate_pairing(
                     PairingAttempt(

@@ -186,6 +186,7 @@ from .roles.source import SourceV1Role
 
 if TYPE_CHECKING:
     from aiosendspin.models.artwork import ClientHelloArtworkSupport
+    from aiosendspin.models.core import SupportedPairMethods
 
     from .audio import BufferedChunk, BufferTracker
     from .group import SendspinGroup
@@ -2061,9 +2062,10 @@ class SendspinConnection:
                 else ServerActivateMessage(activation_payload)
             )
             self._awaiting_rehandshake_activate = False
+            # Count first, since the client's reply can be routed before the send returns.
+            self._pairing_index += 1
             # Finish the send through a cancel so the count matches the activations sent.
             _, cancelled = await finish_despite_cancel(transport.send_str(activation.to_json()))
-            self._pairing_index += 1
             self._pairing_activities = activation_payload.activities
             if cancelled:
                 await abort_pairing(transport, PairAbortReason.USER_CANCELLED)
@@ -2204,15 +2206,13 @@ class SendspinConnection:
         self._flag_noncompliance("Pairing PSK client/pair-finalize sent without client/pair-init")
 
     def _refuse_unadvertised_pairing(self, attempt: PairingAttempt | None) -> None:
-        """Abort an attempt the client/hello rules out, or when strict any method it left out."""
+        """Abort an attempt using a method or format the client/hello did not offer."""
         assert self._client_info is not None
         method = attempt.method if attempt is not None else PairMethod.PAIRING_PSK
         methods = self._client_info.supported_pair_methods
         descriptor = getattr(methods, method.value, None)
         if descriptor is None:
-            unusable = methods is not None and method.value in (methods.unusable_methods or ())
-            # A lenient server lets the client decide, since its config may change after the hello.
-            if self._server.allow_noncompliant_clients and not unusable:
+            if self._tolerates_unlisted_pairing_method(method, methods):
                 return
             raise LocalPairingAbortError(PairAbortReason.METHOD_NOT_SUPPORTED)
         if isinstance(descriptor, DynamicPairMethodDescriptor):
@@ -2220,6 +2220,28 @@ class SendspinConnection:
             assert attempt.pairing_format is not None
             if attempt.pairing_format.value not in descriptor.formats:
                 raise LocalPairingAbortError(PairAbortReason.METHOD_NOT_SUPPORTED)
+
+    def _tolerates_unlisted_pairing_method(
+        self, method: PairMethod, methods: SupportedPairMethods | None
+    ) -> bool:
+        """Whether the server lets the client decide on a method its parsed hello lacks."""
+        if (
+            method is PairMethod.STATIC_PAIRING_CODE
+            and methods is not None
+            and methods.offered_both_pairing_code_methods
+        ):
+            # The parse drops a static method offered alongside a dynamic one with digits.
+            return True
+        if not self._server.allow_noncompliant_clients:
+            return False
+        if methods is None or method is PairMethod.PAIRING_PSK:
+            # The hello was flagged for omitting supported_pair_methods or pairing_psk.
+            return True
+        if method.value in (methods.unusable_methods or ()):
+            return False
+        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
+        # Management may change the client's config after the hello.
+        return self._management_capable
 
     async def _rehandshake_for_pairing_if_needed(self, transport: Transport) -> bool:
         """If the attempt needs a PSK other than the current one, re-handshake onto it."""
@@ -2669,8 +2691,15 @@ class SendspinConnection:
             self._flag_noncompliance("sent a message before the first server/activate")
 
     def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
-        if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
+        if message_type not in _PAIRING_MESSAGE_TYPES:
+            return
+        if self._activated_pairing_method is None:
             self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
+        # A pair/abort for an attempt that already ended has no effect.
+        elif self._pairing_index == 0 and message_type != "pair/abort":
+            self._flag_noncompliance(
+                f"sent {message_type} before any pairing server/activate since the handshake"
+            )
 
     def _flag_pairing_index_ahead(self, text: str, message_type: str) -> None:
         """Flag a ``pairing_index`` above the pairing activations sent since the handshake."""
