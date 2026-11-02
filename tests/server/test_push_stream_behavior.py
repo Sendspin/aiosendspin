@@ -4841,6 +4841,27 @@ async def test_flush_audio_drains_resampler_tail(mock_loop: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail_of_historical_audio(mock_loop: Any) -> None:
+    """flush_audio() drains the resampler of a channel that only received historical audio."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms at 44.1 kHz resampled to the role's 48 kHz: 4800 output frames.
+    pcm = b"\x00\x10" * 2 * 4410
+    stream.prepare_historical_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    data = b"".join(chunk.data for chunk in role.received)
+    frames = [data[i : i + 4] for i in range(0, len(data), 4)]
+    last_signal_frame = max(
+        i for i, frame in enumerate(frames) if int.from_bytes(frame[:2], "little") > 64
+    )
+    assert last_signal_frame >= 4795
+
+
+@pytest.mark.asyncio
 async def test_flush_audio_drains_shared_resampler_for_each_bit_depth(mock_loop: Any) -> None:
     """Players at different bit depths sharing a float resampler all get its tail."""
     group = _DummyGroup(clients=[])

@@ -887,7 +887,7 @@ class PushStream:
         self._channel_source_rate: dict[UUID, int] = {}
         # Channels that have committed real audio (live or historical), not just synthetic timing.
         self._channels_with_committed_audio: set[UUID] = set()
-        # Source format of the most recent live commit per channel, to find its resamplers.
+        # Source format of the most recent commit per channel, to find its resamplers.
         self._channel_committed_format: dict[UUID, AudioFormat] = {}
         # Role-based streaming tracking (for hook-based flow)
         self._started_roles: set[Role] = set()
@@ -1542,6 +1542,7 @@ class PushStream:
                 duration_us = self._advance_channel_timing(
                     channel_id, sample_count, fmt.sample_rate
                 )
+                self._channel_committed_format[channel_id] = fmt
 
                 # Cache PCM (if enabled)
                 channel_int = channel_id.int
