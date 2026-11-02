@@ -2062,9 +2062,10 @@ class SendspinConnection:
                 else ServerActivateMessage(activation_payload)
             )
             self._awaiting_rehandshake_activate = False
+            # Count first, since the client's reply can be routed before the send returns.
+            self._pairing_index += 1
             # Finish the send through a cancel so the count matches the activations sent.
             _, cancelled = await finish_despite_cancel(transport.send_str(activation.to_json()))
-            self._pairing_index += 1
             self._pairing_activities = activation_payload.activities
             if cancelled:
                 await abort_pairing(transport, PairAbortReason.USER_CANCELLED)

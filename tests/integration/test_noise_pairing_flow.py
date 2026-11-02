@@ -2473,6 +2473,44 @@ async def test_strict_server_discards_a_pairing_frame_after_a_pairing() -> None:
             await client.disconnect()
 
 
+async def test_strict_server_accepts_a_reply_before_the_pairing_activate_send_returns() -> None:
+    """A strict server accepts a pair-init routed while its pairing activation send finishes."""
+    server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
+    client_identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    send_str = EncryptedWebSocket.send_str
+
+    async def slow_activation_send_str(self: EncryptedWebSocket, data: str) -> None:
+        await send_str(self, data)
+        if '"server/activate"' in data and '"pairing":' in data:
+            await asyncio.sleep(0.1)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=client_identity,
+            pairing_store=client_store,
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            conn = await _find_connection_by_client_id(server, client_identity.peer_id)
+            with patch.object(EncryptedWebSocket, "send_str", slow_activation_send_str):
+                await conn.initiate_pairing(
+                    PairingAttempt(
+                        method=PairMethod.PAIRING_PSK,
+                        pairing_psk=pairing,
+                        client_id=client_identity.peer_id,
+                    )
+                )
+            await _await_paired_session(client)
+            assert client.connected
+        finally:
+            await client.disconnect()
+
+
 async def test_strict_server_rejects_a_pair_init_after_the_pairing_rehandshake() -> None:
     """A pair-init with no pairing activation since the re-handshake closes a strict server."""
     server = _make_server(InMemoryServerPairingStore(), allow_noncompliant_clients=False)
