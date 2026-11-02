@@ -2890,8 +2890,8 @@ class PushStream:
         so the end of the input stays buffered until more audio arrives. When a stream
         ends naturally, call this once after the last commit_audio() and before waiting
         for players to drain and calling stop(), so players receive the end of the
-        audio. The last frame is padded with silence. stop() and clear() discard the
-        buffered audio instead.
+        audio. The last frame is padded with silence, so only stop() or clear() may
+        follow. stop() and clear() discard the buffered audio instead.
 
         Does nothing if the stream is stopped.
         """
