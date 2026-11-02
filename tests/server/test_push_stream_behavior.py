@@ -15,6 +15,7 @@ from uuid import UUID
 
 import pytest
 
+from aiosendspin.audio.codecs import create_decoder
 from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
@@ -4887,6 +4888,60 @@ async def test_flush_audio_drains_shared_resampler_for_each_bit_depth(mock_loop:
             > 1 << (8 * sample_bytes - 5)
         )
         assert last_signal_frame >= 4795
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_delivers_flac_tail_on_every_channel(mock_loop: Any) -> None:
+    """FLAC players on every channel decode the whole input after flush_audio()."""
+    second_channel = UUID("00000000-0000-0000-0000-0000000000a2")
+    group = _DummyGroup(clients=[])
+    players: list[tuple[FlacEncoder, _DummyRole]] = []
+    for channel_id in (MAIN_CHANNEL, second_channel):
+        transformer = group.transformer_pool.get_or_create(
+            FlacEncoder,
+            channel_id=channel_id.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
+        role = _DummyRole(
+            AudioRequirements(
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+                transformer=transformer,
+                channel_id=channel_id,
+                frame_duration_us=25_000,
+            )
+        )
+        players.append((transformer, role))
+    group.clients.append(_DummyClient([role for _, role in players]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # Two full FLAC frames plus a partial one.
+    frame_count = 2 * players[0][0].frame_samples + 1000
+    pcm = (bytes(range(1, 241)) * (frame_count // 60 + 1))[: frame_count * 4]
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(pcm, fmt)
+    stream.prepare_audio(pcm, fmt, channel_id=second_channel)
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    for transformer, role in players:
+        decoder = create_decoder(
+            "flac",
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            codec_header=transformer.get_header(),
+        )
+        decoded = b"".join(decoder.decode(chunk.data) for chunk in role.received)
+        decoded += decoder.flush()
+        assert decoded[: len(pcm)] == pcm
+        assert decoded[len(pcm) :] == bytes(len(decoded) - len(pcm))
+        for prev, nxt in pairwise(role.received):
+            assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
 
 
 @pytest.mark.asyncio
