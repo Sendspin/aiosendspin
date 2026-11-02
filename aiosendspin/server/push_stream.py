@@ -239,8 +239,9 @@ def _resampler_hold_back_us(source_sample_rate: int, target_sample_rate: int) ->
     return hold_back_us
 
 
-def _drain_resampler_tail(
-    resampler_state: _ResamplerState,
+def _trim_and_quantize_tail(
+    drained: _ResampledPCM,
+    frame_stride: int,
     quantizers: dict[_ResamplerKey, _ResamplerState],
     *,
     channel_id: UUID,
@@ -249,11 +250,10 @@ def _drain_resampler_tail(
     bit_depth: int,
     end_us: int | None = None,
 ) -> _ResampledPCM | None:
-    """Drain a resampler's FIR tail up to `end_us`, quantized to integer PCM if needed.
+    """Trim a drained resampler tail to `end_us`, quantized to integer PCM if needed.
 
-    Returns None when nothing is left. The resampler graph is closed afterwards.
+    Returns None when nothing is left.
     """
-    drained = _flush_resampler(resampler_state)
     sample_count = drained.sample_count
     if end_us is not None:
         end_frames = ((end_us - drained.output_start_ts) * sample_rate + 500_000) // 1_000_000
@@ -262,7 +262,7 @@ def _drain_resampler_tail(
         return None
 
     tail = _ResampledPCM(
-        pcm_data=drained.pcm_data[: sample_count * resampler_state.target_av_frame_stride],
+        pcm_data=drained.pcm_data[: sample_count * frame_stride],
         output_start_ts=drained.output_start_ts,
         sample_count=sample_count,
         needs_s32_to_s24_conversion=drained.needs_s32_to_s24_conversion,
@@ -2645,8 +2645,9 @@ class PushStream:
     ) -> list[CachedChunk]:
         """Drain one resampler's FIR tail up to `end_us` and run it through quantizer/encoder."""
         tkey = self._build_transform_key(req, channel_id)
-        drained = _drain_resampler_tail(
-            resampler_state,
+        drained = _trim_and_quantize_tail(
+            _flush_resampler(resampler_state),
+            resampler_state.target_av_frame_stride,
             quantizers,
             channel_id=channel_id,
             sample_rate=req.sample_rate,
@@ -2991,8 +2992,9 @@ class PushStream:
             for group in groups:
                 tail = None
                 if group.resampler is not None:
-                    tail = _drain_resampler_tail(
-                        group.resampler,
+                    tail = _trim_and_quantize_tail(
+                        _flush_resampler(group.resampler),
+                        group.resampler.target_av_frame_stride,
                         self._resamplers,
                         channel_id=group.channel_id,
                         sample_rate=group.sample_rate,
