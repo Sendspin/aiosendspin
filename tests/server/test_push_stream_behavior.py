@@ -726,9 +726,9 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
 async def test_stop_resets_transformers_without_delivering_tail_frames(mock_loop: Any) -> None:
     """stop() resets transformers but never delivers flushed tail frames.
 
-    Flushed frames carry timestamp_us=0, which has no scheduling
-    semantics, so emitting them would only pollute the client's
-    buffer tracker without serving any playback purpose.
+    flush_audio() delivers the tail while it can still play, so
+    emitting it here would only pollute the client's buffer tracker
+    without serving any playback purpose.
     """
     reset_calls = 0
 
@@ -4833,8 +4833,8 @@ async def test_flush_audio_drains_resampler_tail(mock_loop: Any) -> None:
     last_signal_frame = max(
         i for i, frame in enumerate(frames) if int.from_bytes(frame[:2], "little") > 64
     )
-    # Without draining the resampler, its filter tail (about 17 frames here) is replaced
-    # by the silence padding the final frame.
+    # Without draining the resampler, its filter tail is replaced by the silence padding
+    # the final frame.
     assert last_signal_frame >= 4795
     for prev, nxt in pairwise(role.received):
         assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
