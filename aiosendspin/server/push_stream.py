@@ -432,17 +432,19 @@ def _unconsumed_input(
 ) -> tuple[bytes, int] | None:
     """Return the input past the resampler's cursor, or None if it was already consumed."""
     cursor_us = resampler_state.pending_input_timestamp_us
-    # Within the jump tolerance the resampler continues its timeline, so nothing is consumed yet.
-    if cursor_us is None or cursor_us - input_timestamp_us <= _TIMELINE_JUMP_TOLERANCE_US:
+    if cursor_us is None or input_timestamp_us >= cursor_us:
         return source_pcm, input_timestamp_us
     sample_rate = source_format.sample_rate
     frame_stride = source_format.bit_depth // 8 * source_format.channels
-    frames = len(source_pcm) // frame_stride
-    input_end_us = input_timestamp_us + frames * 1_000_000 // sample_rate
-    if input_end_us - cursor_us <= _TIMELINE_JUMP_TOLERANCE_US:
-        return None
-    # Round up so no kept frame starts before the cursor.
+    # Frames starting before the cursor, rounded up so no kept frame starts before it.
     skip = -((input_timestamp_us - cursor_us) * sample_rate // 1_000_000)
+    # Check full consumption in frames before applying the tolerance, so a re-pushed
+    # chunk shorter than the tolerance is not mistaken for jitter.
+    if skip >= len(source_pcm) // frame_stride:
+        return None
+    # Within the jump tolerance the resampler continues its timeline, so nothing is consumed yet.
+    if cursor_us - input_timestamp_us <= _TIMELINE_JUMP_TOLERANCE_US:
+        return source_pcm, input_timestamp_us
     return (
         source_pcm[skip * frame_stride :],
         input_timestamp_us + skip * 1_000_000 // sample_rate,

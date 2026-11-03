@@ -4148,16 +4148,22 @@ def _indexed_pcm(first_index: int, frames: int) -> bytes:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("second_start_us", "expected_indices"),
+    ("second_first_index", "second_frames", "second_start_us", "expected_indices"),
     [
-        pytest.param(10_020_000 - 1, [*range(1920)], id="within_tolerance_continues"),
+        pytest.param(960, 960, 10_020_000 - 1, [*range(1920)], id="within_tolerance_continues"),
         # 5 ms early = 240 consumed frames; the rest of the chunk is kept.
-        pytest.param(10_015_000, [*range(960), *range(1200, 1920)], id="overlap_skips_head"),
-        pytest.param(10_000_000, [*range(960)], id="fully_consumed_dropped"),
+        pytest.param(
+            960, 960, 10_015_000, [*range(960), *range(1200, 1920)], id="overlap_skips_head"
+        ),
+        pytest.param(960, 960, 10_000_000, [*range(960)], id="fully_consumed_dropped"),
+        # A re-pushed chunk shorter than the jump tolerance is still consumed, not jitter.
+        pytest.param(936, 24, 10_019_500, [*range(960)], id="short_consumed_not_duplicated"),
+        # 19.5 ms early: the 24 tail frames past the cursor are new audio and are kept.
+        pytest.param(960, 960, 10_000_500, [*range(960), *range(1896, 1920)], id="short_tail_kept"),
     ],
 )
 async def test_explicit_commit_overlapping_cursor(
-    second_start_us: int, expected_indices: list[int]
+    second_first_index: int, second_frames: int, second_start_us: int, expected_indices: list[int]
 ) -> None:
     """An explicit start before the cursor only drops audio that was already consumed."""
     group = _DummyGroup(clients=[])
@@ -4168,8 +4174,11 @@ async def test_explicit_commit_overlapping_cursor(
     )
     fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 
-    for first_index, start_us in ((0, 10_000_000), (960, second_start_us)):
-        stream.prepare_audio(_indexed_pcm(first_index, 960), fmt)
+    for first_index, frames, start_us in (
+        (0, 960, 10_000_000),
+        (second_first_index, second_frames, second_start_us),
+    ):
+        stream.prepare_audio(_indexed_pcm(first_index, frames), fmt)
         await stream.commit_audio(play_start_us=start_us)
     stream.stop()
 
