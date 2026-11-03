@@ -4193,6 +4193,66 @@ async def test_explicit_commit_overlapping_cursor(
 
 
 @pytest.mark.asyncio
+async def test_catchup_trims_overlapping_cached_chunk() -> None:
+    """A late joiner replays only the unconsumed part of a cached chunk that overlaps."""
+
+    class PassTransformer:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, dur)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    group = _DummyGroup(clients=[])
+    group.clients.append(
+        _DummyClient([_make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=0)])
+    )
+    stream = PushStream(
+        loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=1_000_000), group=group
+    )
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    # The second chunk starts 5 ms (240 frames) before the first one ends.
+    for first_index, start_us in ((0, 10_000_000), (960, 10_015_000)):
+        stream.prepare_audio(_indexed_pcm(first_index, 960), fmt)
+        await stream.commit_audio(play_start_us=start_us)
+
+    joiner = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=PassTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        ),
+        replay_from_pcm_cache=True,
+        required_lead_time_us=0,
+    )
+    group.clients.append(_DummyClient([joiner]))
+    stream.on_role_join(joiner)
+    await _drain_catchup_tasks(stream)
+    stream.stop()
+
+    data = b"".join(c.data for c in sorted(joiner.received, key=lambda c: c.timestamp_us))
+    indices = [
+        int.from_bytes(data[i : i + 2], "little", signed=True) for i in range(0, len(data), 4)
+    ]
+    assert indices == [*range(960), *range(1200, 1920)]
+
+
+@pytest.mark.asyncio
 async def test_send_ahead_uses_largest_member_budget() -> None:
     """Live grouped players use a common floor: max(lead, min_buffer) + static across members."""
     loop = asyncio.get_running_loop()
