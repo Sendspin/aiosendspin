@@ -2724,7 +2724,7 @@ class PushStream:
                 new_pcm = [
                     chunk
                     for chunk in self._pcm_chunk_cache.get(channel_int, [])
-                    if chunk.timestamp_us >= last_source_end_us
+                    if chunk.timestamp_us + chunk.duration_us > last_source_end_us
                 ]
                 if not new_pcm:
                     # Clear-then-recheck guards against the commit_audio set()
@@ -2733,7 +2733,7 @@ class PushStream:
                     new_pcm = [
                         chunk
                         for chunk in self._pcm_chunk_cache.get(channel_int, [])
-                        if chunk.timestamp_us >= last_source_end_us
+                        if chunk.timestamp_us + chunk.duration_us > last_source_end_us
                     ]
                     if not new_pcm:
                         try:
@@ -2770,7 +2770,7 @@ class PushStream:
                 pending = [
                     chunk
                     for chunk in self._pcm_chunk_cache.get(channel_int, [])
-                    if chunk.timestamp_us >= last_source_end_us
+                    if chunk.timestamp_us + chunk.duration_us > last_source_end_us
                 ]
                 if not pending:
                     break

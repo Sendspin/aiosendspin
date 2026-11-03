@@ -1511,6 +1511,27 @@ async def test_catchup_handoff_delivers_contiguous_audio() -> None:
 
 
 @pytest.mark.asyncio
+async def test_catchup_keeps_overlapping_commit_during_catchup() -> None:
+    """A chunk committed during catch-up that overlaps the cached tail still reaches the joiner."""
+    stream, role2, tail_us = await _setup_deep_buffer_catchup_join()
+
+    stream.prepare_audio(
+        bytes(7200),
+        AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+    )
+    await stream.commit_audio(play_start_us=tail_us - 5_000)
+    await _drain_catchup_tasks(stream)
+
+    received = sorted(role2.received, key=lambda c: c.timestamp_us)
+    assert received
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    # The 20 ms past the old tail arrives as 960 s16 stereo frames.
+    last = received[-1]
+    assert (last.timestamp_us, len(last.data)) == (tail_us, 960 * 4)
+
+
+@pytest.mark.asyncio
 async def test_late_joiner_shares_group_timeline() -> None:
     """A late joiner must land on the same absolute timeline as the existing member.
 
