@@ -50,7 +50,8 @@ _PITCH_REGISTER_ALPHA = 0.25
 _PITCH_SNAP_MAX_SEMITONES = 7.0
 _PITCH_REGISTER_GAP_US = 400_000
 # Fixed onset hop, independent of `rate_max`. Changing it changes `peak` sensitivity.
-_ONSET_HOP_US = 1_000_000 // 60
+# Rounded up like the periodic hop, so it equals the hop of a `rate_max` 60 client.
+_ONSET_HOP_US = -(-1_000_000 // 60)
 
 
 @dataclass(frozen=True)
