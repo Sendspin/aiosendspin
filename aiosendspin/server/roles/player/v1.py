@@ -363,7 +363,11 @@ class PlayerV1Role(Role):
         """Send binary audio; the connection adds the header. Late audio is discarded there."""
         # Send deferred stream/start on first chunk (ensures encoder header is available)
         if self._pending_stream_start:
-            if not self._client.available:
+            connection = self._client.connection
+            # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+            if not self._client.available and not (
+                connection is not None and connection.leaves_external_source_on_stream_start
+            ):
                 # No stream/start, and so no audio, until the latest client/state
                 # reports the client available.
                 return

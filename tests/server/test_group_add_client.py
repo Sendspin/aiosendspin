@@ -60,6 +60,7 @@ class _DummyServer:
 
 class _DummyConnection:
     receives_group_updates = True
+    leaves_external_source_on_stream_start = False
 
     def __init__(self) -> None:
         self.role_messages: list[tuple[str, object]] = []
