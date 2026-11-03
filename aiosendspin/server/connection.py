@@ -440,6 +440,8 @@ class SendspinConnection:
         # Set for a client on a pre-#177 wire: unencrypted, or a client/hello carrying
         # trust_level or player supported_commands.
         self._legacy_hello = False
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+        self._legacy_state = False
         # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
         # Set when the client/hello tripped a tolerance for a wire that predates spec-pr-287.
         # Such a client awaits server/hello and sends client/hello again after a re-handshake.
@@ -550,6 +552,12 @@ class SendspinConnection:
         Such a client receives the 9-byte player audio header without send_ahead.
         """
         return self._legacy_hello
+
+    # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+    @property
+    def leaves_external_source_on_stream_start(self) -> bool:
+        """Whether the client leaves the legacy `external_source` state only on a stream/start."""
+        return self._legacy_state
 
     # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
     @property
@@ -3059,6 +3067,7 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         if payload.legacy_state_used:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
+            self._legacy_state = True
         for role in self._client.active_roles:
             for reason in role.client_state_deviations(payload):
                 self._flag_noncompliance(f"client/state {reason}")

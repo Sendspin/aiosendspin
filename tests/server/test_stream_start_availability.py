@@ -529,3 +529,31 @@ async def test_visualizer_stream_starts_once_the_reconnected_client_is_available
 
     assert len(_visualizer_starts()) == 1
     stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_legacy_external_source_player_gets_stream_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client in the legacy `external_source` state gets stream/start to leave it."""
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]))
+    monkeypatch.setattr(
+        conn._server,  # noqa: SLF001
+        "request_client_playback_connection",
+        lambda _client_id: False,
+        raising=False,
+    )
+    await conn._handle_client_state(  # noqa: SLF001
+        ClientStatePayload.from_dict(
+            {"state": "external_source", "player": _PLAYER_STATE.to_dict()}
+        )
+    )
+    assert not _client(conn).available
+
+    stream = _client(conn).group.start_stream()
+    await _commit(stream)
+
+    queued = _queued_player_entries(conn)
+    assert len([e for e in queued if isinstance(e.json_message, StreamStartMessage)]) == 1
+    assert any(entry.binary is not None for entry in queued)
+    stream.stop()
