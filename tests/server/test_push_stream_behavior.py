@@ -1513,6 +1513,27 @@ async def test_catchup_handoff_delivers_contiguous_audio() -> None:
 
 
 @pytest.mark.asyncio
+async def test_catchup_keeps_overlapping_commit_during_catchup() -> None:
+    """A chunk committed during catch-up that overlaps the cached tail still reaches the joiner."""
+    stream, role2, tail_us = await _setup_deep_buffer_catchup_join()
+
+    stream.prepare_audio(
+        bytes(7200),
+        AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+    )
+    await stream.commit_audio(play_start_us=tail_us - 5_000)
+    await _drain_catchup_tasks(stream)
+
+    received = sorted(role2.received, key=lambda c: c.timestamp_us)
+    assert received
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    # The 20 ms past the old tail arrives as 960 s16 stereo frames.
+    last = received[-1]
+    assert (last.timestamp_us, len(last.data)) == (tail_us, 960 * 4)
+
+
+@pytest.mark.asyncio
 async def test_late_joiner_shares_group_timeline() -> None:
     """A late joiner must land on the same absolute timeline as the existing member.
 
@@ -4139,6 +4160,119 @@ async def test_explicit_play_start_us_overrides_stale_channel_timing() -> None:
     # duration (25ms @ 48kHz stereo s16 = 25_000us), not first + 2 * duration.
     expected_after_advance = second_play_start_us + 25_000
     assert stream._channel_timing[MAIN_CHANNEL] == expected_after_advance  # noqa: SLF001
+
+
+def _indexed_pcm(first_index: int, frames: int) -> bytes:
+    """Return s16 stereo PCM whose left sample holds each frame's index."""
+    return b"".join(
+        (first_index + i).to_bytes(2, "little", signed=True) + bytes(2) for i in range(frames)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_first_index", "second_frames", "second_start_us", "expected_indices"),
+    [
+        pytest.param(960, 960, 10_020_000 - 1, [*range(1920)], id="within_tolerance_continues"),
+        # 5 ms early = 240 consumed frames; the rest of the chunk is kept.
+        pytest.param(
+            960, 960, 10_015_000, [*range(960), *range(1200, 1920)], id="overlap_skips_head"
+        ),
+        pytest.param(960, 960, 10_000_000, [*range(960)], id="fully_consumed_dropped"),
+        # A re-pushed chunk shorter than the jump tolerance is still consumed, not jitter.
+        pytest.param(936, 24, 10_019_500, [*range(960)], id="short_consumed_not_duplicated"),
+        # 19.5 ms early: the 24 tail frames past the cursor are new audio and are kept.
+        pytest.param(960, 960, 10_000_500, [*range(960), *range(1896, 1920)], id="short_tail_kept"),
+    ],
+)
+async def test_explicit_commit_overlapping_cursor(
+    second_first_index: int, second_frames: int, second_start_us: int, expected_indices: list[int]
+) -> None:
+    """An explicit start before the cursor only drops audio that was already consumed."""
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(
+        loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=1_000_000), group=group
+    )
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    for first_index, frames, start_us in (
+        (0, 960, 10_000_000),
+        (second_first_index, second_frames, second_start_us),
+    ):
+        stream.prepare_audio(_indexed_pcm(first_index, frames), fmt)
+        await stream.commit_audio(play_start_us=start_us)
+    stream.stop()
+
+    received = sorted(role.received, key=lambda c: c.timestamp_us)
+    data = b"".join(c.data for c in received)
+    indices = [
+        int.from_bytes(data[i : i + 2], "little", signed=True) for i in range(0, len(data), 4)
+    ]
+    assert indices == expected_indices
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_catchup_trims_overlapping_cached_chunk() -> None:
+    """A late joiner replays only the unconsumed part of a cached chunk that overlaps."""
+
+    class PassTransformer:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, dur)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    group = _DummyGroup(clients=[])
+    group.clients.append(
+        _DummyClient([_make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=0)])
+    )
+    stream = PushStream(
+        loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=1_000_000), group=group
+    )
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    # The second chunk starts 5 ms (240 frames) before the first one ends.
+    for first_index, start_us in ((0, 10_000_000), (960, 10_015_000)):
+        stream.prepare_audio(_indexed_pcm(first_index, 960), fmt)
+        await stream.commit_audio(play_start_us=start_us)
+
+    joiner = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=PassTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        ),
+        replay_from_pcm_cache=True,
+        required_lead_time_us=0,
+    )
+    group.clients.append(_DummyClient([joiner]))
+    stream.on_role_join(joiner)
+    await _drain_catchup_tasks(stream)
+    stream.stop()
+
+    data = b"".join(c.data for c in sorted(joiner.received, key=lambda c: c.timestamp_us))
+    indices = [
+        int.from_bytes(data[i : i + 2], "little", signed=True) for i in range(0, len(data), 4)
+    ]
+    assert indices == [*range(960), *range(1200, 1920)]
 
 
 @pytest.mark.asyncio
