@@ -382,7 +382,8 @@ def test_peak_detected_promptly_with_low_rate_max() -> None:
 
 def test_peak_and_periodic_frames_merge_in_timestamp_order() -> None:
     """Onset frames interleave with periodic frames without going backwards."""
-    config = StreamStartVisualizer(types=("loudness", "peak"), rate_max=30)
+    # A 25 ms periodic hop lands on chunk ends, after the onset inside the burst chunk.
+    config = StreamStartVisualizer(types=("loudness", "peak"), rate_max=40)
     extractor = VisualizerFeatureExtractor(sample_rate=48_000, channels=2, config=config)
     silence = bytes(1_200 * 2 * 2)
     burst = sine_pcm_16bit(sample_rate=48_000, channels=2, hz=1000.0, duration_s=0.025)
