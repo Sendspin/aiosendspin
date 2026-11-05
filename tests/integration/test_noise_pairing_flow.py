@@ -4953,6 +4953,34 @@ async def test_forgetting_a_mismatched_client_reactivates_it_in_place() -> None:
             await client.disconnect()
 
 
+async def test_unpair_unstages_the_clients_pairing_psk() -> None:
+    """Unpairing leaves no staged Pairing PSK that would let the client pair again."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=await _unpaired_enabled_store(),
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+        )
+        try:
+            await client.connect(url)
+            await _find_connection_by_client_id(server, identity.peer_id)
+            psk = generate_psk()
+            await server_store.stage_pairing_psk(
+                identity.peer_id, StagedPairingPsk(psk_id=psk_id_for(psk), psk=psk)
+            )
+
+            await server.unpair(identity.peer_id)
+
+            assert await server_store.staged_pairing_psk(identity.peer_id) is None
+        finally:
+            await client.disconnect()
+
+
 async def test_moving_onto_a_pairing_psk_keeps_the_playback_hold() -> None:
     """The hold must outlive the re-handshake an attempt makes to reach its own PSK.
 
