@@ -387,15 +387,15 @@ async def test_server_store_expires_staged_pairing_psk_with_naive_timestamp(
     assert await server_store.staged_pairing_psk("client-B") is None
 
 
-async def test_file_server_store_drops_expired_staged_pairing_psk_on_load(tmp_path: Path) -> None:
-    """Opening the store removes an expired staged Pairing PSK from disk."""
+async def test_file_server_store_save_drops_expired_staged_pairing_psk(tmp_path: Path) -> None:
+    """The next save removes an expired staged Pairing PSK from disk."""
     path = tmp_path / "pairings.json"
+    store = await FileServerPairingStore.open(path)
     expired = replace(_staged_psk(), created_at=datetime.now(UTC) - timedelta(hours=25))
-    path.write_text(
-        json.dumps({"staged_pairing_psks": {"client-A": expired.to_dict()}}), encoding="utf-8"
-    )
-    await FileServerPairingStore.open(path)
-    assert json.loads(path.read_text(encoding="utf-8"))["staged_pairing_psks"] == {}
+    await store.stage_pairing_psk("client-A", expired)
+    await store.stage_pairing_psk("client-B", _staged_psk())
+    staged = json.loads(path.read_text(encoding="utf-8"))["staged_pairing_psks"]
+    assert list(staged) == ["client-B"]
 
 
 async def test_file_server_store_removal_persists(tmp_path: Path) -> None:

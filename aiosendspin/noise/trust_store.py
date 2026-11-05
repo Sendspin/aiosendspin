@@ -646,21 +646,14 @@ class FileServerPairingStore(_ServerPairingStoreBase):
                 self._records[cid] = ServerPairingRecord.from_dict(v)
             except _UnknownPairMethodError as err:
                 logger.warning("Skipping pairing record for client %s: %s", cid, err)
-        self._staged = {}
-        dropped_staged = False
-        for cid, v in _section(data, "staged_pairing_psks").items():
-            staged = StagedPairingPsk.from_dict(v)
-            if _is_expired(staged):
-                logger.info("Dropping the expired staged pairing PSK for client %s", cid)
-                dropped_staged = True
-            else:
-                self._staged[cid] = staged
+        self._staged = {
+            cid: StagedPairingPsk.from_dict(v)
+            for cid, v in _section(data, "staged_pairing_psks").items()
+        }
         self._trusted = {
             cid: TrustedUnpairedClient.from_dict(v)
             for cid, v in _section(data, "trusted_unpaired_clients").items()
         }
-        if dropped_staged:
-            await self._save()
 
     async def _save(self) -> None:
         """Atomically write the current state to the JSON file."""
