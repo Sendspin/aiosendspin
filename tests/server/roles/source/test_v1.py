@@ -26,7 +26,7 @@ from aiosendspin.server.roles.source import (
 )
 from aiosendspin.server.roles.source.stream import SourceStream
 from aiosendspin.server.roles.source.v1 import SourceV1Role
-from tests.conftest import sine_pcm_16bit
+from tests.conftest import flac_frame, sine_pcm_16bit
 
 
 class _FakeInfo:
@@ -423,6 +423,42 @@ def test_flac_chunk_longer_than_150_ms_is_flagged(monkeypatch: pytest.MonkeyPatc
     role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7200 * 6))
     assert client.noncompliance == []
     role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(7201 * 6))
+    assert client.noncompliance == ["sent a source audio chunk longer than 150 ms"]
+
+
+@pytest.mark.parametrize(
+    ("within", "beyond"),
+    [
+        # 150 ms at 48 kHz plus one 4096-sample block is 11296 samples.
+        (
+            b"".join(flac_frame(64, number=n) for n in range(176)),
+            b"".join(flac_frame(64, number=n) for n in range(177)),
+        ),
+        (bytes(90_368), bytes(90_369)),
+    ],
+    ids=["frame samples", "bytes"],
+)
+def test_flac_chunk_beyond_its_budget_is_dropped_before_decoding(
+    monkeypatch: pytest.MonkeyPatch, within: bytes, beyond: bytes
+) -> None:
+    """Too many frame samples, or more bytes than 150 ms can need, never reach the decoder."""
+    decoded: list[bytes] = []
+
+    class _RecordingDecoder(_PassthroughDecoder):
+        def decode(self, data: bytes) -> bytes:
+            decoded.append(data)
+            return b""
+
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _RecordingDecoder()
+    )
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC))
+
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, within)
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, beyond)
+
+    assert decoded == [within]
     assert client.noncompliance == ["sent a source audio chunk longer than 150 ms"]
 
 

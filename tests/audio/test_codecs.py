@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from aiosendspin.audio.codecs import (
+    _flac_chunk_samples,
     create_decoder,
     create_encoder,
     decoded_bit_depth,
@@ -17,7 +18,7 @@ from aiosendspin.audio.codecs import (
     opus_available,
 )
 from aiosendspin.audio.format import _convert_s24_to_s32
-from tests.conftest import sine_pcm_16bit
+from tests.conftest import flac_frame, sine_pcm_16bit
 
 
 @pytest.fixture
@@ -222,3 +223,36 @@ def test_flac_encoder_unavailable_without_encoder(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("aiosendspin.audio.codecs._get_av", lambda: stub)
 
     assert flac_encoder_available() is False
+
+
+@pytest.mark.parametrize(
+    ("chunk", "samples"),
+    [
+        (flac_frame(1024) + flac_frame(512, number=1), 1536),
+        (b"\x00" + flac_frame(1024), 1024),
+        (flac_frame(1024) + flac_frame(512, number=1, bad_crc=True), 1024),
+        (flac_frame(1024) + flac_frame(4097, number=1), 1024),
+        (flac_frame(1024, channels=11) + flac_frame(512, number=1, channels=12), 1024),
+    ],
+)
+def test_flac_chunk_samples_counts_every_frame_the_decoder_accepts(
+    chunk: bytes, samples: int
+) -> None:
+    """Headers count at any offset, unless a field the decoder checks rules them out."""
+    assert (
+        _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=16, limit=10**6) == samples
+    )
+
+
+def test_flac_chunk_samples_skips_headers_in_another_sample_size() -> None:
+    """The decoder rejects frames whose sample size differs from STREAMINFO."""
+    chunk = flac_frame(1024)
+    assert _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=24, limit=10**6) == 0
+
+
+def test_flac_chunk_samples_is_over_limit_with_too_many_sync_codes() -> None:
+    """More than ``limit // 8`` sync codes count as past the limit."""
+    assert (
+        _flac_chunk_samples(b"\xff\xf8" * 104, max_blocksize=4096, bits_per_sample=16, limit=800)
+        > 800
+    )

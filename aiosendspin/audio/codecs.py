@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import struct
 import types
 from collections.abc import Mapping
@@ -617,6 +618,94 @@ class PcmDecoder:
     def flush(self) -> bytes:
         """No buffered audio for raw PCM."""
         return b""
+
+
+def _crc8_table() -> bytes:
+    table = bytearray(256)
+    for i in range(256):
+        crc = i
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+        table[i] = crc
+    return bytes(table)
+
+
+_FLAC_CRC8 = _crc8_table()
+
+
+_FLAC_SYNC = re.compile(rb"\xff[\xf8\xf9]")
+# Bits per sample for each frame header sample size code. Code 3 is reserved.
+_FLAC_SAMPLE_SIZES = (0, 8, 12, None, 16, 20, 24, 32)
+
+
+def _flac_chunk_samples(
+    data: bytes, *, max_blocksize: int, bits_per_sample: int, limit: int
+) -> int:
+    """
+    Sum the block sizes of the FLAC frame headers in ``data``, stopping once past ``limit``.
+
+    Every offset holding a header the decoder would accept counts, so the sum is never
+    below what decoding ``data`` produces. More than ``limit // 8`` sync codes also count as
+    past ``limit``: that is twice what frames of at least 16 samples need, which leaves room
+    for sync codes that occur by chance in audio data.
+    """
+    total = 0
+    end = len(data)
+    for candidates, match in enumerate(_FLAC_SYNC.finditer(data), 1):
+        pos = match.start()
+        if pos + 5 >= end:
+            break
+        if candidates > limit // 8:
+            return limit + 1
+        total += _flac_header_blocksize(data, pos, max_blocksize, bits_per_sample)
+        if total > limit:
+            return total
+    return total
+
+
+def _flac_header_blocksize(data: bytes, pos: int, max_blocksize: int, bits_per_sample: int) -> int:
+    """Return the block size of the FLAC frame header at ``pos``, or 0 if it is not one."""
+    blocksize_code = data[pos + 2] >> 4
+    rate_code = data[pos + 2] & 0x0F
+    channel_code = data[pos + 3] >> 4
+    sample_size = _FLAC_SAMPLE_SIZES[data[pos + 3] >> 1 & 0x07]
+    first = data[pos + 4]
+    if (
+        not blocksize_code
+        or rate_code == 15
+        or channel_code > 10
+        or sample_size not in (0, bits_per_sample)
+        or data[pos + 3] & 0x01
+        or first & 0xC0 == 0x80
+        or first >= 0xFE
+    ):
+        return 0
+    # The frame or sample number is UTF-8 coded: its leading one bits give the byte count.
+    i = pos + 4 + max(1, 8 - (first ^ 0xFF).bit_length())
+    if any(byte & 0xC0 != 0x80 for byte in data[pos + 5 : i]):
+        return 0
+    if blocksize_code == 1:
+        blocksize = 192
+    elif blocksize_code <= 5:
+        blocksize = 576 << (blocksize_code - 2)
+    elif blocksize_code == 6:
+        blocksize = int.from_bytes(data[i : i + 1], "big") + 1
+        i += 1
+    elif blocksize_code == 7:
+        blocksize = int.from_bytes(data[i : i + 2], "big") + 1
+        i += 2
+    else:
+        blocksize = 256 << (blocksize_code - 8)
+    if rate_code == 12:
+        i += 1
+    elif rate_code in (13, 14):
+        i += 2
+    if i >= len(data) or blocksize > max_blocksize:
+        return 0
+    crc = 0
+    for byte in data[pos:i]:
+        crc = _FLAC_CRC8[crc ^ byte]
+    return blocksize if crc == data[i] else 0
 
 
 class _AvDecoder:

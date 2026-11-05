@@ -8,7 +8,12 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from aiosendspin.audio.codecs import create_decoder, decoded_bit_depth, opus_available
+from aiosendspin.audio.codecs import (
+    _flac_chunk_samples,
+    create_decoder,
+    decoded_bit_depth,
+    opus_available,
+)
 from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
 from aiosendspin.models.source import SourceCommandServerPayload
@@ -49,6 +54,10 @@ class SourceV1Role(Role):
         self._decoder: object | None = None
         self._pcm_frame_bytes: int | None = None
         self._max_chunk_bytes = 0
+        self._flac_max_blocksize: int | None = None
+        self._flac_bits_per_sample = 0
+        self._flac_max_samples = 0
+        self._flac_max_bytes = 0
         self._stream: SourceStream | None = None
         self._stream_active = False
         # The source object of the client/state this activation requires.
@@ -275,6 +284,15 @@ class SourceV1Role(Role):
         # The longest chunk allowed is 150 ms of frames, measured on the decoded PCM.
         decoded_frame_bytes = audio_format.bit_depth // 8 * audio_format.channels
         self._max_chunk_bytes = source.sample_rate * 3 // 20 * decoded_frame_bytes
+        if source.codec is AudioCodec.FLAC and header is not None:
+            self._flac_max_blocksize = int.from_bytes(header[10:12], "big")
+            self._flac_bits_per_sample = ((header[20] & 0x01) << 4 | header[21] >> 4) + 1
+            # One more block absorbs a frame header pattern that occurs by chance in audio data.
+            self._flac_max_samples = source.sample_rate * 3 // 20 + self._flac_max_blocksize
+            # No FLAC encoding needs more than twice the decoded size, which bounds the scan.
+            self._flac_max_bytes = 2 * self._flac_max_samples * decoded_frame_bytes
+        else:
+            self._flac_max_blocksize = None
         self._stream = SourceStream(audio_format)
         self._stream_active = True
         self._client._signal_event(  # noqa: SLF001
@@ -297,6 +315,22 @@ class SourceV1Role(Role):
         if self._pcm_frame_bytes is None and not data:
             # An empty packet flushes the decoder and ends decoding for the stream.
             self._client.flag_noncompliance("sent an empty flac or opus source audio chunk")
+            return
+        # The FLAC decoder decodes every frame in a chunk, and a frame of a few bytes can declare
+        # up to 65536 samples, so a chunk of a few kilobytes can decode to minutes of audio.
+        # Counting the samples first rejects such chunks without decoding them. An Opus chunk is
+        # one packet, which holds at most 120 ms.
+        if self._flac_max_blocksize is not None and (
+            len(data) > self._flac_max_bytes
+            or _flac_chunk_samples(
+                data,
+                max_blocksize=self._flac_max_blocksize,
+                bits_per_sample=self._flac_bits_per_sample,
+                limit=self._flac_max_samples,
+            )
+            > self._flac_max_samples
+        ):
+            self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
             return
         try:
             pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
