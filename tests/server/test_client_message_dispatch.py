@@ -126,6 +126,21 @@ async def test_unknown_message_type_is_warned_once_per_type(
     assert "client/b" in warnings[1]
 
 
+async def test_unknown_message_type_warning_strips_control_characters(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A client-chosen type cannot add lines or terminal escapes to the warning."""
+    conn, _ = _connection([_unknown("client/a\nforged record \x1b[31mred")])
+
+    with caplog.at_level(logging.WARNING):
+        await conn._run_message_loop()  # noqa: SLF001
+
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "client/a forged record [31mred" in warning
+    assert "\n" not in warning
+    assert "\x1b" not in warning
+
+
 async def test_unknown_message_type_warnings_are_capped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -28,7 +28,8 @@ def clean_peer_text(part: str | None, limit: int = _MAX_DESCRIPTION_PART) -> str
     """Reduce a client-supplied fragment to a bounded, single-line run of printable words."""
     if not part:
         return ""
-    collapsed = " ".join(part.split())
+    # Leave room for the whitespace and non-printables cleaning drops without scanning all of it.
+    collapsed = " ".join(part[: limit * 4].split())
     printable = "".join(ch for ch in collapsed if ch.isprintable())
     return " ".join(printable.split())[:limit]
 

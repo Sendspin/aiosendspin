@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 from aiosendspin.models.core import ClientGoodbyeMessage, ClientGoodbyePayload
@@ -35,6 +37,26 @@ async def test_malformed_client_hello_rejects_without_raising() -> None:
     assert await conn._ingest_client_hello("{not json") is False  # noqa: SLF001
 
     conn.disconnect.assert_awaited_once_with(retry_connection=False)
+
+
+@pytest.mark.asyncio
+async def test_malformed_client_hello_log_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
+    """A hello with a huge wrong-typed field logs a bounded error, not the field's repr."""
+    loop = asyncio.get_running_loop()
+    conn = SendspinConnection(
+        _DummyServer(loop=loop, clock=LoopClock(loop)), wsock_client=MagicMock()
+    )
+    conn.disconnect = AsyncMock()  # type: ignore[method-assign]
+    hello = orjson.dumps(
+        {"type": "client/hello", "payload": {"client_id": "c", "name": ["A" * 100_000]}}
+    ).decode()
+
+    with caplog.at_level(logging.ERROR):
+        assert await conn._ingest_client_hello(hello) is False  # noqa: SLF001
+
+    (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "Malformed client/hello" in error
+    assert len(error) < 1_000
 
 
 @pytest.mark.asyncio
