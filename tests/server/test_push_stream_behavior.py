@@ -4870,14 +4870,16 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
         )
 
 
-def _pcm_passthrough_role(group: _DummyGroup, bit_depth: int = 16) -> _DummyRole:
+def _pcm_passthrough_role(
+    group: _DummyGroup, bit_depth: int = 16, frame_duration_us: int = 25_000
+) -> _DummyRole:
     transformer = group.transformer_pool.get_or_create(
         PcmPassthrough,
         channel_id=MAIN_CHANNEL.int,
         sample_rate=48000,
         bit_depth=bit_depth,
         channels=2,
-        frame_duration_us=25_000,
+        frame_duration_us=frame_duration_us,
     )
     role = _DummyRole(
         AudioRequirements(
@@ -4886,7 +4888,7 @@ def _pcm_passthrough_role(group: _DummyGroup, bit_depth: int = 16) -> _DummyRole
             channels=2,
             transformer=transformer,
             channel_id=MAIN_CHANNEL,
-            frame_duration_us=25_000,
+            frame_duration_us=frame_duration_us,
         )
     )
     group.clients.append(_DummyClient([role]))
@@ -5111,6 +5113,72 @@ async def test_flush_audio_defers_joins_until_tail_is_cached(mock_loop: Any) -> 
 
     assert len(role.received) == 2
     assert [chunk.data for chunk in joiner.received] == [chunk.data for chunk in role.received]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("join_before_flush", [True, False])
+async def test_flush_audio_delivers_tail_to_catching_up_player(
+    join_before_flush: bool,  # noqa: FBT001
+) -> None:
+    """A player whose catch-up runs during or after flush_audio() still receives the tail."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    loop = asyncio.get_running_loop()
+    stream = PushStream(loop=loop, clock=ManualClock(), group=group)
+
+    # 500 ms plus a 300-frame tail, nonzero so the silence padding stands out.
+    pcm = (bytes(range(1, 241)) * 410)[: (24_000 + 300) * 4]
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    # A different frame duration gives the joiner its own encoder, so it catches up.
+    if join_before_flush:
+        joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+        stream.on_role_join(joiner)
+        assert stream._catchup_tasks  # noqa: SLF001
+    await stream.flush_audio()
+    if not join_before_flush:
+        joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+        stream.on_role_join(joiner)
+        assert stream._catchup_tasks  # noqa: SLF001
+    await _drain_catchup_tasks(stream)
+
+    assert joiner.received
+    for prev, nxt in pairwise(joiner.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    start_us = joiner.received[0].timestamp_us - role.received[0].timestamp_us
+    expected = pcm[start_us * 48000 // 1_000_000 * 4 :]
+    data = b"".join(chunk.data for chunk in joiner.received)
+    assert data[: len(expected)] == expected
+    assert data[len(expected) :] == bytes(len(data) - len(expected))
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail_for_catching_up_player() -> None:
+    """A player catching up after flush_audio() also gets the samples its resampler holds back."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    loop = asyncio.get_running_loop()
+    stream = PushStream(loop=loop, clock=ManualClock(), group=group)
+
+    # 500 ms at 44.1 kHz resampled to the players' 48 kHz: 24000 output frames.
+    pcm = b"\x00\x10" * 2 * 22050
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+    stream.on_role_join(joiner)
+    await _drain_catchup_tasks(stream)
+
+    data = b"".join(chunk.data for chunk in joiner.received)
+    last_signal_frame = max(
+        i // 4 for i in range(0, len(data), 4) if int.from_bytes(data[i : i + 2], "little") > 64
+    )
+    start_frame = (joiner.received[0].timestamp_us - role.received[0].timestamp_us) * 48 // 1000
+    assert start_frame + last_signal_frame >= 23995
+    for prev, nxt in pairwise(joiner.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
 
 
 @pytest.mark.asyncio
