@@ -161,10 +161,10 @@ def test_impossible_declared_format_opens_no_stream(bad_format: dict[str, int]) 
 
 
 @pytest.mark.parametrize("codec", [AudioCodec.PCM, AudioCodec.OPUS])
-def test_codec_header_for_headerless_codec_is_flagged_and_passed_on(
+def test_codec_header_for_headerless_codec_is_flagged_and_dropped(
     monkeypatch: pytest.MonkeyPatch, codec: AudioCodec
 ) -> None:
-    """A codec_header the codec does not take is flagged, yet still reaches the decoder."""
+    """A codec_header the codec does not take is flagged and never reaches the decoder."""
     headers: list[bytes | None] = []
 
     def _decoder(*_args: object, codec_header: bytes | None, **_kwargs: object) -> object:
@@ -187,7 +187,7 @@ def test_codec_header_for_headerless_codec_is_flagged_and_passed_on(
     )
 
     assert role.stream_active
-    assert headers == [b"head"]
+    assert headers == [None]
     assert client.noncompliance == [f"client-stream/start sent a codec_header for {codec.value}"]
 
 
@@ -781,11 +781,20 @@ def test_teardown_cancels_a_queued_start(teardown: str) -> None:
 
 
 def _start_payload(
-    codec: AudioCodec, *, channels: int = 2, bit_depth: int = 16, sample_rate: int = 48000
+    codec: AudioCodec,
+    *,
+    channels: int = 2,
+    bit_depth: int = 16,
+    sample_rate: int = 48000,
+    streaminfo_rate: int | None = None,
 ) -> ClientStreamStartPayload:
     header = None
     if codec is AudioCodec.FLAC:
-        fields = (sample_rate << 44) | ((channels - 1) << 41) | ((bit_depth - 1) << 36)
+        fields = (
+            ((streaminfo_rate or sample_rate) << 44)
+            | ((channels - 1) << 41)
+            | ((bit_depth - 1) << 36)
+        )
         streaminfo = bytes([16, 0, 16, 0]) + bytes(6) + fields.to_bytes(8, "big") + bytes(16)
         header = base64.b64encode(b"fLaC\x80\x00\x00\x22" + streaminfo).decode()
     return ClientStreamStartPayload(
@@ -802,9 +811,9 @@ def _start_payload(
 @pytest.mark.parametrize(
     ("codec", "channels", "bit_depth", "decoded_bit_depth"),
     [
-        (AudioCodec.PCM, 9, 16, 16),
-        (AudioCodec.PCM, 11, 24, 24),
-        (AudioCodec.PCM, 12, 32, 32),
+        (AudioCodec.PCM, 8, 16, 16),
+        (AudioCodec.PCM, 6, 24, 24),
+        (AudioCodec.PCM, 3, 32, 32),
         (AudioCodec.PCM, 2, 8, 16),
         (AudioCodec.FLAC, 2, 8, 16),
         (AudioCodec.FLAC, 2, 12, 16),
@@ -814,7 +823,7 @@ def _start_payload(
 def test_any_decodable_format_opens_at_its_decoded_format(
     codec: AudioCodec, channels: int, bit_depth: int, decoded_bit_depth: int
 ) -> None:
-    """The stream opens for any channel count and announces the decoded PCM format."""
+    """The stream opens for any channel count up to 8 and announces the decoded PCM format."""
     pytest.importorskip("av")
     role, client = _make_role()
 
@@ -860,3 +869,55 @@ def test_bit_depth_the_codec_cannot_carry_is_flagged(
 
     assert not role.stream_active
     assert client.noncompliance == [f"client-stream/start announced {reason}"]
+
+
+@pytest.mark.parametrize(
+    ("codec", "sample_rate", "channels"),
+    [
+        (AudioCodec.PCM, 384_001, 2),
+        (AudioCodec.PCM, 48000, 9),
+        (AudioCodec.OPUS, 48000, 3),
+    ],
+)
+def test_format_beyond_server_limits_is_declined_without_a_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    codec: AudioCodec,
+    sample_rate: int,
+    channels: int,
+) -> None:
+    """A rate or channel count beyond the server's limits opens no stream and warns once."""
+    monkeypatch.setattr("aiosendspin.server.roles.source.v1.opus_available", lambda: True)
+    role, client = _make_role()
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            role.on_client_stream_start(
+                _start_payload(codec, channels=channels, sample_rate=sample_rate)
+            )
+
+    assert not role.stream_active
+    assert client.noncompliance == []
+    assert len(caplog.records) == 1
+
+
+def test_highest_supported_rate_opens_a_stream() -> None:
+    """384 kHz is within the server's limits."""
+    role, client = _make_role()
+
+    role.on_client_stream_start(_start_payload(AudioCodec.PCM, sample_rate=384_000))
+
+    assert role.stream_active
+    assert client.noncompliance == []
+
+
+def test_flac_streaminfo_rate_must_match_the_declared_rate() -> None:
+    """A STREAMINFO rate that differs from the declared rate is flagged and opens no stream."""
+    role, client = _make_role()
+
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC, streaminfo_rate=44100))
+
+    assert not role.stream_active
+    assert client.noncompliance == [
+        "client-stream/start FLAC STREAMINFO sample rate differs from sample_rate"
+    ]

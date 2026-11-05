@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_SAMPLE_RATE = 384_000
+_MAX_CHANNELS = 8
+
 
 class SourceV1Role(Role):
     """Per-connection role that decodes audio streamed up by a source client."""
@@ -59,6 +62,8 @@ class SourceV1Role(Role):
         self._signal: SignalState | None = None
         self._decode_error_count = 0
         self._last_decode_error_log_s: float | None = None
+        self._unsupported_count = 0
+        self._last_unsupported_log_s: float | None = None
 
     @property
     def role_id(self) -> str:
@@ -190,11 +195,9 @@ class SourceV1Role(Role):
             channels=source.channels,
         )
         header = None
-        if source.codec_header is not None:
-            if source.codec is not AudioCodec.FLAC:
-                on_noncompliance(
-                    f"client-stream/start sent a codec_header for {source.codec.value}"
-                )
+        if source.codec_header is not None and source.codec is not AudioCodec.FLAC:
+            on_noncompliance(f"client-stream/start sent a codec_header for {source.codec.value}")
+        elif source.codec_header is not None:
             try:
                 header = base64.b64decode(source.codec_header, validate=True)
             except (binascii.Error, ValueError):
@@ -209,6 +212,11 @@ class SourceV1Role(Role):
         ):
             on_noncompliance("client-stream/start FLAC codec_header must contain STREAMINFO")
             return None
+        if header is not None and int.from_bytes(header[18:21], "big") >> 4 != source.sample_rate:
+            on_noncompliance(
+                "client-stream/start FLAC STREAMINFO sample rate differs from sample_rate"
+            )
+            return None
         return audio_format, header
 
     def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:
@@ -221,6 +229,25 @@ class SourceV1Role(Role):
             payload, on_noncompliance=self._client.flag_noncompliance
         )
         if checked is None:
+            return
+        # Opus without an OpusHead decodes at most two channels.
+        max_channels = 2 if source.codec is AudioCodec.OPUS else _MAX_CHANNELS
+        if source.sample_rate > _MAX_SAMPLE_RATE or source.channels > max_channels:
+            self._unsupported_count += 1
+            now_s = time.monotonic()
+            last_log_s = self._last_unsupported_log_s
+            if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
+                logger.warning(
+                    "Declined %s source stream(s) since last report, latest at %s Hz with "
+                    "%s channels, beyond the supported %s Hz and %s channels",
+                    self._unsupported_count,
+                    source.sample_rate,
+                    source.channels,
+                    _MAX_SAMPLE_RATE,
+                    max_channels,
+                )
+                self._unsupported_count = 0
+                self._last_unsupported_log_s = now_s
             return
         audio_format, header = checked
         if not self._stream_wanted:
