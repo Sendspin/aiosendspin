@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import struct
 import sys
 import threading
@@ -46,7 +47,11 @@ from aiosendspin.server.push_stream import (
     PushStream,
 )
 from aiosendspin.server.roles import AudioChunk, AudioRequirements
-from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
+from aiosendspin.server.roles.player.audio_transformers import (
+    FlacEncoder,
+    OpusEncoder,
+    PcmPassthrough,
+)
 
 
 @dataclass(slots=True)
@@ -4875,19 +4880,22 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
 
 
 def _pcm_passthrough_role(
-    group: _DummyGroup, bit_depth: int = 16, frame_duration_us: int = 25_000
+    group: _DummyGroup,
+    bit_depth: int = 16,
+    frame_duration_us: int = 25_000,
+    sample_rate: int = 48000,
 ) -> _DummyRole:
     transformer = group.transformer_pool.get_or_create(
         PcmPassthrough,
         channel_id=MAIN_CHANNEL.int,
-        sample_rate=48000,
+        sample_rate=sample_rate,
         bit_depth=bit_depth,
         channels=2,
         frame_duration_us=frame_duration_us,
     )
     role = _DummyRole(
         AudioRequirements(
-            sample_rate=48000,
+            sample_rate=sample_rate,
             bit_depth=bit_depth,
             channels=2,
             transformer=transformer,
@@ -5082,6 +5090,68 @@ async def test_flush_audio_delivers_flac_tail_on_every_channel(mock_loop: Any) -
         assert decoded[len(pcm) :] == bytes(len(decoded) - len(pcm))
         for prev, nxt in pairwise(role.received):
             assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+def _signal_end_us(first_timestamp_us: int, pcm: bytes, sample_rate: int) -> float:
+    """Return when the last loud sample of 16-bit stereo `pcm` ends."""
+    left = struct.unpack(f"<{len(pcm) // 2}h", pcm)[::2]
+    last = max(i for i, sample in enumerate(left) if abs(sample) > 1000)
+    return first_timestamp_us + (last + 1) * 1_000_000 / sample_rate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sample_rate", "tail_samples"),
+    [(48000, 0), (48000, 700), (16000, 210)],
+    ids=["frame_boundary", "short_padding", "low_rate"],
+)
+async def test_flush_audio_delivers_opus_lookahead(
+    mock_loop: Any, sample_rate: int, tail_samples: int
+) -> None:
+    """Opus players play to the end of the input, like PCM players, after flush_audio()."""
+    group = _DummyGroup(clients=[])
+    pcm_role = _pcm_passthrough_role(group, sample_rate=sample_rate)
+    transformer = group.transformer_pool.get_or_create(
+        OpusEncoder,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=sample_rate,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=20_000,
+    )
+    opus_role = _DummyRole(
+        AudioRequirements(
+            sample_rate=sample_rate,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=20_000,
+        )
+    )
+    group.clients.append(_DummyClient([opus_role]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    frame_count = 50 * transformer.frame_samples + tail_samples
+    tone = [
+        round(8000 * math.sin(2 * math.pi * 1000 * i / sample_rate)) for i in range(frame_count)
+    ]
+    pcm = b"".join(struct.pack("<hh", sample, sample) for sample in tone)
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=sample_rate, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    pcm_end_us = _signal_end_us(
+        pcm_role.received[0].timestamp_us,
+        b"".join(chunk.data for chunk in pcm_role.received),
+        sample_rate,
+    )
+    decoder = create_decoder(
+        "opus", sample_rate=sample_rate, bit_depth=16, channels=2, codec_header=None
+    )
+    decoded = b"".join(decoder.decode(chunk.data) for chunk in opus_role.received)
+    opus_end_us = _signal_end_us(opus_role.received[0].timestamp_us, decoded, sample_rate)
+    assert abs(opus_end_us - pcm_end_us) <= 2 * 1_000_000 / sample_rate
 
 
 @pytest.mark.asyncio

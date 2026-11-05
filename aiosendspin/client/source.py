@@ -65,6 +65,7 @@ class SourceCapture:
         )
         self._started = False
         self._capture_spans: deque[tuple[int, int]] = deque()
+        self._frame_end_us = 0
 
     @property
     def audio_format(self) -> AudioFormat:
@@ -167,7 +168,7 @@ class SourceCapture:
 
     async def _send_frames(self, frames: Iterable[tuple[bytes, int]], stale_before_us: int) -> None:
         """Send encoded frames, skipping those captured before ``stale_before_us``."""
-        for frame, _frame_duration_us in frames:
+        for frame, frame_duration_us in frames:
             captured_us = self._next_capture_timestamp()
             if captured_us >= stale_before_us:
                 timestamp_us = self._connection.compute_source_timestamp(
@@ -175,11 +176,12 @@ class SourceCapture:
                 )
                 await self._connection.send_source_chunk(frame, timestamp_us=timestamp_us)
             self._consume_capture_samples(self._encoder.frame_samples)
+            self._frame_end_us = captured_us + frame_duration_us
 
     def _next_capture_timestamp(self) -> int:
         if self._capture_spans:
             return self._capture_spans[0][1]
-        return self._client.now_us()
+        return self._frame_end_us
 
     def _consume_capture_samples(self, samples: int) -> None:
         while samples > 0 and self._capture_spans:

@@ -542,25 +542,28 @@ class OpusEncoder:
         return frames
 
     def flush(self) -> list[tuple[bytes, int]]:
-        """Flush remaining buffered audio, padded with silence."""
-        if not self._buffer:
+        """Flush remaining buffered audio and the encoder lookahead, padded with silence."""
+        if not self._buffer and self._output_frame_count == 0:
             return []
 
         self._ensure_initialized()
         chunk_size = self._chunk_samples * self._frame_stride
 
-        padding_needed = chunk_size - len(self._buffer)
-        self._buffer.extend(bytes(padding_needed))
-        chunk_pcm = bytes(self._buffer)
-        self._buffer.clear()
+        # The encoder holds back its internal delay, which can exceed the pre-skip,
+        # so follow the audio with a whole silent frame.
+        self._buffer.extend(bytes(-len(self._buffer) % chunk_size + chunk_size))
 
-        encoded = self._encode_chunk(chunk_pcm)
-        if encoded:
-            self._output_frame_count += 1
-            self._dur_residue += self._chunk_samples * 1_000_000
-            delta_us, self._dur_residue = divmod(self._dur_residue, self._sample_rate)
-            return [(encoded, delta_us)]
-        return []
+        frames: list[tuple[bytes, int]] = []
+        while self._buffer:
+            chunk_pcm = bytes(memoryview(self._buffer)[:chunk_size])
+            del self._buffer[:chunk_size]
+            encoded = self._encode_chunk(chunk_pcm)
+            if encoded:
+                self._output_frame_count += 1
+                self._dur_residue += self._chunk_samples * 1_000_000
+                delta_us, self._dur_residue = divmod(self._dur_residue, self._sample_rate)
+                frames.append((encoded, delta_us))
+        return frames
 
     def get_header(self) -> bytes | None:
         """Opus doesn't need a header for raw packets (player stream/start)."""
