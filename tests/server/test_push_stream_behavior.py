@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
 
+import numpy as np
 import pytest
 
 from aiosendspin.audio.codecs import create_decoder
@@ -5152,6 +5153,61 @@ async def test_flush_audio_delivers_opus_lookahead(
     decoded = b"".join(decoder.decode(chunk.data) for chunk in opus_role.received)
     opus_end_us = _signal_end_us(opus_role.received[0].timestamp_us, decoded, sample_rate)
     assert abs(opus_end_us - pcm_end_us) <= 2 * 1_000_000 / sample_rate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("encoder_cls", "codec"), [(FlacEncoder, "flac"), (OpusEncoder, "opus")])
+async def test_flush_audio_delivers_stream_shorter_than_one_encoder_frame(
+    mock_loop: Any, encoder_cls: type[FlacEncoder | OpusEncoder], codec: str
+) -> None:
+    """flush_audio() delivers a stream shorter than one encoder frame, on the PCM timeline."""
+    group = _DummyGroup(clients=[])
+    pcm_role = _pcm_passthrough_role(group)
+    transformer = group.transformer_pool.get_or_create(
+        encoder_cls,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=25_000,
+    )
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    frame_count = 500
+    tone = (8000 * np.sin(2 * np.pi * 1000 * np.arange(frame_count) / 48000)).astype(np.int16)
+    pcm = np.repeat(tone, 2).tobytes()
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+    chunk = role.received[0]
+    assert chunk.timestamp_us == pcm_role.received[0].timestamp_us - transformer.lookahead_us
+
+    decoder = create_decoder(
+        codec, sample_rate=48000, bit_depth=16, channels=2, codec_header=transformer.get_header()
+    )
+    decoded = np.frombuffer(decoder.decode(chunk.data) + decoder.flush(), dtype=np.int16)
+    start = transformer.lookahead_us * 48000 // 1_000_000 * 2
+    signal = decoded[start : start + len(pcm) // 2]
+    if codec == "flac":
+        assert signal.tobytes() == pcm
+        assert not decoded[start + len(pcm) // 2 :].any()
+    else:
+        expected = np.repeat(tone, 2).astype(np.float64)
+        error = signal.astype(np.float64) - expected
+        assert np.sqrt(np.mean(error**2)) < 0.2 * np.sqrt(np.mean(expected**2))
 
 
 @pytest.mark.asyncio
