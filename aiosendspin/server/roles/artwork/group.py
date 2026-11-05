@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -25,6 +26,10 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Kept apart from the default executor so encodes don't queue ahead of audio work, and
+# bounded so many clients can't run more encodes at once.
+_ENCODE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sendspin-artwork")
 
 
 class ArtworkGroupRole(GroupRole):
@@ -139,7 +144,8 @@ class ArtworkGroupRole(GroupRole):
             assert channel_config.width is not None
             assert channel_config.height is not None
             assert channel_config.format is not None
-            img_data = await asyncio.to_thread(
+            img_data = await asyncio.get_running_loop().run_in_executor(
+                _ENCODE_EXECUTOR,
                 self._process_and_encode_image,
                 # Pillow images are not safe to share across concurrent encode tasks.
                 image.copy(),
