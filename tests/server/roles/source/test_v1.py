@@ -10,6 +10,7 @@ import pytest
 
 from aiosendspin.audio.codecs import PcmPassthrough
 from aiosendspin.audio.format import AudioFormat
+from aiosendspin.clock import ManualClock
 from aiosendspin.models.core import ClientStatePayload
 from aiosendspin.models.source import (
     ClientHelloSourceFeatures,
@@ -40,6 +41,11 @@ class _FakeConnection:
     pass
 
 
+class _FakeServer:
+    def __init__(self) -> None:
+        self.clock = ManualClock(now_us_value=5_000_000)
+
+
 class _FakeClient:
     def __init__(self, *, line_sense: bool = True) -> None:
         self.events: list[Any] = []
@@ -49,6 +55,7 @@ class _FakeClient:
         self.available = True
         self.noncompliance: list[str] = []
         self.held = False
+        self._server = _FakeServer()
 
     @property
     def info(self) -> _FakeInfo:
@@ -980,3 +987,77 @@ def test_flac_streaminfo_rate_must_match_the_declared_rate() -> None:
     assert client.noncompliance == [
         "client-stream/start FLAC STREAMINFO sample rate differs from sample_rate"
     ]
+
+
+def test_source_running_ahead_of_real_time_is_dropped_without_a_flag(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Audio more than 1 s ahead of the server clock is dropped until the clock catches up."""
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+    handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
+    chunk_100_ms = bytes(4800 * 4)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(15):
+            role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, chunk_100_ms)
+        client._server.clock.advance_us(200_000)  # noqa: SLF001
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, chunk_100_ms)
+
+    assert len(handle._queue) == 12  # noqa: SLF001
+    assert client.noncompliance == []
+    assert len(caplog.records) == 1
+
+
+def test_restarted_stream_keeps_the_lead() -> None:
+    """A new client-stream/start does not reset how far the source runs ahead."""
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+    for _ in range(11):
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(4800 * 4))
+
+    role.on_client_stream_start(_pcm_start_payload())
+    handle = [e for e in client.events if isinstance(e, SourceStreamStartedEvent)][-1].handle
+    role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(4800 * 4))
+
+    assert len(handle._queue) == 0  # noqa: SLF001
+
+
+def test_flac_chunks_that_decode_to_nothing_use_up_the_lead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Undecodable FLAC chunks still cost their bytes, so a flood of them gets dropped unread."""
+    decoded: list[bytes] = []
+
+    class _RecordingDecoder(_PassthroughDecoder):
+        def decode(self, data: bytes) -> bytes:
+            decoded.append(data)
+            return b""
+
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _RecordingDecoder()
+    )
+    role, _client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC))
+
+    # Half of 38 400 bytes is 100 ms at 48 kHz stereo 16-bit.
+    for _ in range(15):
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(38_400))
+
+    assert len(decoded) == 11
+
+
+def test_source_with_a_slightly_fast_clock_keeps_streaming() -> None:
+    """A capture clock 0.5% fast never builds up a lead that drops audio."""
+    role, client = _make_role()
+    role.on_client_stream_start(_pcm_start_payload())
+    handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
+    received = 0
+
+    for _ in range(3000):
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, bytes(4824 * 4))
+        received += len(handle._queue)  # noqa: SLF001
+        handle._queue.clear()  # noqa: SLF001
+        client._server.clock.advance_us(100_000)  # noqa: SLF001
+
+    assert received == 3000

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from aiosendspin.client.source import SourceCapture
+from aiosendspin.clock import RawMonotonicClock
 from aiosendspin.models.core import ClientStatePayload
 from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.models.source import (
@@ -30,6 +31,10 @@ class _ServerSideConnection:
     pass
 
 
+class _ServerSide:
+    clock = RawMonotonicClock()
+
+
 class _ServerSideClient:
     """Minimal stand-in for the server's SendspinClient used by the role under test."""
 
@@ -45,6 +50,7 @@ class _ServerSideClient:
         self.connection = _ServerSideConnection()
         self.available = True
         self.sent: list[Any] = []
+        self._server = _ServerSide()
 
     def _signal_event(self, event: Any) -> None:
         self.events.append(event)
