@@ -66,8 +66,9 @@ if TYPE_CHECKING:
 
 
 BUFFER_TRACKER_RESET_DELAY_S = 2.0
-# Largest required_lead_time_ms / min_buffer_ms the server honours; larger values are clamped.
+# Largest required_lead_time_ms the server honours. Larger values are clamped.
 MAX_TIMING_PARAMETER_MS = 30_000
+MAX_MIN_BUFFER_MS = 5_000
 
 
 @dataclass
@@ -528,7 +529,7 @@ class PlayerV1Role(Role):
 
     def get_min_buffer_us(self) -> int:
         """Return reported minimum buffer in microseconds, clamped to the server maximum."""
-        return min(max(self.min_buffer_ms, 0), MAX_TIMING_PARAMETER_MS) * 1_000
+        return min(max(self.min_buffer_ms, 0), MAX_MIN_BUFFER_MS) * 1_000
 
     def get_output_delay_ms(self) -> int:
         """Return output delay for protocol API."""
@@ -684,6 +685,8 @@ class PlayerV1Role(Role):
             or state.min_buffer_ms is None
         ):
             reasons.append("omitted required player timing fields")
+        if state.min_buffer_ms is not None and state.min_buffer_ms > MAX_MIN_BUFFER_MS:
+            reasons.append(f"reported min_buffer_ms above {MAX_MIN_BUFFER_MS}")
         commands = state.supported_commands
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         # A pre-#177 hello's commands count as declared; that client is already flagged.
@@ -875,14 +878,16 @@ class PlayerV1Role(Role):
             and self.required_lead_time_ms != state.required_lead_time_ms
         ):
             self.required_lead_time_ms = state.required_lead_time_ms
-            self._log_if_clamped("required_lead_time_ms", state.required_lead_time_ms)
+            self._log_if_clamped(
+                "required_lead_time_ms", state.required_lead_time_ms, MAX_TIMING_PARAMETER_MS
+            )
             self.emit_client_event(
                 RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
             )
 
         if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
             self.min_buffer_ms = state.min_buffer_ms
-            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms)
+            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms, MAX_MIN_BUFFER_MS)
             self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
     def _apply_state_format(self, state: PlayerStatePayload) -> None:
@@ -924,10 +929,10 @@ class PlayerV1Role(Role):
         ):
             self._begin_format_transition()
 
-    def _log_if_clamped(self, name: str, value: int) -> None:
-        if value > MAX_TIMING_PARAMETER_MS:
+    def _log_if_clamped(self, name: str, value: int, maximum: int) -> None:
+        if value > maximum:
             self._client._logger.debug(  # noqa: SLF001
-                "Clamping %s=%s to %s ms", name, value, MAX_TIMING_PARAMETER_MS
+                "Clamping %s=%s to %s ms", name, value, maximum
             )
 
     def _legacy_hello_commands(self) -> list[PlayerCommand] | None:

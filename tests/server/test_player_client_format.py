@@ -303,6 +303,16 @@ def test_declared_format_is_not_flagged(mock_server: MagicMock) -> None:
     assert role.client_state_deviations(_state(FLAC_48K)) == []
 
 
+def test_min_buffer_above_5000_is_flagged(mock_server: MagicMock) -> None:
+    """A min_buffer_ms above the spec's 5000 reports a deviation."""
+    _, role, _ = _make_player(mock_server)
+    payload = _state(FLAC_48K)
+    assert payload.player is not None
+    payload.player.min_buffer_ms = 9000
+
+    assert role.client_state_deviations(payload) == ["reported min_buffer_ms above 5000"]
+
+
 def test_opus_format_ignores_bit_depth(mock_server: MagicMock) -> None:
     """An opus preference matches its supported entry whatever bit_depth it carries."""
     _, role, _ = _make_player(mock_server, [PCM_48K, OPUS_48K])
