@@ -1047,6 +1047,31 @@ def test_flac_chunks_that_decode_to_nothing_use_up_the_lead(
     assert len(decoded) == 11
 
 
+def test_flac_frames_dropped_after_decoding_use_up_the_lead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frames the decoder rejects still cost the samples their headers declare."""
+    decoded: list[bytes] = []
+
+    class _RejectingDecoder(_PassthroughDecoder):
+        def decode(self, data: bytes) -> bytes:
+            decoded.append(data)
+            raise ValueError
+
+    monkeypatch.setattr(
+        "aiosendspin.server.roles.source.v1.create_decoder", lambda *_a, **_k: _RejectingDecoder()
+    )
+    role, _client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC))
+
+    # Two 4096-sample frames are 171 ms at 48 kHz.
+    chunk = flac_frame(4096) + flac_frame(4096, number=1)
+    for _ in range(10):
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, chunk)
+
+    assert len(decoded) == 6
+
+
 def test_source_with_a_slightly_fast_clock_keeps_streaming() -> None:
     """A capture clock 0.5% fast never builds up a lead that drops audio."""
     role, client = _make_role()

@@ -61,6 +61,7 @@ class SourceV1Role(Role):
         self._flac_bits_per_sample = 0
         self._flac_max_samples = 0
         self._flac_max_bytes = 0
+        self._decoded_frame_bytes = 0
         self._decoded_bytes_per_s = 0
         # Server time at which the decoded audio so far would finish playing.
         self._audio_end_us = 0
@@ -292,6 +293,7 @@ class SourceV1Role(Role):
         # The longest chunk allowed is 150 ms of frames, measured on the decoded PCM.
         decoded_frame_bytes = audio_format.bit_depth // 8 * audio_format.channels
         self._max_chunk_bytes = source.sample_rate * 3 // 20 * decoded_frame_bytes
+        self._decoded_frame_bytes = decoded_frame_bytes
         self._decoded_bytes_per_s = source.sample_rate * decoded_frame_bytes
         if source.codec is AudioCodec.FLAC and header is not None:
             self._flac_max_blocksize = int.from_bytes(header[10:12], "big")
@@ -345,15 +347,16 @@ class SourceV1Role(Role):
         # up to 65536 samples, so a chunk of a few kilobytes can decode to minutes of audio.
         # Counting the samples first rejects such chunks without decoding them. An Opus chunk is
         # one packet, which holds at most 120 ms.
-        if self._flac_max_blocksize is not None and (
-            len(data) > self._flac_max_bytes
-            or _flac_chunk_samples(
+        flac_samples = 0
+        if self._flac_max_blocksize is not None and len(data) <= self._flac_max_bytes:
+            flac_samples = _flac_chunk_samples(
                 data,
                 max_blocksize=self._flac_max_blocksize,
                 bits_per_sample=self._flac_bits_per_sample,
                 limit=self._flac_max_samples,
             )
-            > self._flac_max_samples
+        if self._flac_max_blocksize is not None and (
+            len(data) > self._flac_max_bytes or flac_samples > self._flac_max_samples
         ):
             self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
         else:
@@ -375,8 +378,11 @@ class SourceV1Role(Role):
                     self._last_decode_error_log_s = now_s
         charged_bytes = len(pcm or b"")
         if self._flac_max_blocksize is not None:
-            # Half the bytes stays below honest audio and charges chunks that decode to nothing.
-            charged_bytes = max(charged_bytes, len(data) // 2)
+            # Charge what the decoder may have done even when its output was dropped. Half the
+            # bytes stays below honest audio and charges chunks without frame headers.
+            charged_bytes = max(
+                charged_bytes, flac_samples * self._decoded_frame_bytes, len(data) // 2
+            )
         self._audio_end_us = max(self._audio_end_us, now_us) + int(
             charged_bytes * 1_000_000 / self._decoded_bytes_per_s / _CLOCK_TOLERANCE
         )
