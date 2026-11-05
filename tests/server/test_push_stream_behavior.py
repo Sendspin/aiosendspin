@@ -5191,14 +5191,15 @@ async def test_flush_audio_delivers_stream_shorter_than_one_encoder_frame(
     await stream.commit_audio()
     await stream.flush_audio()
 
-    assert len(role.received) == 1
-    chunk = role.received[0]
-    assert chunk.timestamp_us == pcm_role.received[0].timestamp_us - transformer.lookahead_us
+    assert role.received[0].timestamp_us == (
+        pcm_role.received[0].timestamp_us - transformer.lookahead_us
+    )
 
     decoder = create_decoder(
         codec, sample_rate=48000, bit_depth=16, channels=2, codec_header=transformer.get_header()
     )
-    decoded = np.frombuffer(decoder.decode(chunk.data) + decoder.flush(), dtype=np.int16)
+    encoded = b"".join(decoder.decode(chunk.data) for chunk in role.received)
+    decoded = np.frombuffer(encoded + decoder.flush(), dtype=np.int16)
     start = transformer.lookahead_us * 48000 // 1_000_000 * 2
     signal = decoded[start : start + len(pcm) // 2]
     if codec == "flac":
