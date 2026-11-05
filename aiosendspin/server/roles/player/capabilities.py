@@ -14,6 +14,7 @@ from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, Opus
 PCM_BIT_DEPTHS: frozenset[int] = frozenset({16, 24, 32})
 FLAC_BIT_DEPTHS: frozenset[int] = FlacEncoder.VALID_BIT_DEPTHS
 FLAC_MAX_CHANNELS = 8
+MAX_SAMPLE_RATE = 384_000
 # DEPRECATED: unused since opus ignores bit_depth, remove in aiosendspin <version>
 OPUS_BIT_DEPTHS: frozenset[int] = frozenset({16})
 
@@ -31,7 +32,7 @@ def can_encode_format(fmt: SupportedAudioFormat) -> bool:
     - Opus channels: 1 or 2 only, as multichannel not yet implemented;
       also requires PyAV built with libopus
     - Opus: sample rate must be one of 8k, 12k, 16k, 24k, 48k
-    - FLAC/PCM: any sample rate
+    - FLAC/PCM: sample rate up to 384 kHz
 
     Args:
         fmt: The format to validate.
@@ -39,7 +40,7 @@ def can_encode_format(fmt: SupportedAudioFormat) -> bool:
     Returns:
         True if the server can encode this format.
     """
-    if fmt.sample_rate <= 0:
+    if not 0 < fmt.sample_rate <= MAX_SAMPLE_RATE:
         return False
     if fmt.channels not in VALID_CHANNELS:
         return False
