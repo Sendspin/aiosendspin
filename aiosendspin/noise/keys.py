@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from cryptography.hazmat.primitives import serialization
@@ -51,7 +51,7 @@ def generate_psk() -> bytes:
 class Identity:
     """Sendspin static identity — a long-term X25519 keypair."""
 
-    private_bytes: bytes
+    private_bytes: bytes = field(repr=False)
     public_bytes: bytes
 
     @classmethod

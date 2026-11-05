@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, NoReturn, Protocol, cast, overload
 
 from aiohttp import WSMsgType
@@ -140,7 +140,7 @@ class PairingAttempt:
     """
     pairing_format: PairingCodeFormat | None = None
     """Emission format for the dynamic pairing code; absent for the other methods."""
-    pairing_psk: bytes | None = None
+    pairing_psk: bytes | None = field(default=None, repr=False)
     """Required for the Pairing PSK method; the live PSK pasted from a token."""
     client_id: str | None = None
     """Required for the Pairing PSK method; the ``client_id`` decoded from the same token.

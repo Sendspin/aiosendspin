@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -62,19 +63,15 @@ def mock_server() -> MagicMock:
     return server
 
 
-def _make_player(
-    server: MagicMock,
-    supported_formats: list[SupportedAudioFormat] | None = None,
-) -> tuple[SendspinClient, PlayerV1Role, _FakeConnection]:
-    client = SendspinClient(server, client_id="p1")
-    SendspinGroup(server, client)
-
+def _attach(
+    client: SendspinClient, supported_formats: list[SupportedAudioFormat]
+) -> _FakeConnection:
     conn = _FakeConnection()
     hello = MagicMock()
-    hello.client_id = "p1"
-    hello.name = "p1"
+    hello.client_id = client.client_id
+    hello.name = client.client_id
     hello.player_support = ClientHelloPlayerSupport(
-        supported_formats=supported_formats or [PCM_48K, FLAC_48K],
+        supported_formats=supported_formats,
         buffer_capacity=100_000,
     )
     hello.artwork_support = None
@@ -88,6 +85,17 @@ def _make_player(
         active_roles=[Roles.PLAYER.value],
     )
     client.mark_connected()
+    return conn
+
+
+def _make_player(
+    server: MagicMock,
+    supported_formats: list[SupportedAudioFormat] | None = None,
+    client_id: str = "p1",
+) -> tuple[SendspinClient, PlayerV1Role, _FakeConnection]:
+    client = SendspinClient(server, client_id=client_id)
+    SendspinGroup(server, client)
+    conn = _attach(client, supported_formats or [PCM_48K, FLAC_48K])
     role = client.role("player@v1")
     assert isinstance(role, PlayerV1Role)
     return client, role, conn
@@ -303,6 +311,16 @@ def test_declared_format_is_not_flagged(mock_server: MagicMock) -> None:
     assert role.client_state_deviations(_state(FLAC_48K)) == []
 
 
+def test_min_buffer_above_5000_is_flagged(mock_server: MagicMock) -> None:
+    """A min_buffer_ms above the spec's 5000 reports a deviation."""
+    _, role, _ = _make_player(mock_server)
+    payload = _state(FLAC_48K)
+    assert payload.player is not None
+    payload.player.min_buffer_ms = 9000
+
+    assert role.client_state_deviations(payload) == ["reported min_buffer_ms above 5000"]
+
+
 def test_opus_format_ignores_bit_depth(mock_server: MagicMock) -> None:
     """An opus preference matches its supported entry whatever bit_depth it carries."""
     _, role, _ = _make_player(mock_server, [PCM_48K, OPUS_48K])
@@ -369,3 +387,84 @@ def test_preference_is_reset_on_reconnect(mock_server: MagicMock) -> None:
     role.on_connect()
 
     assert isinstance(_transformer(role), PcmPassthrough)
+
+
+def test_format_change_drops_unused_encoder(mock_server: MagicMock) -> None:
+    """An encoder no role uses leaves the pool, also without an active stream."""
+    _, role, _ = _make_player(mock_server)
+    role.on_client_state(_state(FLAC_48K))
+    flac = _transformer(role)
+
+    role.on_client_state(_state(PCM_48K))
+    role.on_client_state(_state(FLAC_48K))
+
+    assert _transformer(role) is not flac
+
+
+@pytest.mark.asyncio
+async def test_format_change_keeps_encoder_another_member_uses(mock_server: MagicMock) -> None:
+    """An encoder stays pooled while another group member still uses it."""
+    client1, role1, _ = _make_player(mock_server, client_id="p1")
+    client2, role2, _ = _make_player(mock_server, client_id="p2")
+    await client1.group.add_client(client2)
+    role1.on_client_state(_state(FLAC_48K))
+    role2.on_client_state(_state(FLAC_48K))
+
+    role1.on_client_state(_state(PCM_48K))
+    role1.on_client_state(_state(FLAC_48K))
+
+    assert _transformer(role1) is _transformer(role2)
+
+
+@pytest.mark.asyncio
+async def test_removed_client_releases_its_encoder(mock_server: MagicMock) -> None:
+    """A client leaving the group frees the encoder only it used in that group."""
+    client1, role1, _ = _make_player(mock_server, client_id="p1")
+    client2, role2, _ = _make_player(mock_server, client_id="p2")
+    group = client1.group
+    await group.add_client(client2)
+    role2.on_client_state(_state(FLAC_48K))
+    flac = _transformer(role2)
+
+    await group.remove_client(client2)
+    role1.on_client_state(_state(FLAC_48K))
+
+    assert _transformer(role1) is not flac
+
+
+@pytest.mark.asyncio
+async def test_reconnects_keep_only_encoders_in_use(mock_server: MagicMock) -> None:
+    """A reconnecting member keeps its new encoder pooled and frees those of earlier hellos."""
+    flac_44 = SupportedAudioFormat(AudioCodec.FLAC, 2, 44100, 16)
+    flac_88 = SupportedAudioFormat(AudioCodec.FLAC, 2, 88200, 16)
+    unencodable = SupportedAudioFormat(AudioCodec.FLAC, 2, 48000, 32)
+    client1, _, _ = _make_player(mock_server, [FLAC_48K], client_id="p1")
+    client2, role2, _ = _make_player(mock_server, [flac_44], client_id="p2")
+    await client1.group.add_client(client2)
+    old_flac_44 = _transformer(role2)
+
+    client2.detach_connection(None)
+    _attach(client2, [unencodable])
+    client2.detach_connection(None)
+    _attach(client2, [flac_88])
+
+    pooled = client1.group.transformer_pool._transformers.values()  # noqa: SLF001
+    assert not any(t is old_flac_44 for t in pooled)
+    assert any(t is _transformer(role2) for t in pooled)
+
+
+@pytest.mark.asyncio
+async def test_channel_change_prunes_without_nesting(mock_server: MagicMock) -> None:
+    """Members refreshing a changed channel during a prune don't start scans of their own."""
+    client1, _, _ = _make_player(mock_server, client_id="p0")
+    group = client1.group
+    for index in range(1, 5):
+        client, _, _ = _make_player(mock_server, client_id=f"p{index}")
+        await group.add_client(client)
+    group._channel_resolver = lambda _player_id: uuid.UUID(int=1)  # noqa: SLF001
+    scans = MagicMock(wraps=group.transformer_pool.prune)
+    group.transformer_pool.prune = scans  # type: ignore[method-assign]
+
+    group.prune_transformer_pool()
+
+    assert scans.call_count == 1

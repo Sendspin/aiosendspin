@@ -900,6 +900,8 @@ class PushStream:
         self._is_live: bool = False
         # Monotonic lifecycle token used to invalidate in-flight commit work on stop().
         self._stream_generation = 0
+        # Generation that flush_audio() ran in, so catch-ups finishing after it drain their tail.
+        self._flushed_generation: int | None = None
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
         # Per-channel timing: channel_id -> next_chunk_start_us
@@ -2843,34 +2845,54 @@ class PushStream:
                     self._role_chunk_cache[cache_key].extend(drained)
                     last_encoded_end_us = drained[-1].timestamp_us + drained[-1].duration_us
 
-            # A shared live graph can release output at a different position than the catch-up
-            # graph, so fill from the catch-up graph's tail up to where the live graph resumes.
-            for rkey, rstate in catchup_resamplers.items():
-                live_state = self._resamplers.get(rkey)
-                if (
-                    rkey not in established_resampler_keys
-                    or live_state is None
-                    or live_state.pending_timestamp_us is None
-                ):
-                    continue
-                bridged = self._flush_resampler_to_chunks(
-                    rstate,
-                    catchup_quantizers,
-                    encoder,
-                    req,
-                    channel_id,
-                    end_us=live_state.pending_timestamp_us,
-                )
-                if bridged and self._catchup_state.get(cache_key) == "catching_up":
-                    self._role_chunk_cache[cache_key].extend(bridged)
+            if self._flushed_generation == self._stream_generation:
+                # flush_audio() did not drain this key, so drain its tail here.
+                tail = [
+                    chunk
+                    for rstate in catchup_resamplers.values()
+                    for chunk in self._flush_resampler_to_chunks(
+                        rstate, catchup_quantizers, encoder, req, channel_id
+                    )
+                ]
+                if encoder is not None:
+                    tail.extend(
+                        CachedChunk(
+                            timestamp_us=ts, duration_us=dur, payload=data, byte_count=len(data)
+                        )
+                        for data, ts, dur in self._flush_transformer_tail(cache_key, encoder)
+                    )
+                if tail and self._catchup_state.get(cache_key) == "catching_up":
+                    self._role_chunk_cache[cache_key].extend(tail)
+            else:
+                # A shared live graph can release output at a different position than the
+                # catch-up graph, so fill from the catch-up graph's tail up to where the live
+                # graph resumes.
+                for rkey, rstate in catchup_resamplers.items():
+                    live_state = self._resamplers.get(rkey)
+                    if (
+                        rkey not in established_resampler_keys
+                        or live_state is None
+                        or live_state.pending_timestamp_us is None
+                    ):
+                        continue
+                    bridged = self._flush_resampler_to_chunks(
+                        rstate,
+                        catchup_quantizers,
+                        encoder,
+                        req,
+                        channel_id,
+                        end_us=live_state.pending_timestamp_us,
+                    )
+                    if bridged and self._catchup_state.get(cache_key) == "catching_up":
+                        self._role_chunk_cache[cache_key].extend(bridged)
 
-            # Promote FIR-warmed catch-up state, skipping shared live keys.
-            for rkey, rstate in catchup_resamplers.items():
-                if rkey not in established_resampler_keys:
-                    self._resamplers[rkey] = rstate
-            for qkey, qstate in catchup_quantizers.items():
-                if qkey not in established_resampler_keys:
-                    self._resamplers[qkey] = qstate
+                # Promote FIR-warmed catch-up state, skipping shared live keys.
+                for rkey, rstate in catchup_resamplers.items():
+                    if rkey not in established_resampler_keys:
+                        self._resamplers[rkey] = rstate
+                for qkey, qstate in catchup_quantizers.items():
+                    if qkey not in established_resampler_keys:
+                        self._resamplers[qkey] = qstate
 
             now_us = self._clock.now_us()
             encoded_cache: deque[CachedChunk] = self._role_chunk_cache.get(cache_key, deque())
@@ -2931,6 +2953,7 @@ class PushStream:
             async with self._commit_dsp_lock:
                 if not self._is_generation_active(flush_generation):
                     return
+                self._flushed_generation = flush_generation
                 groups, roles_by_transform = self._collect_flush_groups()
                 if not groups:
                     return

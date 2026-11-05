@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import logging
 import math
 import multiprocessing as mp
@@ -19,8 +20,17 @@ from typing import Any
 from aiohttp import ClientSession, TCPConnector
 
 from aiosendspin.client import SendspinClient
+from aiosendspin.clock import Clock
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, PlayerCommand, Roles
+from aiosendspin.noise import (
+    ClientPairingRecord,
+    Identity,
+    InMemoryClientPairingStore,
+    InMemoryServerPairingStore,
+    ServerPairingRecord,
+    psk_id_for,
+)
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.push_stream import DEFAULT_INITIAL_DELAY_US, PushStream
@@ -147,6 +157,40 @@ def _make_player_support(
         buffer_capacity=512 * 1024,
         supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
     )
+
+
+def _bench_secret(label: str) -> bytes:
+    return hashlib.sha256(f"aiosendspin-bench:{label}".encode()).digest()
+
+
+def _server_identity(index: int) -> Identity:
+    return Identity.from_private_bytes(_bench_secret(f"server-{index}"))
+
+
+def _client_identity(index: int) -> Identity:
+    return Identity.from_private_bytes(_bench_secret(f"client-{index}"))
+
+
+async def _make_server(
+    loop: asyncio.AbstractEventLoop,
+    index: int,
+    name: str,
+    client_count: int,
+    clock: Clock | None = None,
+) -> SendspinServer:
+    """Create a server already paired with benchmark clients 0 to client_count - 1."""
+    store = InMemoryServerPairingStore()
+    for i in range(client_count):
+        psk = _bench_secret(f"psk-{index}-{i}")
+        await store.store_record(
+            ServerPairingRecord(
+                psk_id=psk_id_for(psk),
+                psk=psk,
+                client_id=_client_identity(i).peer_id,
+                pair_methods=[],
+            )
+        )
+    return SendspinServer(loop, _server_identity(index), name, pairing_store=store, clock=clock)
 
 
 def _make_audio_format(sample_rate: int, channels: int, bit_depth: int) -> AudioFormat:
@@ -346,11 +390,13 @@ async def _connect_clients(
     start_index: int = 0,
     codec: str = "pcm",
     opus_bitrate: int = 32000,
+    server_count: int = 1,
 ) -> tuple[list[SendspinClient], dict[str, AudioStats]]:
     # Normalize urls to a list for round-robin distribution
     urls = [url] if isinstance(url, str) else url
 
     player_support = _make_player_support(sample_rate, channels, bit_depth, codec, opus_bitrate)
+    server_ids = [_server_identity(i).peer_id for i in range(server_count)]
 
     semaphore = asyncio.Semaphore(max_in_flight)
     tasks: list[asyncio.Task[SendspinClient | None]] = []
@@ -363,10 +409,17 @@ async def _connect_clients(
         client_id = f"bench-{start_index + index:05d}"
         # Round-robin across URLs based on global client index
         target_url = urls[(start_index + index) % len(urls)]
+        pairing_store = InMemoryClientPairingStore()
+        for server_index, server_id in enumerate(server_ids):
+            psk = _bench_secret(f"psk-{server_index}-{start_index + index}")
+            await pairing_store.store_record(
+                ClientPairingRecord(psk_id=psk_id_for(psk), psk=psk, server_id=server_id)
+            )
         client = SendspinClient(
-            client_id=client_id,
-            client_name=client_id,
-            roles=[Roles.PLAYER],
+            _client_identity(start_index + index),
+            client_id,
+            [Roles.PLAYER],
+            pairing_store=pairing_store,
             player_support=player_support,
             session=session,
         )
@@ -479,7 +532,7 @@ def _collect_sync_stats(clients: list[SendspinClient]) -> SyncStats:
             continue
         stats.synchronized += 1
         # Access internal filter for accuracy stats (benchmark-only).
-        filt = client._time_filter  # noqa: SLF001
+        filt = client._admitted_connection._time_filter  # type: ignore[union-attr]  # noqa: SLF001
         stats.error_us.append(filt.error)
         stats.offset_us.append(abs(int(filt.offset)))
     return stats
@@ -775,6 +828,7 @@ async def _worker_async(
             start_index=start_index,
             codec=codec,
             opus_bitrate=opus_bitrate,
+            server_count=len(url_list),
         )
 
         connected = len(clients)
@@ -966,7 +1020,7 @@ def _aggregate_sync_stats(all_sync_stats: list[SyncStats]) -> None:
 async def _main_async_multiprocess(args: argparse.Namespace) -> int:
     """Run benchmark with multiple worker processes."""
     loop = asyncio.get_running_loop()
-    server = SendspinServer(loop=loop, server_id="bench", server_name="bench")
+    server = await _make_server(loop, 0, "bench", args.clients)
     started = False
     processes: list[mp.Process] = []
 
@@ -1137,6 +1191,7 @@ def _server_process_main(
     channels: int,
     bit_depth: int,
     log_level: str,
+    client_count: int,
 ) -> None:
     """Server process entry point."""
     asyncio.run(
@@ -1152,6 +1207,7 @@ def _server_process_main(
             channels=channels,
             bit_depth=bit_depth,
             log_level=log_level,
+            client_count=client_count,
         )
     )
 
@@ -1169,6 +1225,7 @@ async def _server_process_async(
     channels: int,
     bit_depth: int,
     log_level: str,
+    client_count: int,
 ) -> None:
     """Server process async logic."""
     logging.basicConfig(
@@ -1178,9 +1235,7 @@ async def _server_process_async(
     slogger = logging.getLogger(f"server-{server_id}")
 
     loop = asyncio.get_running_loop()
-    server = SendspinServer(
-        loop=loop, server_id=f"bench-{server_id}", server_name=f"bench-{server_id}"
-    )
+    server = await _make_server(loop, server_id, f"bench-{server_id}", client_count)
 
     try:
         await server.start_server(
@@ -1319,6 +1374,7 @@ async def _main_async_distributed(args: argparse.Namespace) -> int:
                     args.channels,
                     args.bit_depth,
                     args.log_level,
+                    args.clients,
                 ),
             )
             p.start()
@@ -1553,12 +1609,7 @@ async def _main_async_multi_server(args: argparse.Namespace) -> int:
         # Create and start multiple servers with shared clock
         for i in range(args.servers):
             port = args.base_port + i
-            server = SendspinServer(
-                loop=loop,
-                server_id=f"bench-{i}",
-                server_name=f"bench-{i}",
-                clock=shared_clock,
-            )
+            server = await _make_server(loop, i, f"bench-{i}", args.clients, shared_clock)
             await server.start_server(
                 port=port,
                 host=args.host,
@@ -1609,6 +1660,7 @@ async def _main_async_multi_server(args: argparse.Namespace) -> int:
                 start_index=start_index,
                 codec=args.codec,
                 opus_bitrate=args.opus_bitrate,
+                server_count=args.servers,
             )
             clients.extend(server_clients)
             audio_stats.update(server_audio_stats)
@@ -1684,7 +1736,7 @@ async def _main_async(argv: Iterable[str]) -> int:
         return await _main_async_distributed(args)
 
     loop = asyncio.get_running_loop()
-    server = SendspinServer(loop=loop, server_id="bench", server_name="bench")
+    server = await _make_server(loop, 0, "bench", args.clients)
     clients: list[SendspinClient] = []
     audio_stats: dict[str, AudioStats] = {}
     session: ClientSession | None = None

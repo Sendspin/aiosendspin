@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 # Longest operator message a client/pair-pending may carry.
-_PAIR_PENDING_MESSAGE_MAX_LENGTH = 200
+_PAIR_PENDING_MESSAGE_MAX_BYTES = 200
 
 # Renders a dynamic pairing token as a QR code, cleared by a ``None`` call.
 type QRCodeDisplay = Callable[[str | None], Awaitable[None]]
@@ -88,7 +88,7 @@ class PairingSupport:
 
     pair_pending_message: str | None = None
     """Optional short plain-text sentence for the operator sent in ``client/pair-pending``,
-    such as naming the pairing gesture, at most 200 characters.
+    such as naming the pairing gesture, at most 200 bytes in UTF-8.
 
     The server shows it as unauthenticated text attributed to the device, never as markup.
     """
@@ -101,10 +101,10 @@ class PairingSupport:
             raise ValueError(f"unknown secret_locations: {names}")
         if (
             self.pair_pending_message is not None
-            and len(self.pair_pending_message) > _PAIR_PENDING_MESSAGE_MAX_LENGTH
+            and len(self.pair_pending_message.encode()) > _PAIR_PENDING_MESSAGE_MAX_BYTES
         ):
             raise ValueError(
-                f"pair_pending_message exceeds {_PAIR_PENDING_MESSAGE_MAX_LENGTH} characters"
+                f"pair_pending_message exceeds {_PAIR_PENDING_MESSAGE_MAX_BYTES} bytes in UTF-8"
             )
 
 

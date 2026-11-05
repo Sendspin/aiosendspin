@@ -348,7 +348,7 @@ async def test_unimplemented_roles_notice_names_the_device(
 
     assert (
         "[dev] Client Kitchen ERROR forged (Acme, software 1.2.3) offered roles/versions "
-        "this server does not implement: ['player@v99']"
+        "this server does not implement: player@v99"
     ) in caplog.messages
 
 

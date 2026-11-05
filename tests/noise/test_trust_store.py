@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING
 import pytest
 
 from aiosendspin.models.types import PairMethod
-from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
+from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
+from aiosendspin.noise.pairing import PairingAttempt
+from aiosendspin.noise.pairing_token import PSKPairingToken
 from aiosendspin.noise.trust_store import (
     PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
@@ -24,6 +26,7 @@ from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     PairingPsk,
     PskCategory,
+    ResolvedPsk,
     ServerPairingRecord,
     ServerPairingStore,
     StagedPairingPsk,
@@ -40,6 +43,26 @@ def _server_record(client_id: str = "client-A") -> ServerPairingRecord:
     return ServerPairingRecord(
         psk_id=psk_id_for(psk), psk=psk, client_id=client_id, pair_methods=[]
     )
+
+
+def test_reprs_omit_key_material() -> None:
+    """Secret-holding records print no PSK or private key bytes."""
+    psk = generate_psk()
+    psk_id = psk_id_for(psk)
+    identity = Identity.generate()
+    holders = [
+        identity,
+        ResolvedPsk(psk_id, psk, PskCategory.PAIRING),
+        ServerPairingRecord(psk_id=psk_id, psk=psk, client_id="c", pair_methods=[]),
+        ClientPairingRecord(psk_id=psk_id, psk=psk, server_id="s"),
+        PairingPsk(psk_id=psk_id, psk=psk),
+        StagedPairingPsk(psk_id=psk_id, psk=psk),
+        PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=psk, client_id="c"),
+        PSKPairingToken(client_id="c", pairing_psk=psk),
+    ]
+    for holder in holders:
+        assert repr(psk) not in repr(holder)
+        assert repr(identity.private_bytes) not in repr(holder)
 
 
 _EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
@@ -335,6 +358,69 @@ async def test_file_stores_are_owner_readable_only(tmp_path: Path) -> None:
     assert stat.S_IMODE(client_path.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and file modes")
+async def test_file_store_write_ignores_a_planted_temp_file(tmp_path: Path) -> None:
+    """A symlink at the old temp path neither receives the PSKs nor widens the store's mode."""
+    path = tmp_path / "pairings.json"
+    target = tmp_path / "planted"
+    target.write_text("", encoding="utf-8")
+    target.chmod(0o644)
+    path.with_name(f"{path.name}.tmp").symlink_to(target)
+
+    store = await FileServerPairingStore.open(path)
+    await store.store_record(_server_record())
+
+    assert target.read_text(encoding="utf-8") == ""
+    assert not path.is_symlink()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+async def test_file_store_warns_when_readable_by_others(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Loading a store with group or other permission bits logs a warning."""
+    path = tmp_path / "pairings.json"
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0o640)
+    with caplog.at_level(logging.WARNING):
+        await FileServerPairingStore.open(path)
+    assert "accessible to other users" in caplog.text
+
+
+async def test_server_store_hides_expired_staged_pairing_psk(
+    server_store: ServerPairingStore,
+) -> None:
+    """A staged Pairing PSK older than its lifetime no longer admits the client."""
+    expired = replace(_staged_psk(), created_at=datetime.now(UTC) - timedelta(hours=25))
+    await server_store.stage_pairing_psk("client-A", expired)
+    assert await server_store.staged_pairing_psk("client-A") is None
+    assert list(await server_store.list_staged_pairing_psks()) == []
+
+
+async def test_server_store_expires_staged_pairing_psk_with_naive_timestamp(
+    server_store: ServerPairingStore,
+) -> None:
+    """A naive ``created_at`` neither breaks lookups nor escapes expiry."""
+    fresh = replace(_staged_psk(), created_at=datetime.now())  # noqa: DTZ005
+    old = replace(_staged_psk(), created_at=datetime.now() - timedelta(hours=25))  # noqa: DTZ005
+    await server_store.stage_pairing_psk("client-A", fresh)
+    await server_store.stage_pairing_psk("client-B", old)
+    assert await server_store.staged_pairing_psk("client-A") == fresh
+    assert await server_store.staged_pairing_psk("client-B") is None
+
+
+async def test_file_server_store_save_drops_expired_staged_pairing_psk(tmp_path: Path) -> None:
+    """The next save removes an expired staged Pairing PSK from disk."""
+    path = tmp_path / "pairings.json"
+    store = await FileServerPairingStore.open(path)
+    expired = replace(_staged_psk(), created_at=datetime.now(UTC) - timedelta(hours=25))
+    await store.stage_pairing_psk("client-A", expired)
+    await store.stage_pairing_psk("client-B", _staged_psk())
+    staged = json.loads(path.read_text(encoding="utf-8"))["staged_pairing_psks"]
+    assert list(staged) == ["client-B"]
+
+
 async def test_file_server_store_removal_persists(tmp_path: Path) -> None:
     """Removing a trusted-unpaired approval is reflected after a reload."""
     path = tmp_path / "pairings.json"
@@ -410,6 +496,7 @@ async def test_file_server_store_skips_record_with_unknown_pair_method(
         ),
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
     with caplog.at_level(logging.WARNING, logger="aiosendspin.noise.trust_store"):
         store = await FileServerPairingStore.open(path)

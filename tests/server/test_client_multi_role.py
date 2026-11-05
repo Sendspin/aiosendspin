@@ -13,6 +13,7 @@ from aiosendspin.server.audio_transformers import TransformerPool
 from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles import PlayerV1Role
 
 
@@ -39,6 +40,8 @@ class _DummyGroup:
         self.transformer_pool = TransformerPool()
 
     group_name = "dummy group"
+    _pruning = False
+    prune_transformer_pool = SendspinGroup.prune_transformer_pool
 
     def _publish_if_name_changed(self, previous: str) -> None:  # noqa: ARG002
         return

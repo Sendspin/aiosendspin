@@ -39,6 +39,7 @@ from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import (
     DEFAULT_INITIAL_DELAY_US,
     CachedChunk,
@@ -97,6 +98,9 @@ class _DummyGroup:
     def on_role_format_changed(self, role: Any, *, resume_at_us: int | None = None) -> None:
         if self._push_stream is not None and not self._push_stream.is_stopped:
             self._push_stream.on_role_format_changed(role, resume_at_us=resume_at_us)
+
+    _pruning = False
+    prune_transformer_pool = SendspinGroup.prune_transformer_pool
 
 
 class _FakeConnection:
@@ -4876,7 +4880,10 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
 
 
 def _pcm_passthrough_role(
-    group: _DummyGroup, bit_depth: int = 16, sample_rate: int = 48000
+    group: _DummyGroup,
+    bit_depth: int = 16,
+    frame_duration_us: int = 25_000,
+    sample_rate: int = 48000,
 ) -> _DummyRole:
     transformer = group.transformer_pool.get_or_create(
         PcmPassthrough,
@@ -4884,7 +4891,7 @@ def _pcm_passthrough_role(
         sample_rate=sample_rate,
         bit_depth=bit_depth,
         channels=2,
-        frame_duration_us=25_000,
+        frame_duration_us=frame_duration_us,
     )
     role = _DummyRole(
         AudioRequirements(
@@ -4893,7 +4900,7 @@ def _pcm_passthrough_role(
             channels=2,
             transformer=transformer,
             channel_id=MAIN_CHANNEL,
-            frame_duration_us=25_000,
+            frame_duration_us=frame_duration_us,
         )
     )
     group.clients.append(_DummyClient([role]))
@@ -5183,6 +5190,72 @@ async def test_flush_audio_defers_joins_until_tail_is_cached(mock_loop: Any) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("join_before_flush", [True, False])
+async def test_flush_audio_delivers_tail_to_catching_up_player(
+    join_before_flush: bool,  # noqa: FBT001
+) -> None:
+    """A player whose catch-up runs during or after flush_audio() still receives the tail."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    loop = asyncio.get_running_loop()
+    stream = PushStream(loop=loop, clock=ManualClock(), group=group)
+
+    # 500 ms plus a 300-frame tail, nonzero so the silence padding stands out.
+    pcm = (bytes(range(1, 241)) * 410)[: (24_000 + 300) * 4]
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    # A different frame duration gives the joiner its own encoder, so it catches up.
+    if join_before_flush:
+        joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+        stream.on_role_join(joiner)
+        assert stream._catchup_tasks  # noqa: SLF001
+    await stream.flush_audio()
+    if not join_before_flush:
+        joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+        stream.on_role_join(joiner)
+        assert stream._catchup_tasks  # noqa: SLF001
+    await _drain_catchup_tasks(stream)
+
+    assert joiner.received
+    for prev, nxt in pairwise(joiner.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    start_us = joiner.received[0].timestamp_us - role.received[0].timestamp_us
+    expected = pcm[start_us * 48000 // 1_000_000 * 4 :]
+    data = b"".join(chunk.data for chunk in joiner.received)
+    assert data[: len(expected)] == expected
+    assert data[len(expected) :] == bytes(len(data) - len(expected))
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail_for_catching_up_player() -> None:
+    """A player catching up after flush_audio() also gets the samples its resampler holds back."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    loop = asyncio.get_running_loop()
+    stream = PushStream(loop=loop, clock=ManualClock(), group=group)
+
+    # 500 ms at 44.1 kHz resampled to the players' 48 kHz: 24000 output frames.
+    pcm = b"\x00\x10" * 2 * 22050
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+    stream.on_role_join(joiner)
+    await _drain_catchup_tasks(stream)
+
+    data = b"".join(chunk.data for chunk in joiner.received)
+    last_signal_frame = max(
+        i // 4 for i in range(0, len(data), 4) if int.from_bytes(data[i : i + 2], "little") > 64
+    )
+    start_frame = (joiner.received[0].timestamp_us - role.received[0].timestamp_us) * 48 // 1000
+    assert start_frame + last_signal_frame >= 23995
+    for prev, nxt in pairwise(joiner.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
 async def test_flush_audio_caches_tail_for_warm_reattached_player(mock_loop: Any) -> None:
     """A reattached player waiting for its initial state gets the tail in its replay cache."""
     group = _DummyGroup(clients=[])
@@ -5203,3 +5276,66 @@ async def test_flush_audio_caches_tail_for_warm_reattached_player(mock_loop: Any
     assert len(role.received) == 1
     cached = stream._role_chunk_cache  # noqa: SLF001
     assert sum(len(chunks) for chunks in cached.values()) == 2
+
+
+@pytest.mark.parametrize(
+    "switches",
+    [[[44100], [48000]], [[44100, 48000]]],
+    ids=["separate-commits", "one-commit"],
+)
+@pytest.mark.asyncio
+async def test_inflight_switch_away_and_back_keeps_audio_aligned(
+    mock_loop: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    switches: list[list[int]],
+) -> None:
+    """Switching formats away and back mid-commit keeps every sample at its timestamp."""
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player_multi_format(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    group._push_stream = stream  # noqa: SLF001
+    group.has_active_stream = True
+    role = client.role("player@v1")
+    assert role is not None
+    format_changes = MagicMock(wraps=group.on_role_format_changed)
+    monkeypatch.setattr(group, "on_role_format_changed", format_changes)
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+    next_sample = 0
+
+    async def commit(count: int, switch_to: list[int] | None = None) -> None:
+        nonlocal next_sample
+        for index in range(count):
+            # 30ms commits against 25ms frames leave input buffered in the encoder.
+            values = [(next_sample + i) & 0x7FFF for i in range(1440) for _ in (0, 1)]
+            next_sample += 1440
+            stream.prepare_audio(
+                struct.pack(f"<{len(values)}h", *values),
+                AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+            )
+            if index == 0 and switch_to is not None:
+
+                async def resample_then_switch(*args: Any, **kwargs: Any) -> Any:
+                    monkeypatch.setattr(stream, "_resample_for_roles", original_resample)
+                    for rate in switch_to:
+                        role.on_client_state(_format_state(rate))
+                    return await original_resample(*args, **kwargs)
+
+                monkeypatch.setattr(stream, "_resample_for_roles", resample_then_switch)
+            await stream.commit_audio()
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+    await commit(21)
+    for switch_to in switches:
+        await commit(7, switch_to=switch_to)
+    await commit(7)
+
+    assert format_changes.call_count == 2
+    # 48kHz frames are 4800 bytes, so their first sample follows from their timestamp.
+    first_us = unpack_player_audio_header(conn.sent_binary[0]).timestamp_us
+    frames_48k = [f for f in conn.sent_binary if len(f) == PLAYER_AUDIO_HEADER_SIZE + 4800]
+    assert len(frames_48k) > 30
+    for frame in frames_48k:
+        elapsed_us = unpack_player_audio_header(frame).timestamp_us - first_us
+        first_value = struct.unpack_from("<h", frame, PLAYER_AUDIO_HEADER_SIZE)[0]
+        assert first_value == (elapsed_us * 48 // 1000) & 0x7FFF
