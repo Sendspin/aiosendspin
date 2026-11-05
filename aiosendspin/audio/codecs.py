@@ -7,7 +7,7 @@ import logging
 import re
 import struct
 import types
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 from aiosendspin.audio.format import (
@@ -633,7 +633,19 @@ def _crc8_table() -> bytes:
 _FLAC_CRC8 = _crc8_table()
 
 
-_FLAC_SYNC = re.compile(rb"\xff[\xf8\xf9]")
+def _byte_class(accept: Callable[[int], bool]) -> bytes:
+    return b"[" + b"".join(re.escape(bytes([b])) for b in range(256) if accept(b)) + b"]"
+
+
+# A sync code followed by block size, rate, channel, sample size and number fields the
+# decoder accepts. Most sync codes in audio data fail this, which keeps them below the cap.
+_FLAC_SYNC = re.compile(
+    rb"\xff[\xf8\xf9](?="
+    + _byte_class(lambda b: b >> 4 != 0 and b & 0x0F != 15)
+    + _byte_class(lambda b: b >> 4 <= 10 and b >> 1 & 0x07 != 3 and not b & 0x01)
+    + _byte_class(lambda b: b & 0xC0 != 0x80 and b < 0xFE)
+    + rb")"
+)
 # Bits per sample for each frame header sample size code. Code 3 is reserved.
 _FLAC_SAMPLE_SIZES = (0, 8, 12, None, 16, 20, 24, 32)
 
@@ -664,22 +676,12 @@ def _flac_chunk_samples(
 
 
 def _flac_header_blocksize(data: bytes, pos: int, max_blocksize: int, bits_per_sample: int) -> int:
-    """Return the block size of the FLAC frame header at ``pos``, or 0 if it is not one."""
+    """Return the block size of the FLAC frame header at a ``_FLAC_SYNC`` match, or 0 if not one."""
     blocksize_code = data[pos + 2] >> 4
     rate_code = data[pos + 2] & 0x0F
-    channel_code = data[pos + 3] >> 4
-    sample_size = _FLAC_SAMPLE_SIZES[data[pos + 3] >> 1 & 0x07]
-    first = data[pos + 4]
-    if (
-        not blocksize_code
-        or rate_code == 15
-        or channel_code > 10
-        or sample_size not in (0, bits_per_sample)
-        or data[pos + 3] & 0x01
-        or first & 0xC0 == 0x80
-        or first >= 0xFE
-    ):
+    if _FLAC_SAMPLE_SIZES[data[pos + 3] >> 1 & 0x07] not in (0, bits_per_sample):
         return 0
+    first = data[pos + 4]
     # The frame or sample number is UTF-8 coded: its leading one bits give the byte count.
     i = pos + 4 + max(1, 8 - (first ^ 0xFF).bit_length())
     if any(byte & 0xC0 != 0x80 for byte in data[pos + 5 : i]):

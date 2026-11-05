@@ -258,7 +258,11 @@ def test_flac_chunk_samples_skips_headers_in_another_sample_size() -> None:
 
 def test_flac_chunk_samples_is_over_limit_with_too_many_sync_codes() -> None:
     """More than ``limit // 8`` sync codes count as past the limit."""
-    assert (
-        _flac_chunk_samples(b"\xff\xf8" * 104, max_blocksize=4096, bits_per_sample=16, limit=800)
-        > 800
-    )
+    chunk = flac_frame(1024, bad_crc=True) * 101
+    assert _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=16, limit=800) > 800
+
+
+def test_flac_chunk_samples_ignores_sync_codes_without_header_fields() -> None:
+    """Sync codes in audio data that no header could follow stay below the cap."""
+    chunk = flac_frame(1024) + b"\xff\xf8" * 2048
+    assert _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=16, limit=1500) == 1024
