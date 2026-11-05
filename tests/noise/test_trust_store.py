@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING
 import pytest
 
 from aiosendspin.models.types import PairMethod
-from aiosendspin.noise.keys import b64url_encode, generate_psk, psk_id_for
+from aiosendspin.noise.keys import Identity, b64url_encode, generate_psk, psk_id_for
+from aiosendspin.noise.pairing import PairingAttempt
+from aiosendspin.noise.pairing_token import PSKPairingToken
 from aiosendspin.noise.trust_store import (
     PAIRING_ROUND_LIMIT,
     ClientPairingRecord,
@@ -24,6 +26,7 @@ from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     PairingPsk,
     PskCategory,
+    ResolvedPsk,
     ServerPairingRecord,
     ServerPairingStore,
     StagedPairingPsk,
@@ -40,6 +43,26 @@ def _server_record(client_id: str = "client-A") -> ServerPairingRecord:
     return ServerPairingRecord(
         psk_id=psk_id_for(psk), psk=psk, client_id=client_id, pair_methods=[]
     )
+
+
+def test_reprs_omit_key_material() -> None:
+    """Secret-holding records print no PSK or private key bytes."""
+    psk = generate_psk()
+    psk_id = psk_id_for(psk)
+    identity = Identity.generate()
+    holders = [
+        identity,
+        ResolvedPsk(psk_id, psk, PskCategory.PAIRING),
+        ServerPairingRecord(psk_id=psk_id, psk=psk, client_id="c", pair_methods=[]),
+        ClientPairingRecord(psk_id=psk_id, psk=psk, server_id="s"),
+        PairingPsk(psk_id=psk_id, psk=psk),
+        StagedPairingPsk(psk_id=psk_id, psk=psk),
+        PairingAttempt(method=PairMethod.PAIRING_PSK, pairing_psk=psk, client_id="c"),
+        PSKPairingToken(client_id="c", pairing_psk=psk),
+    ]
+    for holder in holders:
+        assert repr(psk) not in repr(holder)
+        assert repr(identity.private_bytes) not in repr(holder)
 
 
 _EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
