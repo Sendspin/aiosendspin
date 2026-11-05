@@ -42,6 +42,7 @@ class _DummyGroup:
         self.transformer_pool = TransformerPool()
 
     group_name = "dummy group"
+    _pruning = False
     prune_transformer_pool = SendspinGroup.prune_transformer_pool
 
     def _publish_if_name_changed(self, previous: str) -> None:  # noqa: ARG002

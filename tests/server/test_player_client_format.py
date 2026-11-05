@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -440,3 +441,20 @@ async def test_reconnects_keep_only_encoders_in_use(mock_server: MagicMock) -> N
     pooled = client1.group.transformer_pool._transformers.values()  # noqa: SLF001
     assert not any(t is old_flac_44 for t in pooled)
     assert any(t is _transformer(role2) for t in pooled)
+
+
+@pytest.mark.asyncio
+async def test_channel_change_prunes_without_nesting(mock_server: MagicMock) -> None:
+    """Members refreshing a changed channel during a prune don't start scans of their own."""
+    client1, _, _ = _make_player(mock_server, client_id="p0")
+    group = client1.group
+    for index in range(1, 5):
+        client, _, _ = _make_player(mock_server, client_id=f"p{index}")
+        await group.add_client(client)
+    group._channel_resolver = lambda _player_id: uuid.UUID(int=1)  # noqa: SLF001
+    scans = MagicMock(wraps=group.transformer_pool.prune)
+    group.transformer_pool.prune = scans  # type: ignore[method-assign]
+
+    group.prune_transformer_pool()
+
+    assert scans.call_count == 1

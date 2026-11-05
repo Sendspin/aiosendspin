@@ -94,6 +94,7 @@ class _DummyGroup:
         if self._push_stream is not None and not self._push_stream.is_stopped:
             self._push_stream.on_role_format_changed(role, resume_at_us=resume_at_us)
 
+    _pruning = False
     prune_transformer_pool = SendspinGroup.prune_transformer_pool
 
 
