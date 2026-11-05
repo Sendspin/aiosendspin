@@ -28,7 +28,11 @@ from aiosendspin.models.core import (
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
-from aiosendspin.server.roles.artwork.v1 import MAX_ANNOUNCE_LEAD_US, ArtworkV1Role
+from aiosendspin.server.roles.artwork.v1 import (
+    MAX_ANNOUNCE_LEAD_US,
+    MAX_ARTWORK_SIDE,
+    ArtworkV1Role,
+)
 from aiosendspin.server.roles.scheduled_state import ScheduledRoleState
 
 _NOW_US = 1_000_000
@@ -297,6 +301,25 @@ def test_artwork_state_start_is_followed_by_current_images(
         ("image", 2),
     ]
     assert role.get_channel_configs() == {0: _ALBUM, 2: _ARTIST}
+
+
+def test_artwork_oversized_channel_is_not_streamed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A channel above the size limit is streamed as none, without flagging the client."""
+    client = _make_client_stub()
+    events = _record(client, monkeypatch)
+    role = ArtworkV1Role(client=client)
+    role.on_connect()
+    oversized = ArtworkChannel(
+        source=ArtworkSource.ARTIST,
+        format=PictureFormat.PNG,
+        width=MAX_ARTWORK_SIDE + 1,
+        height=200,
+    )
+
+    role.on_client_state(_state(_ALBUM, oversized))
+
+    assert events == [("start", [_ALBUM_WIRE]), ("image", 0)]
+    client.flag_noncompliance.assert_not_called()
 
 
 def test_artwork_unchanged_state_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1140,6 +1163,29 @@ def test_legacy_request_format_disabling_channel_keeps_its_format_and_size(
         ("start", [{**_ALBUM_WIRE, "source": "none"}, _ARTIST_WIRE]),
         ("image", 1),
     ]
+
+
+# DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+def test_legacy_oversized_channel_keeps_its_format_and_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized channel announced to a hello-wire client as none keeps its format and size."""
+    oversized = ArtworkChannel(
+        source=ArtworkSource.ALBUM,
+        format=PictureFormat.JPEG,
+        width=MAX_ARTWORK_SIDE + 1,
+        height=300,
+    )
+    client = _make_legacy_client_stub(oversized, _ARTIST)
+    events = _record(client, monkeypatch)
+    role = ArtworkV1Role(client=client)
+
+    role.on_connect()
+
+    assert events[0] == (
+        "start",
+        [{**_ALBUM_WIRE, "source": "none", "width": MAX_ARTWORK_SIDE + 1}, _ARTIST_WIRE],
+    )
 
 
 # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
