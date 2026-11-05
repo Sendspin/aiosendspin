@@ -6,6 +6,9 @@ import asyncio
 import json
 import logging
 import os
+import stat
+import sys
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
@@ -895,9 +898,13 @@ def _check_psk(psk: bytes) -> None:
 def _read_json_object(path: Path) -> Mapping[str, object] | None:
     """Read ``path`` as a JSON object; ``None`` if absent, ``TypeError`` if not an object."""
     try:
-        raw = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8") as file:
+            mode = stat.S_IMODE(os.fstat(file.fileno()).st_mode)
+            raw = file.read()
     except FileNotFoundError:
         return None
+    if sys.platform != "win32" and mode & 0o077:
+        logger.warning("Pairing store %s is accessible to other users (mode %o)", path, mode)
     data = json.loads(raw)
     if not isinstance(data, Mapping):
         msg = f"pairing store {path} must contain a JSON object"
@@ -908,11 +915,24 @@ def _read_json_object(path: Path) -> Mapping[str, object] | None:
 def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
     """Serialize ``payload`` and atomically replace ``path``, owner-readable only."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        file.write(json.dumps(payload, indent=2))
-    tmp.replace(path)
+    # mkstemp creates a new 0600 file under a random name, never reusing or following one.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(json.dumps(payload, indent=2))
+            file.flush()
+            os.fsync(file.fileno())
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if sys.platform != "win32":
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _section(data: Mapping[str, object], key: str) -> dict[str, Mapping[str, object]]:

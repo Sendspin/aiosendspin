@@ -335,6 +335,36 @@ async def test_file_stores_are_owner_readable_only(tmp_path: Path) -> None:
     assert stat.S_IMODE(client_path.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and file modes")
+async def test_file_store_write_ignores_a_planted_temp_file(tmp_path: Path) -> None:
+    """A symlink at the old temp path neither receives the PSKs nor widens the store's mode."""
+    path = tmp_path / "pairings.json"
+    target = tmp_path / "planted"
+    target.write_text("", encoding="utf-8")
+    target.chmod(0o644)
+    path.with_name(f"{path.name}.tmp").symlink_to(target)
+
+    store = await FileServerPairingStore.open(path)
+    await store.store_record(_server_record())
+
+    assert target.read_text(encoding="utf-8") == ""
+    assert not path.is_symlink()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+async def test_file_store_warns_when_readable_by_others(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Loading a store with group or other permission bits logs a warning."""
+    path = tmp_path / "pairings.json"
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0o640)
+    with caplog.at_level(logging.WARNING):
+        await FileServerPairingStore.open(path)
+    assert "accessible to other users" in caplog.text
+
+
 async def test_file_server_store_removal_persists(tmp_path: Path) -> None:
     """Removing a trusted-unpaired approval is reflected after a reload."""
     path = tmp_path / "pairings.json"
@@ -410,6 +440,7 @@ async def test_file_server_store_skips_record_with_unknown_pair_method(
         ),
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
     with caplog.at_level(logging.WARNING, logger="aiosendspin.noise.trust_store"):
         store = await FileServerPairingStore.open(path)
