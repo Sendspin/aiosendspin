@@ -144,7 +144,7 @@ class ArtworkGroupRole(GroupRole):
             assert channel_config.width is not None
             assert channel_config.height is not None
             assert channel_config.format is not None
-            img_data = await asyncio.get_running_loop().run_in_executor(
+            encoded = asyncio.get_running_loop().run_in_executor(
                 _ENCODE_EXECUTOR,
                 self._process_and_encode_image,
                 # Pillow images are not safe to share across concurrent encode tasks.
@@ -153,6 +153,13 @@ class ArtworkGroupRole(GroupRole):
                 channel_config.height,
                 channel_config.format,
             )
+            try:
+                img_data = await asyncio.shield(encoded)
+            except asyncio.CancelledError:
+                # Hold the send lock until the encode ends, so a replaced replay never queues
+                # a second image copy for the channel.
+                await asyncio.wait([encoded])
+                raise
             current = role.get_channel_configs().get(channel)
             if current is None or _encoding(current) != _encoding(channel_config):
                 # Reconfigured while encoding; the new configuration triggers its own send.
