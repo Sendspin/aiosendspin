@@ -5205,3 +5205,58 @@ async def test_flush_audio_caches_tail_for_warm_reattached_player(mock_loop: Any
     assert len(role.received) == 1
     cached = stream._role_chunk_cache  # noqa: SLF001
     assert sum(len(chunks) for chunks in cached.values()) == 2
+
+
+@pytest.mark.asyncio
+async def test_inflight_switch_away_and_back_keeps_audio_aligned(
+    mock_loop: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching formats away and back mid-commit keeps every sample at its timestamp."""
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player_multi_format(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    group._push_stream = stream  # noqa: SLF001
+    group.has_active_stream = True
+    role = client.role("player@v1")
+    assert role is not None
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+    next_sample = 0
+
+    async def commit(count: int, switch_to: int | None = None) -> None:
+        nonlocal next_sample
+        for index in range(count):
+            # 30ms commits against 25ms frames leave input buffered in the encoder.
+            values = [(next_sample + i) & 0x7FFF for i in range(1440) for _ in (0, 1)]
+            next_sample += 1440
+            stream.prepare_audio(
+                struct.pack(f"<{len(values)}h", *values),
+                AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+            )
+            if index == 0 and switch_to is not None:
+
+                async def resample_then_switch(*args: Any, **kwargs: Any) -> Any:
+                    monkeypatch.setattr(stream, "_resample_for_roles", original_resample)
+                    role.on_client_state(_format_state(switch_to))
+                    return await original_resample(*args, **kwargs)
+
+                monkeypatch.setattr(stream, "_resample_for_roles", resample_then_switch)
+            await stream.commit_audio()
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+    await commit(21)
+    await commit(7, switch_to=44100)
+    await commit(7, switch_to=48000)
+    await commit(7)
+
+    starts = [msg.payload.player for msg in conn.sent_json if isinstance(msg, StreamStartMessage)]
+    assert [player.sample_rate for player in starts if player is not None] == [48000, 44100, 48000]
+    # 48kHz frames are 4800 bytes, so their first sample follows from their timestamp.
+    first_us = unpack_player_audio_header(conn.sent_binary[0]).timestamp_us
+    frames_48k = [f for f in conn.sent_binary if len(f) == PLAYER_AUDIO_HEADER_SIZE + 4800]
+    assert len(frames_48k) > 30
+    for frame in frames_48k:
+        elapsed_us = unpack_player_audio_header(frame).timestamp_us - first_us
+        first_value = struct.unpack_from("<h", frame, PLAYER_AUDIO_HEADER_SIZE)[0]
+        assert first_value == (elapsed_us * 48 // 1000) & 0x7FFF
