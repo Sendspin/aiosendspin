@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from .keys import (
@@ -25,7 +25,7 @@ class PSKPairingToken:
     """Pairing Token."""
 
     client_id: str
-    pairing_psk: bytes
+    pairing_psk: bytes = field(repr=False)
 
 
 def encode_psk_token(token: PSKPairingToken) -> str:

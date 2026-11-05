@@ -177,7 +177,12 @@ from aiosendspin.util import (
 )
 
 from .client import SendspinClient
-from .compliance import ClientComplianceError, describe_client, noncompliance_subject
+from .compliance import (
+    ClientComplianceError,
+    clean_peer_text,
+    describe_client,
+    noncompliance_subject,
+)
 from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
 from .roles.controller.group import ControllerGroupRole
 from .roles.negotiation import negotiate_roles
@@ -213,6 +218,9 @@ _UNPAIR_GOODBYE_TIMEOUT_S = 5.0
 
 # Distinct unknown message types warned about per connection; later ones log at debug.
 _MAX_WARNED_UNKNOWN_TYPES = 16
+
+# Characters of client-supplied text, such as parse errors that quote a field, kept per log line.
+_MAX_LOGGED_PEER_TEXT = 200
 
 _CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
 
@@ -1454,7 +1462,9 @@ class SendspinConnection:
                 self._client_message_from_dict, decoded
             )
         except (LookupError, TypeError, ValueError) as exc:
-            self._logger.error("Malformed client/hello: %s", exc)
+            self._logger.error(
+                "Malformed client/hello: %s", clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT)
+            )
             await self.disconnect(retry_connection=False)
             return False
         if isinstance(message, ClientGoodbyeMessage):
@@ -1512,7 +1522,7 @@ class SendspinConnection:
             self._logger.info(
                 "Client %s offered roles/versions this server does not implement: %s",
                 self._hello_description,
-                unimplemented,
+                clean_peer_text(", ".join(unimplemented), _MAX_LOGGED_PEER_TEXT),
             )
 
         await self._reload_trusted_unpaired()
@@ -1705,12 +1715,12 @@ class SendspinConnection:
             # newer revision of the spec. Worth noticing, but not a compliance failure.
             self._logger.info(
                 "client/hello offered unrecognized pairing methods: %s",
-                ", ".join(methods.ignored_methods),
+                clean_peer_text(", ".join(methods.ignored_methods), _MAX_LOGGED_PEER_TEXT),
             )
         if methods.ignored_values:
             self._logger.info(
                 "client/hello offered unrecognized pair-method values: %s",
-                ", ".join(methods.ignored_values),
+                clean_peer_text(", ".join(methods.ignored_values), _MAX_LOGGED_PEER_TEXT),
             )
         if methods.unusable_methods:
             self._logger.info(
@@ -2777,7 +2787,8 @@ class SendspinConnection:
                     if self._skip_undecodable_message(text, exc):
                         continue
                     self._logger.warning(
-                        "Ending connection on a message that failed to parse: %s", exc
+                        "Ending connection on a message that failed to parse: %s",
+                        clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT),
                     )
                     break
                 for reason in deviations:
@@ -2820,10 +2831,16 @@ class SendspinConnection:
                 self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
             elif self._client is not None and self._client.roles_by_family("controller"):
                 self._flag_noncompliance("sent a malformed client/command controller object")
-            self._logger.debug("Ignoring client/command that failed to parse: %s", exc)
+            self._logger.debug(
+                "Ignoring client/command that failed to parse: %s",
+                clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT),
+            )
             return True
         if message_type == "client/state":
-            self._logger.debug("Ignoring client/state that failed to parse: %s", exc)
+            self._logger.debug(
+                "Ignoring client/state that failed to parse: %s",
+                clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT),
+            )
             self._flag_noncompliance("sent a malformed client/state")
             return True
         if not isinstance(message_type, str) or not (
@@ -2859,12 +2876,12 @@ class SendspinConnection:
         if message_type in self._warned_unknown_types:
             return
         if len(self._warned_unknown_types) >= _MAX_WARNED_UNKNOWN_TYPES:
-            self._logger.debug("Ignoring unknown message type %s", message_type)
+            self._logger.debug("Ignoring unknown message type %s", clean_peer_text(message_type))
             return
         self._warned_unknown_types.add(message_type)
         self._logger.warning(
             "Ignoring unknown message type %s; the client may speak a newer spec revision",
-            message_type,
+            clean_peer_text(message_type),
         )
 
     def _route_inbound_binary(self, data: bytes) -> None:
@@ -3037,7 +3054,7 @@ class SendspinConnection:
         if payload.unrecognized_reason is not None:
             self._logger.info(
                 "Received client/goodbye with unrecognized reason %r; not reconnecting",
-                payload.unrecognized_reason,
+                payload.unrecognized_reason[:_MAX_LOGGED_PEER_TEXT],
             )
         else:
             self._logger.debug(

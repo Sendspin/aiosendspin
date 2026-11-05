@@ -95,7 +95,7 @@ class ResolvedPsk:
     """A PSK selected during a handshake, with its trust metadata."""
 
     psk_id: str
-    psk: bytes
+    psk: bytes = field(repr=False)
     category: PskCategory
     counterparty_id: str | None = None
     """Peer's ``client_id``/``server_id`` for stored-pubkey records; ``None`` otherwise."""
@@ -106,7 +106,7 @@ class ServerPairingRecord:
     """A long-term credential a server stores for one client."""
 
     psk_id: str
-    psk: bytes
+    psk: bytes = field(repr=False)
     client_id: str
     pair_methods: list[PairMethod]
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -161,7 +161,7 @@ class ClientPairingRecord:
     """A long-term credential a client stores for a server."""
 
     psk_id: str
-    psk: bytes
+    psk: bytes = field(repr=False)
     server_id: str
     used: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -235,7 +235,7 @@ class PairingPsk:
     """A Pairing PSK a client accepts to admit a server."""
 
     psk_id: str
-    psk: bytes
+    psk: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         """Validate the PSK size."""
@@ -263,7 +263,7 @@ class StagedPairingPsk:
     """An operator-staged Pairing PSK awaiting a client, with its staging time."""
 
     psk_id: str
-    psk: bytes
+    psk: bytes = field(repr=False)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:

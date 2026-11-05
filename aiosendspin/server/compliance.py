@@ -24,13 +24,14 @@ class ClientComplianceError(Exception):
 _MAX_DESCRIPTION_PART = 64
 
 
-def _clean(part: str | None) -> str:
+def clean_peer_text(part: str | None, limit: int = _MAX_DESCRIPTION_PART) -> str:
     """Reduce a client-supplied fragment to a bounded, single-line run of printable words."""
     if not part:
         return ""
-    collapsed = " ".join(part.split())
+    # Leave room for the whitespace and non-printables cleaning drops without scanning all of it.
+    collapsed = " ".join(part[: limit * 4].split())
     printable = "".join(ch for ch in collapsed if ch.isprintable())
-    return " ".join(printable.split())[:_MAX_DESCRIPTION_PART]
+    return " ".join(printable.split())[:limit]
 
 
 def describe_client(client_info: ClientHelloPayload | None, client_id: str | None) -> str:
@@ -50,18 +51,22 @@ def describe_client(client_info: ClientHelloPayload | None, client_id: str | Non
     name and software version already answer what a device is and what it runs.
     """
     if client_info is None:
-        return _clean(client_id)
-    name = _clean(client_info.name) or _clean(client_id) or _clean(client_info.client_id)
+        return clean_peer_text(client_id)
+    name = (
+        clean_peer_text(client_info.name)
+        or clean_peer_text(client_id)
+        or clean_peer_text(client_info.client_id)
+    )
     if not name:
         return ""
     device = client_info.device_info
     if device is None:
         return name
     details: list[str] = []
-    maker_and_model = (_clean(device.manufacturer), _clean(device.product_name))
+    maker_and_model = (clean_peer_text(device.manufacturer), clean_peer_text(device.product_name))
     if model := " ".join(part for part in maker_and_model if part):
         details.append(model)
-    if software := _clean(device.software_version):
+    if software := clean_peer_text(device.software_version):
         details.append(f"software {software}")
     if not details:
         return name
