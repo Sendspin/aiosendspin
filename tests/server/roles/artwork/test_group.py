@@ -76,6 +76,17 @@ def test_encode_letterboxes_to_the_declared_dimensions() -> None:
         assert decoded.convert("RGB").getpixel((0, 0)) == (0, 0, 0)
 
 
+def test_encode_fits_a_wide_image_into_a_one_pixel_channel() -> None:
+    """A fitted side that rounds below one pixel is kept at one."""
+    agr = ArtworkGroupRole(_make_group_stub())
+    image = Image.new("RGB", (3, 2), (255, 0, 0))
+
+    encoded = agr._process_and_encode_image(image, 1, 1, PictureFormat.PNG)  # noqa: SLF001
+
+    with Image.open(BytesIO(encoded)) as decoded:
+        assert decoded.size == (1, 1)
+
+
 # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def test_encode_still_supports_bmp() -> None:
     """A client declaring the removed 'bmp' format still gets a BMP image."""

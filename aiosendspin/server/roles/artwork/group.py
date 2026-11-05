@@ -315,10 +315,10 @@ class ArtworkGroupRole(GroupRole):
 
         if image_aspect > target_aspect:
             new_width = target_width
-            new_height = int(target_width / image_aspect)
+            new_height = max(1, int(target_width / image_aspect))
         else:
             new_height = target_height
-            new_width = int(target_height * image_aspect)
+            new_width = max(1, int(target_height * image_aspect))
 
         resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
         letterboxed = Image.new("RGB", (target_width, target_height), (0, 0, 0))
