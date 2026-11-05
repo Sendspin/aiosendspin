@@ -462,6 +462,29 @@ def test_flac_chunk_beyond_its_budget_is_dropped_before_decoding(
     assert client.noncompliance == ["sent a source audio chunk longer than 150 ms"]
 
 
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [flac_frame(1024, rate_code=9)],
+        [flac_frame(1024), flac_frame(1024, number=1, channels=1)],
+    ],
+    ids=["first frame at 44.1 kHz", "later frame in mono"],
+)
+async def test_flac_frame_in_another_format_is_dropped(frames: list[bytes]) -> None:
+    """A frame whose rate or channel count differs from the announced format is flagged."""
+    pytest.importorskip("av")
+    role, client = _make_role()
+    role.on_client_stream_start(_start_payload(AudioCodec.FLAC))
+    handle = next(e for e in client.events if isinstance(e, SourceStreamStartedEvent)).handle
+
+    for frame in frames:
+        role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, frame)
+    role.on_client_stream_end()
+
+    assert client.noncompliance == ["sent a source audio chunk that failed to decode"]
+    assert [len(chunk) async for chunk, _ in handle] == [1024 * 4] * (len(frames) - 1)
+
+
 def test_empty_flac_chunk_is_flagged_and_not_decoded(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty FLAC chunk never reaches the decoder, where it would end decoding."""
     decoded: list[bytes] = []

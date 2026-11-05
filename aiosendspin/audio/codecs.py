@@ -728,6 +728,9 @@ class _AvDecoder:
         self._sample_rate = sample_rate
         self._channels = channels
 
+        # libopus always decodes at 48 kHz.
+        self._input_rate = 48000 if codec_name == "libopus" else sample_rate
+
         self._ctx = av.CodecContext.create(codec_name, "r")
         self._ctx.sample_rate = sample_rate
         self._ctx.layout = self._av_layout
@@ -750,6 +753,13 @@ class _AvDecoder:
         return header
 
     def _frames_to_pcm(self, frames: list[av.AudioFrame]) -> bytes:
+        # Reject frames the resampler would pass through without converting.
+        for frame in frames:
+            if frame.sample_rate != self._input_rate or frame.layout.nb_channels != self._channels:
+                raise ValueError(
+                    f"Decoded {frame.sample_rate} Hz with {frame.layout.nb_channels} channels, "
+                    f"expected {self._input_rate} Hz with {self._channels} channels"
+                )
         out = bytearray()
         for frame in frames:
             for resampled in self._resampler.resample(frame):

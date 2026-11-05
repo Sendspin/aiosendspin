@@ -37,11 +37,15 @@ def _uncached_flac_probe() -> Iterator[None]:
     flac_encoder_available.cache_clear()
 
 
-def _roundtrip(codec: str, pcm: bytes) -> bytes:
-    enc = create_encoder(codec, sample_rate=48000, bit_depth=16, channels=2)
+def _roundtrip(codec: str, pcm: bytes, *, sample_rate: int = 48000) -> bytes:
+    enc = create_encoder(codec, sample_rate=sample_rate, bit_depth=16, channels=2)
     frames = enc.process(pcm, 0, 0) + enc.flush()
     dec = create_decoder(
-        codec, sample_rate=48000, bit_depth=16, channels=2, codec_header=enc.get_codec_header()
+        codec,
+        sample_rate=sample_rate,
+        bit_depth=16,
+        channels=2,
+        codec_header=enc.get_codec_header(),
     )
     out = bytearray()
     for frame, _dur in frames:
@@ -56,11 +60,13 @@ def test_pcm_roundtrip_is_bit_exact() -> None:
     assert _roundtrip("pcm", pcm) == pcm
 
 
-@pytest.mark.parametrize("codec", ["flac", "opus"])
-def test_lossy_codec_roundtrip_recovers_audio(codec: str) -> None:
+@pytest.mark.parametrize(
+    ("codec", "sample_rate"), [("flac", 48000), ("opus", 48000), ("opus", 16000)]
+)
+def test_lossy_codec_roundtrip_recovers_audio(codec: str, sample_rate: int) -> None:
     """FLAC/Opus decode back to roughly the same amount of audio (structural check)."""
     pcm = sine_pcm_16bit(48000)
-    out = _roundtrip(codec, pcm)
+    out = _roundtrip(codec, pcm, sample_rate=sample_rate)
     # Within one decoder block of the input; never empty.
     assert len(out) >= len(pcm) - 4608 * 4
     assert len(out) <= len(pcm) + 4608 * 4
