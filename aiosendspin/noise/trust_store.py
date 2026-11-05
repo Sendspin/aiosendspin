@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
@@ -36,6 +36,9 @@ PAIRING_ROUND_LIMIT: Final[int] = 20
 # Per-server pairing records a client store holds before a new pairing evicts one.
 _MIN_RECORD_CAPACITY: Final[int] = 5
 _DEFAULT_RECORD_CAPACITY: Final[int] = 16
+
+# Age after which a staged Pairing PSK no longer admits its client and is dropped from the store.
+_STAGED_PAIRING_PSK_LIFETIME: Final[timedelta] = timedelta(hours=24)
 
 __all__ = [
     "PAIRING_ROUND_LIMIT",
@@ -575,15 +578,16 @@ class _ServerPairingStoreBase(ServerPairingStore):
             await self._save()
 
     async def staged_pairing_psk(self, client_id: str) -> StagedPairingPsk | None:
-        """Return the Pairing PSK staged to admit ``client_id``, if any."""
-        return self._staged.get(client_id)
+        """Return the unexpired Pairing PSK staged to admit ``client_id``, if any."""
+        staged = self._staged.get(client_id)
+        return None if staged is None or _is_expired(staged) else staged
 
     async def list_staged_pairing_psks(self) -> Sequence[StagedPairingPsk]:
-        """Return all operator-staged Pairing PSKs."""
-        return list(self._staged.values())
+        """Return all unexpired operator-staged Pairing PSKs."""
+        return [staged for staged in self._staged.values() if not _is_expired(staged)]
 
     async def stage_pairing_psk(self, client_id: str, pairing_psk: StagedPairingPsk) -> None:
-        """Stage an operator-entered Pairing PSK to admit ``client_id``."""
+        """Stage an operator-entered Pairing PSK to admit ``client_id`` for 24 hours."""
         self._staged[client_id] = pairing_psk
         await self._save()
 
@@ -642,21 +646,30 @@ class FileServerPairingStore(_ServerPairingStoreBase):
                 self._records[cid] = ServerPairingRecord.from_dict(v)
             except _UnknownPairMethodError as err:
                 logger.warning("Skipping pairing record for client %s: %s", cid, err)
-        self._staged = {
-            cid: StagedPairingPsk.from_dict(v)
-            for cid, v in _section(data, "staged_pairing_psks").items()
-        }
+        self._staged = {}
+        dropped_staged = False
+        for cid, v in _section(data, "staged_pairing_psks").items():
+            staged = StagedPairingPsk.from_dict(v)
+            if _is_expired(staged):
+                logger.info("Dropping the expired staged pairing PSK for client %s", cid)
+                dropped_staged = True
+            else:
+                self._staged[cid] = staged
         self._trusted = {
             cid: TrustedUnpairedClient.from_dict(v)
             for cid, v in _section(data, "trusted_unpaired_clients").items()
         }
+        if dropped_staged:
+            await self._save()
 
     async def _save(self) -> None:
         """Atomically write the current state to the JSON file."""
         async with self._lock:
             payload = {
                 "records": {c: r.to_dict() for c, r in self._records.items()},
-                "staged_pairing_psks": {c: p.to_dict() for c, p in self._staged.items()},
+                "staged_pairing_psks": {
+                    c: p.to_dict() for c, p in self._staged.items() if not _is_expired(p)
+                },
                 "trusted_unpaired_clients": {c: t.to_dict() for c, t in self._trusted.items()},
             }
             await asyncio.to_thread(_atomic_write_json, self._path, payload)
@@ -887,6 +900,12 @@ def _newest_per_server(records: Iterable[ClientPairingRecord]) -> dict[str, Clie
         if current is None or record.created_at >= current.created_at:
             newest[record.server_id] = record
     return newest
+
+
+def _is_expired(staged: StagedPairingPsk) -> bool:
+    # astimezone reads a naive timestamp as local time instead of failing the comparison.
+    age = datetime.now(UTC) - staged.created_at.astimezone(UTC)
+    return age > _STAGED_PAIRING_PSK_LIFETIME
 
 
 def _check_psk(psk: bytes) -> None:

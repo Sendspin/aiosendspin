@@ -365,6 +365,39 @@ async def test_file_store_warns_when_readable_by_others(
     assert "accessible to other users" in caplog.text
 
 
+async def test_server_store_hides_expired_staged_pairing_psk(
+    server_store: ServerPairingStore,
+) -> None:
+    """A staged Pairing PSK older than its lifetime no longer admits the client."""
+    expired = replace(_staged_psk(), created_at=datetime.now(UTC) - timedelta(hours=25))
+    await server_store.stage_pairing_psk("client-A", expired)
+    assert await server_store.staged_pairing_psk("client-A") is None
+    assert list(await server_store.list_staged_pairing_psks()) == []
+
+
+async def test_server_store_expires_staged_pairing_psk_with_naive_timestamp(
+    server_store: ServerPairingStore,
+) -> None:
+    """A naive ``created_at`` neither breaks lookups nor escapes expiry."""
+    fresh = replace(_staged_psk(), created_at=datetime.now())  # noqa: DTZ005
+    old = replace(_staged_psk(), created_at=datetime.now() - timedelta(hours=25))  # noqa: DTZ005
+    await server_store.stage_pairing_psk("client-A", fresh)
+    await server_store.stage_pairing_psk("client-B", old)
+    assert await server_store.staged_pairing_psk("client-A") == fresh
+    assert await server_store.staged_pairing_psk("client-B") is None
+
+
+async def test_file_server_store_drops_expired_staged_pairing_psk_on_load(tmp_path: Path) -> None:
+    """Opening the store removes an expired staged Pairing PSK from disk."""
+    path = tmp_path / "pairings.json"
+    expired = replace(_staged_psk(), created_at=datetime.now(UTC) - timedelta(hours=25))
+    path.write_text(
+        json.dumps({"staged_pairing_psks": {"client-A": expired.to_dict()}}), encoding="utf-8"
+    )
+    await FileServerPairingStore.open(path)
+    assert json.loads(path.read_text(encoding="utf-8"))["staged_pairing_psks"] == {}
+
+
 async def test_file_server_store_removal_persists(tmp_path: Path) -> None:
     """Removing a trusted-unpaired approval is reflected after a reload."""
     path = tmp_path / "pairings.json"
