@@ -1075,6 +1075,7 @@ class PlayerV1Role(Role):
                 frame_duration_us=frame_duration_us,
             )
 
+        previous = self._audio_requirements
         self._audio_requirements = AudioRequirements(
             sample_rate=audio_format.sample_rate,
             bit_depth=bit_depth,
@@ -1083,3 +1084,6 @@ class PlayerV1Role(Role):
             channel_id=channel_id,
             frame_duration_us=frame_duration_us,
         )
+        if previous is None or previous.transformer is not transformer:
+            # A reconnecting role is missing from its client's active_roles until it connects.
+            group.prune_transformer_pool(keep=transformer)
