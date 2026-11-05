@@ -1204,8 +1204,8 @@ class SendspinConnection:
     ) -> Transport:
         """Dispatch on the first frame: accept a legacy client or run the Noise handshake.
 
-        Outside a pairing dial, in transition mode, a ``client/hello`` first frame
-        is accepted unencrypted (the raw socket is the transport,
+        Outside a pairing dial, in transition mode on a lenient server, a ``client/hello``
+        first frame is accepted unencrypted (the raw socket is the transport,
         and the frame is held for the message loop). Every other TEXT first frame runs
         the Noise initiator handshake and yields an encrypted transport; one that is not
         a valid ``client/init`` is answered with ``server/error``, as is a BINARY first frame.
@@ -1214,7 +1214,7 @@ class SendspinConnection:
         """
         first_text = await receive_client_init_frame(raw)
         if _peek_message_type(first_text) == "client/hello" and self._pairing_attempt is None:
-            if self._server.allow_unencrypted:
+            if self._server.allow_unencrypted and self._server.allow_noncompliant_clients:
                 self._pending_first_text = first_text
                 return raw
             peer = self._request.remote if self._request is not None else self._url

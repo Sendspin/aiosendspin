@@ -263,8 +263,8 @@ async def test_transition_mode_accepts_legacy_client() -> None:
         assert isinstance(ServerMessage.from_json(msg.data), ServerHelloMessage)
 
 
-async def test_strict_server_closes_legacy_client_despite_transition_mode() -> None:
-    """Rejecting non-compliant clients overrides allow_unencrypted for a legacy client."""
+async def test_strict_server_refuses_legacy_client_despite_transition_mode() -> None:
+    """A strict server answers a legacy client/hello like a server without transition mode."""
     server = _make_server(
         InMemoryServerPairingStore(), allow_unencrypted=True, allow_noncompliant_clients=False
     )
@@ -274,6 +274,9 @@ async def test_strict_server_closes_legacy_client_despite_transition_mode() -> N
         session.ws_connect(url) as ws,
     ):
         await ws.send_str(_legacy_hello())
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert msg.type is WSMsgType.TEXT
+        assert ServerErrorMessage.from_json(msg.data).payload.reason is ServerErrorReason.MALFORMED
         msg = await asyncio.wait_for(ws.receive(), timeout=5)
         assert msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
     assert server.get_client("legacy-client") is None

@@ -569,7 +569,7 @@ class SendspinServer:
             return
         self._unencrypted_refused_peers.add(peer)
         logger.warning(
-            "Refused unencrypted legacy connection from %s (transition mode is off)", peer
+            "Refused unencrypted legacy connection from %s (transition mode is off or strict)", peer
         )
 
     def _signal_client_connected(self, client_id: str) -> None:
