@@ -6,11 +6,14 @@ import asyncio
 import json
 import logging
 import os
+import stat
+import sys
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
@@ -33,6 +36,9 @@ PAIRING_ROUND_LIMIT: Final[int] = 20
 # Per-server pairing records a client store holds before a new pairing evicts one.
 _MIN_RECORD_CAPACITY: Final[int] = 5
 _DEFAULT_RECORD_CAPACITY: Final[int] = 16
+
+# Age after which a staged Pairing PSK no longer admits its client and is dropped from the store.
+_STAGED_PAIRING_PSK_LIFETIME: Final[timedelta] = timedelta(hours=24)
 
 __all__ = [
     "PAIRING_ROUND_LIMIT",
@@ -572,15 +578,16 @@ class _ServerPairingStoreBase(ServerPairingStore):
             await self._save()
 
     async def staged_pairing_psk(self, client_id: str) -> StagedPairingPsk | None:
-        """Return the Pairing PSK staged to admit ``client_id``, if any."""
-        return self._staged.get(client_id)
+        """Return the unexpired Pairing PSK staged to admit ``client_id``, if any."""
+        staged = self._staged.get(client_id)
+        return None if staged is None or _is_expired(staged) else staged
 
     async def list_staged_pairing_psks(self) -> Sequence[StagedPairingPsk]:
-        """Return all operator-staged Pairing PSKs."""
-        return list(self._staged.values())
+        """Return all unexpired operator-staged Pairing PSKs."""
+        return [staged for staged in self._staged.values() if not _is_expired(staged)]
 
     async def stage_pairing_psk(self, client_id: str, pairing_psk: StagedPairingPsk) -> None:
-        """Stage an operator-entered Pairing PSK to admit ``client_id``."""
+        """Stage an operator-entered Pairing PSK to admit ``client_id`` for 24 hours."""
         self._staged[client_id] = pairing_psk
         await self._save()
 
@@ -653,7 +660,9 @@ class FileServerPairingStore(_ServerPairingStoreBase):
         async with self._lock:
             payload = {
                 "records": {c: r.to_dict() for c, r in self._records.items()},
-                "staged_pairing_psks": {c: p.to_dict() for c, p in self._staged.items()},
+                "staged_pairing_psks": {
+                    c: p.to_dict() for c, p in self._staged.items() if not _is_expired(p)
+                },
                 "trusted_unpaired_clients": {c: t.to_dict() for c, t in self._trusted.items()},
             }
             await asyncio.to_thread(_atomic_write_json, self._path, payload)
@@ -886,6 +895,12 @@ def _newest_per_server(records: Iterable[ClientPairingRecord]) -> dict[str, Clie
     return newest
 
 
+def _is_expired(staged: StagedPairingPsk) -> bool:
+    # astimezone reads a naive timestamp as local time instead of failing the comparison.
+    age = datetime.now(UTC) - staged.created_at.astimezone(UTC)
+    return age > _STAGED_PAIRING_PSK_LIFETIME
+
+
 def _check_psk(psk: bytes) -> None:
     if len(psk) != PSK_SIZE:
         msg = f"PSK must be {PSK_SIZE} bytes, got {len(psk)}"
@@ -895,9 +910,13 @@ def _check_psk(psk: bytes) -> None:
 def _read_json_object(path: Path) -> Mapping[str, object] | None:
     """Read ``path`` as a JSON object; ``None`` if absent, ``TypeError`` if not an object."""
     try:
-        raw = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8") as file:
+            mode = stat.S_IMODE(os.fstat(file.fileno()).st_mode)
+            raw = file.read()
     except FileNotFoundError:
         return None
+    if sys.platform != "win32" and mode & 0o077:
+        logger.warning("Pairing store %s is accessible to other users (mode %o)", path, mode)
     data = json.loads(raw)
     if not isinstance(data, Mapping):
         msg = f"pairing store {path} must contain a JSON object"
@@ -908,11 +927,24 @@ def _read_json_object(path: Path) -> Mapping[str, object] | None:
 def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
     """Serialize ``payload`` and atomically replace ``path``, owner-readable only."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        file.write(json.dumps(payload, indent=2))
-    tmp.replace(path)
+    # mkstemp creates a new 0600 file under a random name, never reusing or following one.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(json.dumps(payload, indent=2))
+            file.flush()
+            os.fsync(file.fileno())
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if sys.platform != "win32":
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _section(data: Mapping[str, object], key: str) -> dict[str, Mapping[str, object]]:
