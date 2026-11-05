@@ -8,7 +8,12 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from aiosendspin.audio.codecs import create_decoder, decoded_bit_depth, opus_available
+from aiosendspin.audio.codecs import (
+    _flac_chunk_samples,
+    create_decoder,
+    decoded_bit_depth,
+    opus_available,
+)
 from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.core import ServerCommandMessage, ServerCommandPayload
 from aiosendspin.models.source import SourceCommandServerPayload
@@ -33,6 +38,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_SAMPLE_RATE = 384_000
+_MAX_CHANNELS = 8
+_MAX_LEAD_US = 1_000_000
+# Lets a source whose capture clock runs slightly fast stay within the lead.
+_CLOCK_TOLERANCE = 1.01
+
 
 class SourceV1Role(Role):
     """Per-connection role that decodes audio streamed up by a source client."""
@@ -46,6 +57,16 @@ class SourceV1Role(Role):
         self._decoder: object | None = None
         self._pcm_frame_bytes: int | None = None
         self._max_chunk_bytes = 0
+        self._flac_max_blocksize: int | None = None
+        self._flac_bits_per_sample = 0
+        self._flac_max_samples = 0
+        self._flac_max_bytes = 0
+        self._decoded_frame_bytes = 0
+        self._decoded_bytes_per_s = 0
+        # Server time at which the decoded audio so far would finish playing.
+        self._audio_end_us = 0
+        self._lead_drop_count = 0
+        self._last_lead_drop_log_s: float | None = None
         self._stream: SourceStream | None = None
         self._stream_active = False
         # The source object of the client/state this activation requires.
@@ -59,6 +80,8 @@ class SourceV1Role(Role):
         self._signal: SignalState | None = None
         self._decode_error_count = 0
         self._last_decode_error_log_s: float | None = None
+        self._unsupported_count = 0
+        self._last_unsupported_log_s: float | None = None
 
     @property
     def role_id(self) -> str:
@@ -190,11 +213,9 @@ class SourceV1Role(Role):
             channels=source.channels,
         )
         header = None
-        if source.codec_header is not None:
-            if source.codec is not AudioCodec.FLAC:
-                on_noncompliance(
-                    f"client-stream/start sent a codec_header for {source.codec.value}"
-                )
+        if source.codec_header is not None and source.codec is not AudioCodec.FLAC:
+            on_noncompliance(f"client-stream/start sent a codec_header for {source.codec.value}")
+        elif source.codec_header is not None:
             try:
                 header = base64.b64decode(source.codec_header, validate=True)
             except (binascii.Error, ValueError):
@@ -209,6 +230,11 @@ class SourceV1Role(Role):
         ):
             on_noncompliance("client-stream/start FLAC codec_header must contain STREAMINFO")
             return None
+        if header is not None and int.from_bytes(header[18:21], "big") >> 4 != source.sample_rate:
+            on_noncompliance(
+                "client-stream/start FLAC STREAMINFO sample rate differs from sample_rate"
+            )
+            return None
         return audio_format, header
 
     def on_client_stream_start(self, payload: ClientStreamStartPayload) -> None:
@@ -221,6 +247,25 @@ class SourceV1Role(Role):
             payload, on_noncompliance=self._client.flag_noncompliance
         )
         if checked is None:
+            return
+        # Opus without an OpusHead decodes at most two channels.
+        max_channels = 2 if source.codec is AudioCodec.OPUS else _MAX_CHANNELS
+        if source.sample_rate > _MAX_SAMPLE_RATE or source.channels > max_channels:
+            self._unsupported_count += 1
+            now_s = time.monotonic()
+            last_log_s = self._last_unsupported_log_s
+            if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
+                logger.warning(
+                    "Declined %s source stream(s) since last report, latest at %s Hz with "
+                    "%s channels, beyond the supported %s Hz and %s channels",
+                    self._unsupported_count,
+                    source.sample_rate,
+                    source.channels,
+                    _MAX_SAMPLE_RATE,
+                    max_channels,
+                )
+                self._unsupported_count = 0
+                self._last_unsupported_log_s = now_s
             return
         audio_format, header = checked
         if not self._stream_wanted:
@@ -248,6 +293,17 @@ class SourceV1Role(Role):
         # The longest chunk allowed is 150 ms of frames, measured on the decoded PCM.
         decoded_frame_bytes = audio_format.bit_depth // 8 * audio_format.channels
         self._max_chunk_bytes = source.sample_rate * 3 // 20 * decoded_frame_bytes
+        self._decoded_frame_bytes = decoded_frame_bytes
+        self._decoded_bytes_per_s = source.sample_rate * decoded_frame_bytes
+        if source.codec is AudioCodec.FLAC and header is not None:
+            self._flac_max_blocksize = int.from_bytes(header[10:12], "big")
+            self._flac_bits_per_sample = ((header[20] & 0x01) << 4 | header[21] >> 4) + 1
+            # One more block absorbs a frame header pattern that occurs by chance in audio data.
+            self._flac_max_samples = source.sample_rate * 3 // 20 + self._flac_max_blocksize
+            # No FLAC encoding needs more than twice the decoded size, which bounds the scan.
+            self._flac_max_bytes = 2 * self._flac_max_samples * decoded_frame_bytes
+        else:
+            self._flac_max_blocksize = None
         self._stream = SourceStream(audio_format)
         self._stream_active = True
         self._client._signal_event(  # noqa: SLF001
@@ -271,22 +327,66 @@ class SourceV1Role(Role):
             # An empty packet flushes the decoder and ends decoding for the stream.
             self._client.flag_noncompliance("sent an empty flac or opus source audio chunk")
             return
-        try:
-            pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
-        except Exception as err:
-            self._client.flag_noncompliance("sent a source audio chunk that failed to decode")
-            self._decode_error_count += 1
+        now_us = self._client._server.clock.now_us()  # noqa: SLF001
+        if self._audio_end_us - now_us > _MAX_LEAD_US:
+            self._lead_drop_count += 1
             now_s = time.monotonic()
-            last_log_s = self._last_decode_error_log_s
+            last_log_s = self._last_lead_drop_log_s
             if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
                 logger.warning(
-                    "Failed to decode %s source audio chunk(s) since last report: %s",
-                    self._decode_error_count,
-                    err,
-                    exc_info=self._decode_error_count == 1,
+                    "Dropped %s source audio chunk(s) since last report: the source runs more "
+                    "than %s s ahead of real time",
+                    self._lead_drop_count,
+                    _MAX_LEAD_US / 1_000_000,
                 )
-                self._decode_error_count = 0
-                self._last_decode_error_log_s = now_s
+                self._lead_drop_count = 0
+                self._last_lead_drop_log_s = now_s
+            return
+        pcm: bytes | None = None
+        # The FLAC decoder decodes every frame in a chunk, and a frame of a few bytes can declare
+        # up to 65536 samples, so a chunk of a few kilobytes can decode to minutes of audio.
+        # Counting the samples first rejects such chunks without decoding them. An Opus chunk is
+        # one packet, which holds at most 120 ms.
+        flac_samples = 0
+        if self._flac_max_blocksize is not None and len(data) <= self._flac_max_bytes:
+            flac_samples = _flac_chunk_samples(
+                data,
+                max_blocksize=self._flac_max_blocksize,
+                bits_per_sample=self._flac_bits_per_sample,
+                limit=self._flac_max_samples,
+            )
+        if self._flac_max_blocksize is not None and (
+            len(data) > self._flac_max_bytes or flac_samples > self._flac_max_samples
+        ):
+            self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
+        else:
+            try:
+                pcm = self._decoder.decode(data)  # type: ignore[attr-defined]
+            except Exception as err:
+                self._client.flag_noncompliance("sent a source audio chunk that failed to decode")
+                self._decode_error_count += 1
+                now_s = time.monotonic()
+                last_log_s = self._last_decode_error_log_s
+                if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
+                    logger.warning(
+                        "Failed to decode %s source audio chunk(s) since last report: %s",
+                        self._decode_error_count,
+                        err,
+                        exc_info=self._decode_error_count == 1,
+                    )
+                    self._decode_error_count = 0
+                    self._last_decode_error_log_s = now_s
+        charged_bytes = len(pcm or b"")
+        if self._flac_max_blocksize is not None:
+            # Charge what the decoder may have done even when its output was dropped. Half the
+            # bytes stays below honest audio and charges chunks without frame headers.
+            charged_bytes = max(
+                charged_bytes, flac_samples * self._decoded_frame_bytes, len(data) // 2
+            )
+        self._audio_end_us = max(self._audio_end_us, now_us) + int(
+            charged_bytes * 1_000_000 / self._decoded_bytes_per_s / _CLOCK_TOLERANCE
+        )
+        if pcm is None:
             return
         if len(pcm) > self._max_chunk_bytes:
             self._client.flag_noncompliance("sent a source audio chunk longer than 150 ms")
