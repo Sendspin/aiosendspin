@@ -1131,7 +1131,7 @@ def test_on_client_state_updates_min_buffer() -> None:
 
 
 def test_timing_fields_above_server_maximum_are_clamped() -> None:
-    """Timing values above 30 s are stored as reported but honoured at 30 s."""
+    """Timing values above the server maximums are stored as reported but honoured at them."""
     client = _make_client_stub()
     role = PlayerV1Role(client=client)
     role.on_client_state(
@@ -1142,7 +1142,7 @@ def test_timing_fields_above_server_maximum_are_clamped() -> None:
     assert role.required_lead_time_ms == 45_000
     assert role.min_buffer_ms == 60_000
     assert role.get_required_lead_time_us() == 30_000_000
-    assert role.get_min_buffer_us() == 30_000_000
+    assert role.get_min_buffer_us() == 5_000_000
     client.flag_noncompliance.assert_not_called()
 
 
