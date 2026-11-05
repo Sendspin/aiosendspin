@@ -48,7 +48,11 @@ from aiosendspin.server.roles.player.audio_transformers import (
     OpusEncoder,
     PcmPassthrough,
 )
-from aiosendspin.server.roles.player.capabilities import can_encode_format, filter_encodable_formats
+from aiosendspin.server.roles.player.capabilities import (
+    MAX_SAMPLE_RATE,
+    can_encode_format,
+    filter_encodable_formats,
+)
 from aiosendspin.server.roles.player.events import (
     MinBufferChangedEvent,
     OutputDelayChangedEvent,
@@ -227,6 +231,13 @@ class PlayerV1Role(Role):
         # Reset buffer tracker on (re)connect - client buffer is empty after reconnect
         if state.buffer_tracker is not None:
             state.buffer_tracker.reset()
+        support = self._client.info.player_support
+        if support is not None and any(
+            fmt.sample_rate > MAX_SAMPLE_RATE for fmt in support.supported_formats
+        ):
+            self._client._logger.warning(  # noqa: SLF001
+                "Skipping declared player formats above %s Hz", MAX_SAMPLE_RATE
+            )
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
 
