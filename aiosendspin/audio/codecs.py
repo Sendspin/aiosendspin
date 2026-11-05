@@ -224,9 +224,9 @@ class FlacEncoder:
 
     @property
     def pending_timestamp_us(self) -> int | None:
-        """Timestamp of the next output frame, or None if stream not started."""
+        """Timestamp of the next output frame, or None before any input."""
         if self._stream_start_timestamp_us is None:
-            return None
+            return self._first_input_timestamp_us
         cumulative_samples = self._output_frame_count * self._chunk_samples
         return self._stream_start_timestamp_us + (
             cumulative_samples * 1_000_000 // self._sample_rate
@@ -434,9 +434,11 @@ class OpusEncoder:
 
     @property
     def pending_timestamp_us(self) -> int | None:
-        """Timestamp of the next output frame, or None if stream not started."""
+        """Timestamp of the next output frame, or None before any input."""
         if self._stream_start_timestamp_us is None:
-            return None
+            if self._first_input_timestamp_us is None:
+                return None
+            return self._first_input_timestamp_us - self._lookahead_us
         cumulative_samples = self._output_frame_count * self._chunk_samples
         return self._stream_start_timestamp_us + (
             cumulative_samples * 1_000_000 // self._sample_rate
