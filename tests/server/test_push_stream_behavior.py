@@ -5208,10 +5208,16 @@ async def test_flush_audio_caches_tail_for_warm_reattached_player(mock_loop: Any
     assert sum(len(chunks) for chunks in cached.values()) == 2
 
 
+@pytest.mark.parametrize(
+    "switches",
+    [[[44100], [48000]], [[44100, 48000]]],
+    ids=["separate-commits", "one-commit"],
+)
 @pytest.mark.asyncio
 async def test_inflight_switch_away_and_back_keeps_audio_aligned(
     mock_loop: Any,
     monkeypatch: pytest.MonkeyPatch,
+    switches: list[list[int]],
 ) -> None:
     """Switching formats away and back mid-commit keeps every sample at its timestamp."""
     group = _DummyGroup(clients=[])
@@ -5221,10 +5227,12 @@ async def test_inflight_switch_away_and_back_keeps_audio_aligned(
     group.has_active_stream = True
     role = client.role("player@v1")
     assert role is not None
+    format_changes = MagicMock(wraps=group.on_role_format_changed)
+    monkeypatch.setattr(group, "on_role_format_changed", format_changes)
     original_resample = stream._resample_for_roles  # noqa: SLF001
     next_sample = 0
 
-    async def commit(count: int, switch_to: int | None = None) -> None:
+    async def commit(count: int, switch_to: list[int] | None = None) -> None:
         nonlocal next_sample
         for index in range(count):
             # 30ms commits against 25ms frames leave input buffered in the encoder.
@@ -5238,7 +5246,8 @@ async def test_inflight_switch_away_and_back_keeps_audio_aligned(
 
                 async def resample_then_switch(*args: Any, **kwargs: Any) -> Any:
                     monkeypatch.setattr(stream, "_resample_for_roles", original_resample)
-                    role.on_client_state(_format_state(switch_to))
+                    for rate in switch_to:
+                        role.on_client_state(_format_state(rate))
                     return await original_resample(*args, **kwargs)
 
                 monkeypatch.setattr(stream, "_resample_for_roles", resample_then_switch)
@@ -5247,12 +5256,11 @@ async def test_inflight_switch_away_and_back_keeps_audio_aligned(
                 await asyncio.sleep(0)
 
     await commit(21)
-    await commit(7, switch_to=44100)
-    await commit(7, switch_to=48000)
+    for switch_to in switches:
+        await commit(7, switch_to=switch_to)
     await commit(7)
 
-    starts = [msg.payload.player for msg in conn.sent_json if isinstance(msg, StreamStartMessage)]
-    assert [player.sample_rate for player in starts if player is not None] == [48000, 44100, 48000]
+    assert format_changes.call_count == 2
     # 48kHz frames are 4800 bytes, so their first sample follows from their timestamp.
     first_us = unpack_player_audio_header(conn.sent_binary[0]).timestamp_us
     frames_48k = [f for f in conn.sent_binary if len(f) == PLAYER_AUDIO_HEADER_SIZE + 4800]
