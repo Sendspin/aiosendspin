@@ -25,6 +25,7 @@ from aiosendspin.noise.trust_store import (
     InMemoryServerPairingStore,
     PairingPsk,
     PskCategory,
+    StagedPairingPsk,
 )
 from aiosendspin.server.roles.source import SourceStreamStartedEvent
 from aiosendspin.server.roles.source.v1 import SourceV1Role
@@ -86,7 +87,9 @@ async def test_paired_source_client_streams_pcm_end_to_end() -> None:
     pairing = generate_psk()
     pp = PairingPsk(psk_id=psk_id_for(pairing), psk=pairing)
     await client_store.set_pairing_psk(pp)
-    await server_store.stage_pairing_psk(client_identity.peer_id, pp)
+    await server_store.stage_pairing_psk(
+        client_identity.peer_id, StagedPairingPsk(pp.psk_id, pp.psk)
+    )
 
     async with _serve(server) as url:
         # First connect performs pairing onto a long-term PSK.
