@@ -38,6 +38,7 @@ from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import (
     DEFAULT_INITIAL_DELAY_US,
     CachedChunk,
@@ -92,6 +93,8 @@ class _DummyGroup:
     def on_role_format_changed(self, role: Any, *, resume_at_us: int | None = None) -> None:
         if self._push_stream is not None and not self._push_stream.is_stopped:
             self._push_stream.on_role_format_changed(role, resume_at_us=resume_at_us)
+
+    prune_transformer_pool = SendspinGroup.prune_transformer_pool
 
 
 class _FakeConnection:

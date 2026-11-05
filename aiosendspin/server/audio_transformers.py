@@ -6,7 +6,7 @@ They are managed by TransformerPool for deduplication across roles.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Collection, Hashable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, TypeVar, runtime_checkable
 
@@ -170,6 +170,15 @@ class TransformerPool:
     def get(self, key: TransformKey) -> AudioTransformer | None:
         """Return the pooled transformer for key, if one exists."""
         return self._transformers.get(key)
+
+    def prune(self, keep: Collection[AudioTransformer]) -> None:
+        """Drop every pooled transformer that is not in keep."""
+        keep_ids = {id(transformer) for transformer in keep}
+        self._transformers = {
+            key: transformer
+            for key, transformer in self._transformers.items()
+            if id(transformer) in keep_ids
+        }
 
     def reset_all(self) -> None:
         """Reset all transformers (called on stream/clear)."""

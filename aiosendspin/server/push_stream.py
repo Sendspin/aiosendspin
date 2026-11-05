@@ -2219,14 +2219,9 @@ class PushStream:
                 self._transform_key_cache.pop(cache_key, None)
         for stale_tkey in stale_transform_keys:
             if not self._other_roles_use_transform_key(stale_tkey, role):
-                # Sole user of the old format: drop its encoded cache and
-                # reset the encoder so a change back starts clean.
+                # Sole user of the old format: drop its encoded cache.
                 self._transform_last_input_end_us.pop(stale_tkey, None)
                 self._role_chunk_cache.pop(stale_tkey, None)
-                transformer = self._group.transformer_pool.get(stale_tkey)
-                if transformer is not None:
-                    with self._transformer_lock:
-                        transformer.reset()
 
         # Clean up any catchup state referencing this role
         for tkey in list(self._catchup_roles.keys()):

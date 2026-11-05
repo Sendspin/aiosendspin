@@ -25,7 +25,7 @@ from aiosendspin.server.events import (
 from aiosendspin.server.roles import GroupRole, MetadataGroupRole
 from aiosendspin.server.roles.registry import create_group_roles
 
-from .audio_transformers import TransformerPool
+from .audio_transformers import AudioTransformer, TransformerPool
 from .channels import ChannelResolver, default_channel_resolver
 from .push_stream import PushStream
 
@@ -309,6 +309,16 @@ class SendspinGroup:
         """Return the transformer pool for encoder deduplication."""
         return self._transformer_pool
 
+    def prune_transformer_pool(self, keep: AudioTransformer | None = None) -> None:
+        """Drop pooled transformers that no member role uses, apart from keep."""
+        in_use = [] if keep is None else [keep]
+        for client in self.clients:
+            for role in client.active_roles:
+                req = role.get_audio_requirements()
+                if req is not None and req.transformer is not None:
+                    in_use.append(req.transformer)
+        self.transformer_pool.prune(in_use)
+
     def get_channel_for_player(self, player_id: str) -> UUID:
         """
         Get the channel a player should receive audio from.
@@ -414,6 +424,7 @@ class SendspinGroup:
                 role.on_stream_end()
                 if self._push_stream is not None and not self._push_stream.is_stopped:
                     self._push_stream.on_role_leave(role)
+            self.prune_transformer_pool()
         if not self._clients:
             self._finalize_empty_group()
         else:
