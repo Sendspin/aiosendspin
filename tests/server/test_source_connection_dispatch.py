@@ -19,6 +19,7 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import AudioCodec, BinaryMessageType, ClientMessage
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.roles.base import Role
 from aiosendspin.util import WARN_INTERVAL_S
 
 
@@ -34,6 +35,8 @@ class _RecordingRole:
     def handles_inbound_binary(self, message_type: int) -> bool:
         return self.consume and message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
 
+    on_binary_message = Role.on_binary_message
+
     def on_binary_chunk(self, message_type: int, timestamp_us: int, data: bytes) -> None:
         self.binary.append((message_type, timestamp_us, data))
 
@@ -42,6 +45,19 @@ class _RecordingRole:
 
     def on_client_stream_end(self) -> None:
         self.ends += 1
+
+
+class _ApplicationRole:
+    role_family = "_vendor_echo"
+
+    def __init__(self) -> None:
+        self.messages: list[tuple[int, bytes]] = []
+
+    def handles_inbound_binary(self, message_type: int) -> bool:
+        return message_type == 200
+
+    def on_binary_message(self, message_type: int, data: bytes) -> None:
+        self.messages.append((message_type, data))
 
 
 class _FakeClient:
@@ -106,6 +122,14 @@ def test_inbound_binary_stops_at_first_consuming_role() -> None:
     )
     assert len(first.binary) == 1
     assert second.binary == []
+
+
+def test_application_binary_reaches_role_without_timestamp_header() -> None:
+    """An application-specific binary message reaches its role whole, however short."""
+    role = _ApplicationRole()
+    conn = _bare_connection([role], strict=True)
+    conn._route_inbound_binary(b"\xc8abc")  # noqa: SLF001
+    assert role.messages == [(200, b"abc")]
 
 
 def test_unhandled_binary_warns(caplog: Any) -> None:
