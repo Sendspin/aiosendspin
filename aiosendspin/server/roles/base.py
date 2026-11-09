@@ -9,6 +9,7 @@ This module contains:
 
 from __future__ import annotations
 
+import struct
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
 # Default startup lead time used when a role does not report its own. Matches the
 # push stream's no-roles fallback so default behavior is unchanged.
 DEFAULT_REQUIRED_LEAD_TIME_US = 250_000
+
+_TIMESTAMP = struct.Struct(">q")
 
 
 @dataclass(frozen=True)
@@ -387,8 +390,20 @@ class Role(ABC):
     def on_stream_end(self) -> None:  # noqa: B027
         """Handle stream stop."""
 
+    def on_binary_message(self, message_type: int, data: bytes) -> None:
+        """Handle a declared inbound binary message, given its bytes after the ID byte.
+
+        The default reads an 8-byte timestamp header, passes the rest to
+        on_binary_chunk(), and drops shorter messages. Override this for a
+        binary layout without that header.
+        """
+        if len(data) < _TIMESTAMP.size:
+            return
+        (timestamp_us,) = _TIMESTAMP.unpack_from(data)
+        self.on_binary_chunk(message_type, timestamp_us, data[_TIMESTAMP.size :])
+
     def on_binary_chunk(self, message_type: int, timestamp_us: int, data: bytes) -> None:  # noqa: B027
-        """Handle a declared inbound binary message."""
+        """Handle a declared inbound binary message that has a timestamp header."""
 
     # --- Lifecycle hooks ---
 

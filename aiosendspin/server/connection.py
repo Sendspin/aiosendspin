@@ -46,7 +46,7 @@ import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from mashumaro.exceptions import SuitableVariantNotFoundError
 
-from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw, unpack_binary_header
+from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw
 from aiosendspin.models.base import parse_noting_wire_deviations
 from aiosendspin.models.core import (
     STREAM_END_ROLE_FAMILIES,
@@ -2888,16 +2888,12 @@ class SendspinConnection:
         """Route an inbound binary chunk to the role that declares its message type."""
         if self._client is None or not data:
             return
-        if len(data) < BINARY_HEADER_SIZE:
-            if data[0] == BinaryMessageType.SOURCE_AUDIO_CHUNK.value:
-                self._flag_noncompliance("sent a source audio chunk shorter than its header")
-            else:
-                self._drop_unrouted_binary(data[0])
-            return
-        header = unpack_binary_header(data)
-        payload = data[BINARY_HEADER_SIZE:]
-        is_source_audio = header.message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
+        message_type = data[0]
+        is_source_audio = message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
         if is_source_audio:
+            if len(data) < BINARY_HEADER_SIZE:
+                self._flag_noncompliance("sent a source audio chunk shorter than its header")
+                return
             if not self._source_input_open:
                 self._flag_noncompliance("sent source audio without an open input stream")
                 return
@@ -2905,12 +2901,12 @@ class SendspinConnection:
                 self._flag_noncompliance("sent source audio while reporting available: false")
                 return
         for role in self._client.active_roles:
-            if role.handles_inbound_binary(header.message_type):
-                role.on_binary_chunk(header.message_type, header.timestamp_us, payload)
+            if role.handles_inbound_binary(message_type):
+                role.on_binary_message(message_type, data[1:])
                 return
         if is_source_audio:
             return  # In flight from before the source role was removed.
-        self._drop_unrouted_binary(header.message_type)
+        self._drop_unrouted_binary(message_type)
 
     def _drop_unrouted_binary(self, message_type: int) -> None:
         """Flag a server-to-client binary type, or log an unhandled one with a rate limit."""
