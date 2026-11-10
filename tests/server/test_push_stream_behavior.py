@@ -3926,6 +3926,162 @@ def test_encode_pcm_sequence_yields_while_replaying_deep_cache(
     ]
 
 
+_HOLD_BACK_FRAMES = 480
+
+
+class _HoldBackGraph:
+    """Resample graph that always holds back the last `_HOLD_BACK_FRAMES` frames until EOF."""
+
+    def __init__(self, graph: Any) -> None:
+        self._graph = graph
+        self._held = bytearray()
+        self._frame_stride = 0
+        self._template: tuple[str, str, int] | None = None
+        self._eof = False
+
+    def push(self, frame: Any | None) -> None:
+        self._graph.push(frame)
+        self._eof = frame is None
+        for out in push_stream_module._drain_audio_graph(self._graph):  # noqa: SLF001
+            self._frame_stride = out.format.bytes * len(out.layout.channels)
+            self._template = (out.format.name, out.layout.name, out.sample_rate)
+            self._held.extend(bytes(out.planes[0])[: out.samples * self._frame_stride])
+
+    def pull(self) -> Any:
+        if self._template is None:
+            raise EOFError
+        held_frames = len(self._held) // self._frame_stride
+        release = held_frames if self._eof else held_frames - _HOLD_BACK_FRAMES
+        if release <= 0:
+            raise EOFError
+        fmt, layout, rate = self._template
+        frame = push_stream_module._get_av().AudioFrame(  # noqa: SLF001
+            format=fmt, layout=layout, samples=release
+        )
+        frame.sample_rate = rate
+        frame.planes[0].update(bytes(self._held[: release * self._frame_stride]))
+        del self._held[: release * self._frame_stride]
+        return frame
+
+
+@pytest.fixture
+def hold_back_resampler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every resample graph hold back its last `_HOLD_BACK_FRAMES` frames until EOF."""
+    build = push_stream_module._build_resample_graph  # noqa: SLF001
+    monkeypatch.setattr(
+        push_stream_module,
+        "_build_resample_graph",
+        lambda **kwargs: _HoldBackGraph(build(**kwargs)),
+    )
+
+
+_RAMP_FRAMES = 1_200
+
+
+def _ramp_pcm(index: int, bit_depth: int) -> bytes:
+    """Return 25 ms of 48 kHz stereo PCM whose 16-bit value counts up across slices."""
+    shift = bit_depth - 16
+    width = bit_depth // 8
+    return b"".join(
+        ((value << shift) & ((1 << bit_depth) - 1)).to_bytes(width, "little") * 2
+        for value in range(index * _RAMP_FRAMES, (index + 1) * _RAMP_FRAMES)
+    )
+
+
+def _ramp_values(payloads: list[bytes]) -> list[int]:
+    """Return the left-channel samples of 16-bit stereo payloads."""
+    data = b"".join(payloads)
+    return [int.from_bytes(data[i : i + 2], "little") for i in range(0, len(data), 4)]
+
+
+def test_trimmed_resampler_tail_ends_before_end_us() -> None:
+    """A tail longer than the time left before `end_us` is cut, never rounded past it."""
+    drained = push_stream_module._ResampledPCM(  # noqa: SLF001
+        pcm_data=bytes(17 * 4),
+        output_start_ts=349_604,
+        sample_count=17,
+        needs_s32_to_s24_conversion=False,
+        sample_type="int",
+    )
+
+    # 350 us before end_us holds 16.8 frames at 48 kHz.
+    tail = push_stream_module._trim_tail(drained, 4, 48_000, 349_954)  # noqa: SLF001
+
+    assert tail is not None
+    assert tail.output_start_ts + int(tail.sample_count * 1_000_000 / 48_000) <= 349_954
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hold_back_resampler")
+async def test_source_format_change_keeps_old_resampler_tail() -> None:
+    """Audio still held by the old source format's resampler plays before the new format."""
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group = _DummyGroup(clients=[])
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)
+
+    bit_depths = (32, 32, 24, 24)
+    for index, bit_depth in enumerate(bit_depths):
+        stream.prepare_audio(
+            _ramp_pcm(index, bit_depth),
+            AudioFormat(sample_rate=48_000, bit_depth=bit_depth, channels=2),
+        )
+        await stream.commit_audio()
+
+    for prev, nxt in pairwise(role.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    assert _ramp_values([chunk.data for chunk in role.received]) == list(
+        range(len(bit_depths) * _RAMP_FRAMES - _HOLD_BACK_FRAMES)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hold_back_resampler")
+async def test_catchup_source_format_change_between_batches_keeps_old_resampler_tail() -> None:
+    """A source format change between catch-up batches still encodes the old resampler's tail."""
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=_DummyGroup(clients=[]))
+    req = AudioRequirements(
+        sample_rate=48_000,
+        bit_depth=16,
+        channels=2,
+        transformer=None,
+        channel_id=MAIN_CHANNEL,
+        frame_duration_us=25_000,
+    )
+    resamplers: dict[Any, Any] = {}
+    quantizers: dict[Any, Any] = {}
+
+    bit_depths = (32, 24)
+    encoded: list[CachedChunk] = []
+    for index, bit_depth in enumerate(bit_depths):
+        chunk = CachedPCMChunk(
+            timestamp_us=1_000_000 + index * 25_000,
+            duration_us=25_000,
+            pcm_data=_ramp_pcm(index, bit_depth),
+            sample_rate=48_000,
+            bit_depth=bit_depth,
+            channels=2,
+        )
+        encoded += await stream._encode_pcm_sequence(  # noqa: SLF001
+            [chunk], None, req, MAIN_CHANNEL, resamplers=resamplers, quantizers=quantizers
+        )
+
+    for prev, nxt in pairwise(encoded):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    assert _ramp_values([chunk.payload for chunk in encoded]) == list(
+        range(len(bit_depths) * _RAMP_FRAMES - _HOLD_BACK_FRAMES)
+    )
+
+
 def test_soxr_fallback_caches_failure_per_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
