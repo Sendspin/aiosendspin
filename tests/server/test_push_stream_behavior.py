@@ -5410,15 +5410,19 @@ async def test_flush_audio_delivers_stream_shorter_than_one_encoder_frame(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source_rate", "resume_before_end_us"),
+    ("source_rate", "resume_before_end_us", "buffer_at_send_ahead"),
     [
-        pytest.param(48_000, 0, id="at_cache_end"),
-        pytest.param(48_000, 10_000, id="in_cache"),
-        pytest.param(44_100, 10_000, id="in_cache_resampled"),
+        pytest.param(48_000, 0, False, id="at_cache_end"),
+        pytest.param(48_000, 10_000, False, id="in_cache"),
+        pytest.param(44_100, 10_000, False, id="in_cache_resampled"),
+        pytest.param(44_100, 0, True, id="steady_state_resampled"),
     ],
 )
 async def test_switch_into_opus_starts_at_resume_point(
-    mock_loop: Any, resume_before_end_us: int, source_rate: int
+    mock_loop: Any,
+    resume_before_end_us: int,
+    source_rate: int,
+    buffer_at_send_ahead: bool,  # noqa: FBT001
 ) -> None:
     """The first Opus frame after a format change starts where the previous format ended."""
     group = _DummyGroup(clients=[])
@@ -5433,6 +5437,9 @@ async def test_switch_into_opus_starts_at_resume_point(
         role.received[-1].timestamp_us + role.received[-1].duration_us - resume_before_end_us
     )
     role.received.clear()
+    if buffer_at_send_ahead:
+        tail_us = stream._channel_timing[MAIN_CHANNEL]  # noqa: SLF001
+        mock_loop.time.return_value = (tail_us - stream._role_send_ahead_us(role)) / 1_000_000  # noqa: SLF001
 
     transformer = group.transformer_pool.get_or_create(
         OpusEncoder,

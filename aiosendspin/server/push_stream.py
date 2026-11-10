@@ -2400,8 +2400,10 @@ class PushStream:
                             self._ensure_role_started(role)
                         return
 
+                # A format switch always catches up to resume where the old format ended.
                 if (
-                    not role.replay_from_pcm_cache()
+                    resume_at_us is None
+                    and not role.replay_from_pcm_cache()
                     and self._has_established_resampler_for(req, channel_id)
                     and self._skip_replay_keeps_join_near_playhead(channel_id, role)
                 ):
