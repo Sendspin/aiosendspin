@@ -5409,6 +5409,55 @@ async def test_flush_audio_delivers_stream_shorter_than_one_encoder_frame(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_rate", "resume_before_end_us"),
+    [
+        pytest.param(48_000, 0, id="at_cache_end"),
+        pytest.param(48_000, 10_000, id="in_cache"),
+        pytest.param(44_100, 10_000, id="in_cache_resampled"),
+    ],
+)
+async def test_switch_into_opus_starts_at_resume_point(
+    mock_loop: Any, resume_before_end_us: int, source_rate: int
+) -> None:
+    """The first Opus frame after a format change starts where the previous format ended."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    pcm_format = AudioFormat(sample_rate=source_rate, bit_depth=16, channels=2)
+    pcm = bytes(source_rate * 25 // 1000 * 4)
+    for _ in range(4):
+        stream.prepare_audio(pcm, pcm_format)
+        await stream.commit_audio()
+    resume_at_us = (
+        role.received[-1].timestamp_us + role.received[-1].duration_us - resume_before_end_us
+    )
+    role.received.clear()
+
+    transformer = group.transformer_pool.get_or_create(
+        OpusEncoder,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=48_000,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=20_000,
+    )
+    role._requirements = replace(  # noqa: SLF001
+        role._requirements,  # noqa: SLF001
+        transformer=transformer,
+        frame_duration_us=20_000,
+    )
+    stream.on_role_format_changed(role, resume_at_us=resume_at_us)
+    for _ in range(4):
+        stream.prepare_audio(pcm, pcm_format)
+        await stream.commit_audio()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    assert 0 <= role.received[0].timestamp_us - resume_at_us < 1_000_000 // source_rate
+
+
+@pytest.mark.asyncio
 async def test_flush_audio_defers_joins_until_tail_is_cached(mock_loop: Any) -> None:
     """A player joining while the tail is being flushed still receives the tail."""
     group = _DummyGroup(clients=[])
