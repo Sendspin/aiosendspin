@@ -2806,7 +2806,6 @@ class PushStream:
         # this role's tkey will appear later and are safe to overwrite.
         established_resampler_keys = set(self._resamplers.keys())
 
-        # reset() clears the Opus lookahead until the encoder reopens.
         resume_lead_us = _resume_lead_us(encoder)
         try:
             if encoder is not None:

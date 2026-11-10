@@ -5410,12 +5410,13 @@ async def test_flush_audio_delivers_stream_shorter_than_one_encoder_frame(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source_rate", "resume_before_end_us", "buffer_at_send_ahead"),
+    ("source_rate", "resume_before_end_us", "buffer_at_send_ahead", "reuse_reset_encoder"),
     [
-        pytest.param(48_000, 0, False, id="at_cache_end"),
-        pytest.param(48_000, 10_000, False, id="in_cache"),
-        pytest.param(44_100, 10_000, False, id="in_cache_resampled"),
-        pytest.param(44_100, 0, True, id="steady_state_resampled"),
+        pytest.param(48_000, 0, False, False, id="at_cache_end"),
+        pytest.param(48_000, 10_000, False, False, id="in_cache"),
+        pytest.param(44_100, 10_000, False, False, id="in_cache_resampled"),
+        pytest.param(44_100, 0, True, False, id="steady_state_resampled"),
+        pytest.param(48_000, 0, False, True, id="reset_pooled_encoder"),
     ],
 )
 async def test_switch_into_opus_starts_at_resume_point(
@@ -5423,6 +5424,7 @@ async def test_switch_into_opus_starts_at_resume_point(
     resume_before_end_us: int,
     source_rate: int,
     buffer_at_send_ahead: bool,  # noqa: FBT001
+    reuse_reset_encoder: bool,  # noqa: FBT001
 ) -> None:
     """The first Opus frame after a format change starts where the previous format ended."""
     group = _DummyGroup(clients=[])
@@ -5449,6 +5451,8 @@ async def test_switch_into_opus_starts_at_resume_point(
         channels=2,
         frame_duration_us=20_000,
     )
+    if reuse_reset_encoder:
+        transformer.reset()
     role._requirements = replace(  # noqa: SLF001
         role._requirements,  # noqa: SLF001
         transformer=transformer,

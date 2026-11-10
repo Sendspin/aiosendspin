@@ -779,11 +779,11 @@ class TestOpusEncoderLookaheadCompensation:
         assert frames
         assert encoder._stream_start_timestamp_us == second_ts - lookahead_us  # noqa: SLF001
 
-    def test_reset_clears_lookahead(self) -> None:
-        """reset() clears _lookahead_us so a re-init cannot reuse a stale value."""
+    def test_reset_keeps_lookahead(self) -> None:
+        """reset() keeps _lookahead_us so a reset encoder still reports its pre-skip."""
         encoder = OpusEncoder(sample_rate=48000, bit_depth=16, channels=2)
-        encoder._ensure_initialized()  # noqa: SLF001
-        assert encoder._lookahead_us > 0  # noqa: SLF001
+        lookahead_us = encoder._lookahead_us  # noqa: SLF001
+        assert lookahead_us > 0
 
         encoder.reset()
-        assert encoder._lookahead_us == 0  # noqa: SLF001
+        assert encoder._lookahead_us == lookahead_us  # noqa: SLF001
