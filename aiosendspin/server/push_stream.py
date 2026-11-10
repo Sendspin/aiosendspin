@@ -239,6 +239,28 @@ def _resampler_hold_back_us(source_sample_rate: int, target_sample_rate: int) ->
     return hold_back_us
 
 
+def _trim_tail(
+    drained: _ResampledPCM, frame_stride: int, sample_rate: int, end_us: int | None
+) -> _ResampledPCM | None:
+    """Trim a drained resampler tail to `end_us`.
+
+    Returns None when nothing is left.
+    """
+    sample_count = drained.sample_count
+    if end_us is not None:
+        end_frames = ((end_us - drained.output_start_ts) * sample_rate + 500_000) // 1_000_000
+        sample_count = max(0, min(sample_count, end_frames))
+    if sample_count == 0 or not drained.pcm_data:
+        return None
+    return _ResampledPCM(
+        pcm_data=drained.pcm_data[: sample_count * frame_stride],
+        output_start_ts=drained.output_start_ts,
+        sample_count=sample_count,
+        needs_s32_to_s24_conversion=drained.needs_s32_to_s24_conversion,
+        sample_type=drained.sample_type,
+    )
+
+
 def _trim_and_quantize_tail(
     drained: _ResampledPCM,
     frame_stride: int,
@@ -254,20 +276,9 @@ def _trim_and_quantize_tail(
 
     Returns None when nothing is left.
     """
-    sample_count = drained.sample_count
-    if end_us is not None:
-        end_frames = ((end_us - drained.output_start_ts) * sample_rate + 500_000) // 1_000_000
-        sample_count = max(0, min(sample_count, end_frames))
-    if sample_count == 0 or not drained.pcm_data:
+    tail = _trim_tail(drained, frame_stride, sample_rate, end_us)
+    if tail is None:
         return None
-
-    tail = _ResampledPCM(
-        pcm_data=drained.pcm_data[: sample_count * frame_stride],
-        output_start_ts=drained.output_start_ts,
-        sample_count=sample_count,
-        needs_s32_to_s24_conversion=drained.needs_s32_to_s24_conversion,
-        sample_type=drained.sample_type,
-    )
     if tail.sample_type == "float":
         tail = _quantize_float_pcm(
             channel_id=channel_id,
