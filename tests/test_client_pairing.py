@@ -304,11 +304,11 @@ async def test_pair_pending_omits_an_unconfigured_message(method: PairMethod) ->
     assert pending["payload"] == {"pairing_index": 1}
 
 
-def test_pair_pending_message_is_limited_to_200_characters() -> None:
+def test_pair_pending_message_is_limited_to_200_utf8_bytes() -> None:
     """A message the spec allows is kept whole; a longer one is refused rather than cut."""
-    assert PairingSupport(pair_pending_message="x" * 200).pair_pending_message == "x" * 200
-    with pytest.raises(ValueError, match="200 characters"):
-        PairingSupport(pair_pending_message="x" * 201)
+    assert PairingSupport(pair_pending_message="é" * 100).pair_pending_message == "é" * 100
+    with pytest.raises(ValueError, match="200 bytes"):
+        PairingSupport(pair_pending_message="é" * 101)
 
 
 async def test_ungated_dynamic_attempt_starts_immediately(

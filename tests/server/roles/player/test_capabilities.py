@@ -53,6 +53,20 @@ def test_filter_encodable_formats_drops_flac_above_8_channels() -> None:
     assert filter_encodable_formats([flac_10, flac_8]) == [flac_8]
 
 
+def test_filter_encodable_formats_drops_rates_above_384k() -> None:
+    """PCM and FLAC above 384 kHz are skipped, while 384 kHz itself stays encodable."""
+    pcm_768k = SupportedAudioFormat(
+        codec=AudioCodec.PCM, sample_rate=768_000, bit_depth=24, channels=2
+    )
+    flac_768k = SupportedAudioFormat(
+        codec=AudioCodec.FLAC, sample_rate=768_000, bit_depth=24, channels=2
+    )
+    pcm_384k = SupportedAudioFormat(
+        codec=AudioCodec.PCM, sample_rate=384_000, bit_depth=24, channels=2
+    )
+    assert filter_encodable_formats([pcm_768k, flac_768k, pcm_384k]) == [pcm_384k]
+
+
 def test_can_encode_format_rejects_invalid_opus_sample_rate() -> None:
     """Opus with unsupported sample rate should be rejected."""
     fmt = SupportedAudioFormat(codec=AudioCodec.OPUS, sample_rate=44_100, bit_depth=16, channels=2)

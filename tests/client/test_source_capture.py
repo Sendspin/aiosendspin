@@ -83,6 +83,23 @@ async def test_opus_timestamps_lead_capture_by_the_encoder_pre_skip() -> None:
     assert conn.chunks[0][0] == 1_000_000 - 6_500
 
 
+async def test_opus_stop_sends_the_lookahead_on_the_capture_timeline() -> None:
+    """The frame stop() adds for the encoder lookahead follows the captured frames."""
+    pytest.importorskip("av")
+    fmt = SupportedAudioFormat(codec=AudioCodec.OPUS, channels=2, sample_rate=48000, bit_depth=16)
+    conn = _FakeConnection()
+    client = _FakeClient()
+    capture = SourceCapture(client, conn, fmt)  # type: ignore[arg-type]
+    await capture.start()
+    await capture.feed(sine_pcm_16bit(48000), capture_timestamp_us=1_000_000)
+    client.now = 2_200_000
+    await capture.stop()
+
+    timestamps = [ts for ts, _ in conn.chunks]
+    assert len(timestamps) == 51
+    assert timestamps[-1] == timestamps[-2] + 20_000
+
+
 async def test_start_announces_client_stream_only() -> None:
     """start() sends client-stream/start and nothing else (framing is the lifecycle)."""
     conn = _FakeConnection()

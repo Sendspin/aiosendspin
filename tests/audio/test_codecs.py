@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from aiosendspin.audio.codecs import (
+    _flac_chunk_samples,
     create_decoder,
     create_encoder,
     decoded_bit_depth,
@@ -17,7 +18,7 @@ from aiosendspin.audio.codecs import (
     opus_available,
 )
 from aiosendspin.audio.format import _convert_s24_to_s32
-from tests.conftest import sine_pcm_16bit
+from tests.conftest import flac_frame, sine_pcm_16bit
 
 
 @pytest.fixture
@@ -36,11 +37,15 @@ def _uncached_flac_probe() -> Iterator[None]:
     flac_encoder_available.cache_clear()
 
 
-def _roundtrip(codec: str, pcm: bytes) -> bytes:
-    enc = create_encoder(codec, sample_rate=48000, bit_depth=16, channels=2)
+def _roundtrip(codec: str, pcm: bytes, *, sample_rate: int = 48000) -> bytes:
+    enc = create_encoder(codec, sample_rate=sample_rate, bit_depth=16, channels=2)
     frames = enc.process(pcm, 0, 0) + enc.flush()
     dec = create_decoder(
-        codec, sample_rate=48000, bit_depth=16, channels=2, codec_header=enc.get_codec_header()
+        codec,
+        sample_rate=sample_rate,
+        bit_depth=16,
+        channels=2,
+        codec_header=enc.get_codec_header(),
     )
     out = bytearray()
     for frame, _dur in frames:
@@ -55,11 +60,13 @@ def test_pcm_roundtrip_is_bit_exact() -> None:
     assert _roundtrip("pcm", pcm) == pcm
 
 
-@pytest.mark.parametrize("codec", ["flac", "opus"])
-def test_lossy_codec_roundtrip_recovers_audio(codec: str) -> None:
+@pytest.mark.parametrize(
+    ("codec", "sample_rate"), [("flac", 48000), ("opus", 48000), ("opus", 16000)]
+)
+def test_lossy_codec_roundtrip_recovers_audio(codec: str, sample_rate: int) -> None:
     """FLAC/Opus decode back to roughly the same amount of audio (structural check)."""
     pcm = sine_pcm_16bit(48000)
-    out = _roundtrip(codec, pcm)
+    out = _roundtrip(codec, pcm, sample_rate=sample_rate)
     # Within one decoder block of the input; never empty.
     assert len(out) >= len(pcm) - 4608 * 4
     assert len(out) <= len(pcm) + 4608 * 4
@@ -222,3 +229,40 @@ def test_flac_encoder_unavailable_without_encoder(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("aiosendspin.audio.codecs._get_av", lambda: stub)
 
     assert flac_encoder_available() is False
+
+
+@pytest.mark.parametrize(
+    ("chunk", "samples"),
+    [
+        (flac_frame(1024) + flac_frame(512, number=1), 1536),
+        (b"\x00" + flac_frame(1024), 1024),
+        (flac_frame(1024) + flac_frame(512, number=1, bad_crc=True), 1024),
+        (flac_frame(1024) + flac_frame(4097, number=1), 1024),
+        (flac_frame(1024, channels=11) + flac_frame(512, number=1, channels=12), 1024),
+    ],
+)
+def test_flac_chunk_samples_counts_every_frame_the_decoder_accepts(
+    chunk: bytes, samples: int
+) -> None:
+    """Headers count at any offset, unless a field the decoder checks rules them out."""
+    assert (
+        _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=16, limit=10**6) == samples
+    )
+
+
+def test_flac_chunk_samples_skips_headers_in_another_sample_size() -> None:
+    """The decoder rejects frames whose sample size differs from STREAMINFO."""
+    chunk = flac_frame(1024)
+    assert _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=24, limit=10**6) == 0
+
+
+def test_flac_chunk_samples_is_over_limit_with_too_many_sync_codes() -> None:
+    """More than ``limit // 8`` sync codes count as past the limit."""
+    chunk = flac_frame(1024, bad_crc=True) * 101
+    assert _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=16, limit=800) > 800
+
+
+def test_flac_chunk_samples_ignores_sync_codes_without_header_fields() -> None:
+    """Sync codes in audio data that no header could follow stay below the cap."""
+    chunk = flac_frame(1024) + b"\xff\xf8" * 2048
+    assert _flac_chunk_samples(chunk, max_blocksize=4096, bits_per_sample=16, limit=1500) == 1024

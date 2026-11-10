@@ -48,6 +48,25 @@ def sine_pcm_16bit(samples: int, *, rate: int = 48000, channels: int = 2, freq: 
     return bytes(out)
 
 
+def flac_frame(
+    blocksize: int,
+    *,
+    number: int = 0,
+    channels: int = 2,
+    rate_code: int = 0,
+    bad_crc: bool = False,
+) -> bytes:
+    """Build a FLAC frame of silent 16-bit constant subframes."""
+    header = bytes([0xFF, 0xF8, 0x70 | rate_code, (channels - 1) << 4 | 0x08, number & 0x7F])
+    header += (blocksize - 1).to_bytes(2, "big")
+    crc = 0
+    for byte in header:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return header + bytes([crc ^ bad_crc]) + bytes(3) * channels + bytes(2)
+
+
 @pytest.fixture
 def mock_loop() -> MagicMock:
     """Mock event loop with time() returning 0.0."""

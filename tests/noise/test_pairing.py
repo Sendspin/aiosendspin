@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from cpace import CPace, CPaceRole
@@ -39,7 +40,6 @@ from aiosendspin.noise.models import (
     ServerPairInitPayload,
 )
 from aiosendspin.noise.pairing import (
-    PAIR_PENDING_MESSAGE_MAX_LEN,
     InvalidPairingCodeError,
     PairingAbortError,
     PairingAttempt,
@@ -65,6 +65,9 @@ from aiosendspin.noise.trust_store import (
 from aiosendspin.noise.wire import EncryptedWebSocket
 from tests.noise.conftest import make_paired_encrypted_ws
 from tests.pairing_stores import seed_used_client_records
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Coroutine
 
 
 async def _code() -> str:
@@ -278,22 +281,137 @@ async def test_static_pairing_code_server_first_message_wait_times_out(
     assert server_raw.sent == []
 
 
+def _run_server_and_client(
+    client_ews: EncryptedWebSocket,
+    server_ews: EncryptedWebSocket,
+    pairing_index: int,
+    *,
+    pairing_psk: bool,
+    on_noncompliance: Callable[[str], None] | None = None,
+) -> tuple[Coroutine[Any, Any, ServerPairingRecord], Callable[[], Awaitable[None]]]:
+    """Return the server side of a Pairing PSK or static attempt and a starter for the client."""
+    server_store = InMemoryServerPairingStore()
+    client_store = InMemoryClientPairingStore()
+
+    async def provide() -> str:
+        return _STATIC_PAIRING_CODE
+
+    if pairing_psk:
+        server = run_pairing_psk_server(
+            server_ews,
+            pairing_index=pairing_index,
+            client_id="client-A",
+            store=server_store,
+            on_noncompliance=on_noncompliance,
+        )
+
+        async def psk_client() -> None:
+            await run_pairing_psk_client(
+                client_ews, pairing_index=pairing_index, server_id="server-X", store=client_store
+            )
+
+        return server, psk_client
+    server = run_static_pairing_code_server(
+        server_ews,
+        handshake_hash=_HANDSHAKE_HASH,
+        pairing_index=pairing_index,
+        pairing_code_provider=provide,
+        client_id="client-A",
+        store=server_store,
+        on_noncompliance=on_noncompliance,
+    )
+
+    async def static_client() -> None:
+        await run_static_pairing_code_client(
+            client_ews,
+            handshake_hash=_HANDSHAKE_HASH,
+            pairing_index=pairing_index,
+            static_pairing_code=_STATIC_PAIRING_CODE,
+            server_id="server-X",
+            store=client_store,
+        )
+
+    return server, static_client
+
+
 @pytest.mark.parametrize(
-    ("sent", "surfaced"),
+    ("pairing_index", "reason", "discarded", "pairing_psk"),
     [
-        pytest.param(None, None, id="absent"),
-        pytest.param("Press the pairing button", "Press the pairing button", id="present"),
-        pytest.param("x" * 250, "x" * PAIR_PENDING_MESSAGE_MAX_LEN, id="truncated"),
+        pytest.param(2, PairAbortReason.ATTEMPT_TIMEOUT, True, False, id="leftover"),
+        pytest.param(2, PairAbortReason.ATTEMPT_TIMEOUT, True, True, id="leftover-pairing-psk"),
+        pytest.param(2, PairAbortReason.USER_CANCELLED, False, False, id="indistinguishable"),
+        pytest.param(1, PairAbortReason.ATTEMPT_TIMEOUT, False, False, id="first-activation"),
+    ],
+)
+async def test_leftover_abort_before_the_first_message_is_discarded(
+    pairing_index: int, reason: PairAbortReason, *, discarded: bool, pairing_psk: bool
+) -> None:
+    """A pair/abort no unstarted attempt can send is a leftover once an earlier one exists."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    server, client = _run_server_and_client(
+        client_ews, server_ews, pairing_index, pairing_psk=pairing_psk
+    )
+
+    await client_ews.send_str(PairAbortMessage(payload=PairAbortPayload(reason=reason)).to_json())
+    if not discarded:
+        with pytest.raises(RemotePairingAbortError):
+            await server
+        return
+    _, record = await asyncio.gather(client(), server)
+    assert record.client_id == "client-A"
+
+
+@pytest.mark.parametrize(
+    ("pairing_index", "leftover_index", "flagged", "pairing_psk"),
+    [
+        pytest.param(1, 0, True, False, id="zero"),
+        pytest.param(1, 0, True, True, id="zero-pairing-psk"),
+        pytest.param(2, -1, True, False, id="negative"),
+        pytest.param(2, 1, False, False, id="superseded"),
+    ],
+)
+async def test_lower_pairing_index_below_one_is_flagged(
+    pairing_index: int, leftover_index: int, *, flagged: bool, pairing_psk: bool
+) -> None:
+    """A lower ``pairing_index`` is discarded, and flagged when no activation can produce it."""
+    client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
+    noncompliance: list[str] = []
+    server, client = _run_server_and_client(
+        client_ews,
+        server_ews,
+        pairing_index,
+        pairing_psk=pairing_psk,
+        on_noncompliance=noncompliance.append,
+    )
+
+    await client_ews.send_str(
+        ClientPairPendingMessage(
+            payload=ClientPairPendingPayload(pairing_index=leftover_index)
+        ).to_json()
+    )
+    await asyncio.gather(client(), server)
+    assert noncompliance == (
+        ["sent client/pair-pending with a pairing_index below 1"] if flagged else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("sent", "surfaced", "flagged"),
+    [
+        pytest.param(None, None, False, id="absent"),
+        pytest.param("Press the pairing button", "Press the pairing button", False, id="present"),
+        pytest.param("x" + "é" * 150, "x" + "é" * 99, True, id="truncated"),
     ],
 )
 async def test_pair_pending_extends_the_first_message_wait(
-    sent: str | None, surfaced: str | None
+    sent: str | None, surfaced: str | None, *, flagged: bool
 ) -> None:
     """A matching pair-pending surfaces its message and switches to the gesture timeout."""
     client_ews, server_ews, _client_raw, _server_raw = _paired_encrypted_ws()
     client_store = InMemoryClientPairingStore()
     server_store = InMemoryServerPairingStore()
     pending_messages: list[str | None] = []
+    noncompliance: list[str] = []
 
     async def gated_client() -> None:
         await client_ews.send_str(
@@ -323,11 +441,15 @@ async def test_pair_pending_extends_the_first_message_wait(
             client_id="client-A",
             store=server_store,
             on_pair_pending=pending_messages.append,
+            on_noncompliance=noncompliance.append,
         ),
     )
     assert server_record is not None
     assert await server_store.record_by_client_id("client-A") == server_record
     assert pending_messages == [surfaced]
+    assert noncompliance == (
+        ["sent a client/pair-pending message over 200 bytes in UTF-8"] if flagged else []
+    )
 
 
 async def test_gesture_wait_times_out_after_pair_pending(

@@ -48,7 +48,11 @@ from aiosendspin.server.roles.player.audio_transformers import (
     OpusEncoder,
     PcmPassthrough,
 )
-from aiosendspin.server.roles.player.capabilities import can_encode_format, filter_encodable_formats
+from aiosendspin.server.roles.player.capabilities import (
+    MAX_SAMPLE_RATE,
+    can_encode_format,
+    filter_encodable_formats,
+)
 from aiosendspin.server.roles.player.events import (
     MinBufferChangedEvent,
     OutputDelayChangedEvent,
@@ -62,8 +66,9 @@ if TYPE_CHECKING:
 
 
 BUFFER_TRACKER_RESET_DELAY_S = 2.0
-# Largest required_lead_time_ms / min_buffer_ms the server honours; larger values are clamped.
+# Largest required_lead_time_ms the server honours. Larger values are clamped.
 MAX_TIMING_PARAMETER_MS = 30_000
+MAX_MIN_BUFFER_MS = 5_000
 
 
 @dataclass
@@ -227,6 +232,13 @@ class PlayerV1Role(Role):
         # Reset buffer tracker on (re)connect - client buffer is empty after reconnect
         if state.buffer_tracker is not None:
             state.buffer_tracker.reset()
+        support = self._client.info.player_support
+        if support is not None and any(
+            fmt.sample_rate > MAX_SAMPLE_RATE for fmt in support.supported_formats
+        ):
+            self._client._logger.warning(  # noqa: SLF001
+                "Skipping declared player formats above %s Hz", MAX_SAMPLE_RATE
+            )
         self._ensure_preferred_format()
         self._ensure_audio_requirements(force=True)
 
@@ -363,7 +375,11 @@ class PlayerV1Role(Role):
         """Send binary audio; the connection adds the header. Late audio is discarded there."""
         # Send deferred stream/start on first chunk (ensures encoder header is available)
         if self._pending_stream_start:
-            if not self._client.available:
+            connection = self._client.connection
+            # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+            if not self._client.available and not (
+                connection is not None and connection.leaves_external_source_on_stream_start
+            ):
                 # No stream/start, and so no audio, until the latest client/state
                 # reports the client available.
                 return
@@ -513,7 +529,7 @@ class PlayerV1Role(Role):
 
     def get_min_buffer_us(self) -> int:
         """Return reported minimum buffer in microseconds, clamped to the server maximum."""
-        return min(max(self.min_buffer_ms, 0), MAX_TIMING_PARAMETER_MS) * 1_000
+        return min(max(self.min_buffer_ms, 0), MAX_MIN_BUFFER_MS) * 1_000
 
     def get_output_delay_ms(self) -> int:
         """Return output delay for protocol API."""
@@ -669,6 +685,8 @@ class PlayerV1Role(Role):
             or state.min_buffer_ms is None
         ):
             reasons.append("omitted required player timing fields")
+        if state.min_buffer_ms is not None and state.min_buffer_ms > MAX_MIN_BUFFER_MS:
+            reasons.append(f"reported min_buffer_ms above {MAX_MIN_BUFFER_MS}")
         commands = state.supported_commands
         # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
         # A pre-#177 hello's commands count as declared; that client is already flagged.
@@ -860,14 +878,16 @@ class PlayerV1Role(Role):
             and self.required_lead_time_ms != state.required_lead_time_ms
         ):
             self.required_lead_time_ms = state.required_lead_time_ms
-            self._log_if_clamped("required_lead_time_ms", state.required_lead_time_ms)
+            self._log_if_clamped(
+                "required_lead_time_ms", state.required_lead_time_ms, MAX_TIMING_PARAMETER_MS
+            )
             self.emit_client_event(
                 RequiredLeadTimeChangedEvent(required_lead_time_ms=state.required_lead_time_ms)
             )
 
         if state.min_buffer_ms is not None and self.min_buffer_ms != state.min_buffer_ms:
             self.min_buffer_ms = state.min_buffer_ms
-            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms)
+            self._log_if_clamped("min_buffer_ms", state.min_buffer_ms, MAX_MIN_BUFFER_MS)
             self.emit_client_event(MinBufferChangedEvent(min_buffer_ms=state.min_buffer_ms))
 
     def _apply_state_format(self, state: PlayerStatePayload) -> None:
@@ -909,10 +929,10 @@ class PlayerV1Role(Role):
         ):
             self._begin_format_transition()
 
-    def _log_if_clamped(self, name: str, value: int) -> None:
-        if value > MAX_TIMING_PARAMETER_MS:
+    def _log_if_clamped(self, name: str, value: int, maximum: int) -> None:
+        if value > maximum:
             self._client._logger.debug(  # noqa: SLF001
-                "Clamping %s=%s to %s ms", name, value, MAX_TIMING_PARAMETER_MS
+                "Clamping %s=%s to %s ms", name, value, maximum
             )
 
     def _legacy_hello_commands(self) -> list[PlayerCommand] | None:
@@ -1055,6 +1075,7 @@ class PlayerV1Role(Role):
                 frame_duration_us=frame_duration_us,
             )
 
+        previous = self._audio_requirements
         self._audio_requirements = AudioRequirements(
             sample_rate=audio_format.sample_rate,
             bit_depth=bit_depth,
@@ -1063,3 +1084,6 @@ class PlayerV1Role(Role):
             channel_id=channel_id,
             frame_duration_us=frame_duration_us,
         )
+        if previous is None or previous.transformer is not transformer:
+            # A reconnecting role is missing from its client's active_roles until it connects.
+            group.prune_transformer_pool(keep=transformer)

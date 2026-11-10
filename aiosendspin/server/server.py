@@ -568,7 +568,7 @@ class SendspinServer:
             return
         self._unencrypted_refused_peers.add(peer)
         logger.warning(
-            "Refused unencrypted legacy connection from %s (transition mode is off)", peer
+            "Refused unencrypted legacy connection from %s (transition mode is off or strict)", peer
         )
 
     def _signal_client_connected(self, client_id: str) -> None:
@@ -863,10 +863,12 @@ class SendspinServer:
     async def unpair(self, client_id: str) -> None:
         """Drop the pairing with a connected client: remove our record and tell it to drop its own.
 
+        Also unstages any Pairing PSK staged for the client.
         Raises ``ValueError`` if the client is not currently connected.
         """
         connection = self._connection_for(client_id)
         await self.pairing_store.remove_record(client_id)
+        await self.pairing_store.unstage_pairing_psk(client_id)
         connection.forget_credential_mismatch()
         # A Sentinel session ignores server/unpair and stays up, so re-announce what it may
         # now do; a long-term one closes on the message and never sees the activation.

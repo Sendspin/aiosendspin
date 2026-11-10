@@ -46,7 +46,7 @@ import orjson
 from aiohttp import ClientWebSocketResponse, WSMessage, WSMsgType, web
 from mashumaro.exceptions import SuitableVariantNotFoundError
 
-from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw, unpack_binary_header
+from aiosendspin.models import BINARY_HEADER_SIZE, pack_binary_header_raw
 from aiosendspin.models.base import parse_noting_wire_deviations
 from aiosendspin.models.core import (
     STREAM_END_ROLE_FAMILIES,
@@ -158,7 +158,12 @@ from aiosendspin.util import (
 )
 
 from .client import SendspinClient
-from .compliance import ClientComplianceError, describe_client, noncompliance_subject
+from .compliance import (
+    ClientComplianceError,
+    clean_peer_text,
+    describe_client,
+    noncompliance_subject,
+)
 from .events import ClientEvent, ClientGroupChangedEvent, GroupEvent, GroupStateChangedEvent
 from .roles.controller.group import ControllerGroupRole
 from .roles.negotiation import negotiate_roles
@@ -167,6 +172,7 @@ from .roles.source import SourceV1Role
 
 if TYPE_CHECKING:
     from aiosendspin.models.artwork import ClientHelloArtworkSupport
+    from aiosendspin.models.core import SupportedPairMethods
 
     from .audio import BufferedChunk, BufferTracker
     from .group import SendspinGroup
@@ -193,6 +199,9 @@ _UNPAIR_GOODBYE_TIMEOUT_S = 5.0
 
 # Distinct unknown message types warned about per connection; later ones log at debug.
 _MAX_WARNED_UNKNOWN_TYPES = 16
+
+# Characters of client-supplied text, such as parse errors that quote a field, kept per log line.
+_MAX_LOGGED_PEER_TEXT = 200
 
 _CLIENT_STATE_ROLE_FAMILIES = ("player", "source", "artwork", "visualizer")
 
@@ -420,6 +429,8 @@ class SendspinConnection:
         # Set for a client on a pre-#177 wire: unencrypted, or a client/hello carrying
         # trust_level or player supported_commands.
         self._legacy_hello = False
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+        self._legacy_state = False
         # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
         # Set when the client/hello tripped a tolerance for a wire that predates spec-pr-287.
         # Such a client awaits server/hello and sends client/hello again after a re-handshake.
@@ -524,6 +535,12 @@ class SendspinConnection:
         Such a client receives the 9-byte player audio header without send_ahead.
         """
         return self._legacy_hello
+
+    # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+    @property
+    def leaves_external_source_on_stream_start(self) -> bool:
+        """Whether the client leaves the legacy `external_source` state only on a stream/start."""
+        return self._legacy_state
 
     # DEPRECATED(spec-pr-275): remove in aiosendspin <version>
     @property
@@ -1159,8 +1176,8 @@ class SendspinConnection:
     ) -> Transport:
         """Dispatch on the first frame: accept a legacy client or run the Noise handshake.
 
-        Outside a pairing dial, in transition mode, a ``client/hello`` first frame
-        is accepted unencrypted (the raw socket is the transport,
+        Outside a pairing dial, in transition mode on a lenient server, a ``client/hello``
+        first frame is accepted unencrypted (the raw socket is the transport,
         and the frame is held for the message loop). Every other TEXT first frame runs
         the Noise initiator handshake and yields an encrypted transport; one that is not
         a valid ``client/init`` is answered with ``server/error``, as is a BINARY first frame.
@@ -1169,7 +1186,7 @@ class SendspinConnection:
         """
         first_text = await receive_client_init_frame(raw)
         if _peek_message_type(first_text) == "client/hello" and self._pairing_attempt is None:
-            if self._server.allow_unencrypted:
+            if self._server.allow_unencrypted and self._server.allow_noncompliant_clients:
                 self._pending_first_text = first_text
                 return raw
             peer = self._request.remote if self._request is not None else self._url
@@ -1417,7 +1434,9 @@ class SendspinConnection:
                 self._client_message_from_dict, decoded
             )
         except (LookupError, TypeError, ValueError) as exc:
-            self._logger.error("Malformed client/hello: %s", exc)
+            self._logger.error(
+                "Malformed client/hello: %s", clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT)
+            )
             await self.disconnect(retry_connection=False)
             return False
         if isinstance(message, ClientGoodbyeMessage):
@@ -1475,7 +1494,7 @@ class SendspinConnection:
             self._logger.info(
                 "Client %s offered roles/versions this server does not implement: %s",
                 self._hello_description,
-                unimplemented,
+                clean_peer_text(", ".join(unimplemented), _MAX_LOGGED_PEER_TEXT),
             )
 
         await self._reload_trusted_unpaired()
@@ -1668,12 +1687,12 @@ class SendspinConnection:
             # newer revision of the spec. Worth noticing, but not a compliance failure.
             self._logger.info(
                 "client/hello offered unrecognized pairing methods: %s",
-                ", ".join(methods.ignored_methods),
+                clean_peer_text(", ".join(methods.ignored_methods), _MAX_LOGGED_PEER_TEXT),
             )
         if methods.ignored_values:
             self._logger.info(
                 "client/hello offered unrecognized pair-method values: %s",
-                ", ".join(methods.ignored_values),
+                clean_peer_text(", ".join(methods.ignored_values), _MAX_LOGGED_PEER_TEXT),
             )
         if methods.unusable_methods:
             self._logger.info(
@@ -2018,9 +2037,10 @@ class SendspinConnection:
                 else ServerActivateMessage(activation_payload)
             )
             self._awaiting_rehandshake_activate = False
+            # Count first, since the client's reply can be routed before the send returns.
+            self._pairing_index += 1
             # Finish the send through a cancel so the count matches the activations sent.
             _, cancelled = await finish_despite_cancel(transport.send_str(activation.to_json()))
-            self._pairing_index += 1
             self._pairing_activities = activation_payload.activities
             if cancelled:
                 await abort_pairing(transport, PairAbortReason.USER_CANCELLED)
@@ -2161,15 +2181,13 @@ class SendspinConnection:
         self._flag_noncompliance("Pairing PSK client/pair-finalize sent without client/pair-init")
 
     def _refuse_unadvertised_pairing(self, attempt: PairingAttempt | None) -> None:
-        """Abort an attempt the client/hello rules out, or when strict any method it left out."""
+        """Abort an attempt using a method or format the client/hello did not offer."""
         assert self._client_info is not None
         method = attempt.method if attempt is not None else PairMethod.PAIRING_PSK
         methods = self._client_info.supported_pair_methods
         descriptor = getattr(methods, method.value, None)
         if descriptor is None:
-            unusable = methods is not None and method.value in (methods.unusable_methods or ())
-            # A lenient server lets the client decide, since its config may change after the hello.
-            if self._server.allow_noncompliant_clients and not unusable:
+            if self._tolerates_unlisted_pairing_method(method, methods):
                 return
             raise LocalPairingAbortError(PairAbortReason.METHOD_NOT_SUPPORTED)
         if isinstance(descriptor, DynamicPairMethodDescriptor):
@@ -2177,6 +2195,22 @@ class SendspinConnection:
             assert attempt.pairing_format is not None
             if attempt.pairing_format.value not in descriptor.formats:
                 raise LocalPairingAbortError(PairAbortReason.METHOD_NOT_SUPPORTED)
+
+    def _tolerates_unlisted_pairing_method(
+        self, method: PairMethod, methods: SupportedPairMethods | None
+    ) -> bool:
+        """Whether the server lets the client decide on a method its parsed hello lacks."""
+        if (
+            method is PairMethod.STATIC_PAIRING_CODE
+            and methods is not None
+            and methods.offered_both_pairing_code_methods
+        ):
+            # The parse drops a static method offered alongside a dynamic one with digits.
+            return True
+        if not self._server.allow_noncompliant_clients:
+            return False
+        # The hello was flagged for omitting supported_pair_methods or pairing_psk.
+        return methods is None or method is PairMethod.PAIRING_PSK
 
     async def _rehandshake_for_pairing_if_needed(self, transport: Transport) -> bool:
         """If the attempt needs a PSK other than the current one, re-handshake onto it."""
@@ -2471,8 +2505,15 @@ class SendspinConnection:
             self._flag_noncompliance("sent a message before the first server/activate")
 
     def _flag_pairing_frame_before_activate(self, message_type: str | None) -> None:
-        if message_type in _PAIRING_MESSAGE_TYPES and self._activated_pairing_method is None:
+        if message_type not in _PAIRING_MESSAGE_TYPES:
+            return
+        if self._activated_pairing_method is None:
             self._flag_noncompliance(f"sent {message_type} before any pairing server/activate")
+        # A pair/abort for an attempt that already ended has no effect.
+        elif self._pairing_index == 0 and message_type != "pair/abort":
+            self._flag_noncompliance(
+                f"sent {message_type} before any pairing server/activate since the handshake"
+            )
 
     def _flag_pairing_index_ahead(self, text: str, message_type: str) -> None:
         """Flag a ``pairing_index`` above the pairing activations sent since the handshake."""
@@ -2542,7 +2583,8 @@ class SendspinConnection:
                     if self._skip_undecodable_message(text, exc):
                         continue
                     self._logger.warning(
-                        "Ending connection on a message that failed to parse: %s", exc
+                        "Ending connection on a message that failed to parse: %s",
+                        clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT),
                     )
                     break
                 for reason in deviations:
@@ -2585,10 +2627,16 @@ class SendspinConnection:
                 self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
             elif self._client is not None and self._client.roles_by_family("controller"):
                 self._flag_noncompliance("sent a malformed client/command controller object")
-            self._logger.debug("Ignoring client/command that failed to parse: %s", exc)
+            self._logger.debug(
+                "Ignoring client/command that failed to parse: %s",
+                clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT),
+            )
             return True
         if message_type == "client/state":
-            self._logger.debug("Ignoring client/state that failed to parse: %s", exc)
+            self._logger.debug(
+                "Ignoring client/state that failed to parse: %s",
+                clean_peer_text(str(exc), _MAX_LOGGED_PEER_TEXT),
+            )
             self._flag_noncompliance("sent a malformed client/state")
             return True
         if not isinstance(message_type, str) or not (
@@ -2624,28 +2672,24 @@ class SendspinConnection:
         if message_type in self._warned_unknown_types:
             return
         if len(self._warned_unknown_types) >= _MAX_WARNED_UNKNOWN_TYPES:
-            self._logger.debug("Ignoring unknown message type %s", message_type)
+            self._logger.debug("Ignoring unknown message type %s", clean_peer_text(message_type))
             return
         self._warned_unknown_types.add(message_type)
         self._logger.warning(
             "Ignoring unknown message type %s; the client may speak a newer spec revision",
-            message_type,
+            clean_peer_text(message_type),
         )
 
     def _route_inbound_binary(self, data: bytes) -> None:
         """Route an inbound binary chunk to the role that declares its message type."""
         if self._client is None or not data:
             return
-        if len(data) < BINARY_HEADER_SIZE:
-            if data[0] == BinaryMessageType.SOURCE_AUDIO_CHUNK.value:
-                self._flag_noncompliance("sent a source audio chunk shorter than its header")
-            else:
-                self._drop_unrouted_binary(data[0])
-            return
-        header = unpack_binary_header(data)
-        payload = data[BINARY_HEADER_SIZE:]
-        is_source_audio = header.message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
+        message_type = data[0]
+        is_source_audio = message_type == BinaryMessageType.SOURCE_AUDIO_CHUNK.value
         if is_source_audio:
+            if len(data) < BINARY_HEADER_SIZE:
+                self._flag_noncompliance("sent a source audio chunk shorter than its header")
+                return
             if not self._source_input_open:
                 self._flag_noncompliance("sent source audio without an open input stream")
                 return
@@ -2653,12 +2697,12 @@ class SendspinConnection:
                 self._flag_noncompliance("sent source audio while reporting available: false")
                 return
         for role in self._client.active_roles:
-            if role.handles_inbound_binary(header.message_type):
-                role.on_binary_chunk(header.message_type, header.timestamp_us, payload)
+            if role.handles_inbound_binary(message_type):
+                role.on_binary_message(message_type, data[1:])
                 return
         if is_source_audio:
             return  # In flight from before the source role was removed.
-        self._drop_unrouted_binary(header.message_type)
+        self._drop_unrouted_binary(message_type)
 
     def _drop_unrouted_binary(self, message_type: int) -> None:
         """Flag a server-to-client binary type, or log an unhandled one with a rate limit."""
@@ -2797,7 +2841,7 @@ class SendspinConnection:
         if payload.unrecognized_reason is not None:
             self._logger.info(
                 "Received client/goodbye with unrecognized reason %r; not reconnecting",
-                payload.unrecognized_reason,
+                payload.unrecognized_reason[:_MAX_LOGGED_PEER_TEXT],
             )
         else:
             self._logger.debug(
@@ -2827,6 +2871,7 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
         if payload.legacy_state_used:
             self._flag_noncompliance("client/state used the legacy top-level 'state' field")
+            self._legacy_state = True
         for role in self._client.active_roles:
             for reason in role.client_state_deviations(payload):
                 self._flag_noncompliance(f"client/state {reason}")

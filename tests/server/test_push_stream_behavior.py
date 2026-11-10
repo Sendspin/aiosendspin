@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import struct
 import sys
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
 
+import numpy as np
 import pytest
 
+from aiosendspin.audio.codecs import create_decoder
 from aiosendspin.models.core import (
     ClientStatePayload,
     StreamClearMessage,
@@ -36,6 +40,7 @@ from aiosendspin.server.channels import MAIN_CHANNEL
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.connection import SendspinConnection
+from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.push_stream import (
     DEFAULT_INITIAL_DELAY_US,
     CachedChunk,
@@ -43,7 +48,11 @@ from aiosendspin.server.push_stream import (
     PushStream,
 )
 from aiosendspin.server.roles import AudioChunk, AudioRequirements
-from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
+from aiosendspin.server.roles.player.audio_transformers import (
+    FlacEncoder,
+    OpusEncoder,
+    PcmPassthrough,
+)
 
 
 @dataclass(slots=True)
@@ -90,6 +99,9 @@ class _DummyGroup:
     def on_role_format_changed(self, role: Any, *, resume_at_us: int | None = None) -> None:
         if self._push_stream is not None and not self._push_stream.is_stopped:
             self._push_stream.on_role_format_changed(role, resume_at_us=resume_at_us)
+
+    _pruning = False
+    prune_transformer_pool = SendspinGroup.prune_transformer_pool
 
 
 class _FakeConnection:
@@ -725,9 +737,9 @@ async def test_clear_sends_stream_clear(mock_loop: Any) -> None:
 async def test_stop_resets_transformers_without_delivering_tail_frames(mock_loop: Any) -> None:
     """stop() resets transformers but never delivers flushed tail frames.
 
-    Flushed frames carry timestamp_us=0, which has no scheduling
-    semantics, so emitting them would only pollute the client's
-    buffer tracker without serving any playback purpose.
+    flush_audio() delivers the tail while it can still play, so
+    emitting it here would only pollute the client's buffer tracker
+    without serving any playback purpose.
     """
     reset_calls = 0
 
@@ -1508,6 +1520,27 @@ async def test_catchup_handoff_delivers_contiguous_audio() -> None:
         assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
     last = received[-1]
     assert last.timestamp_us + last.duration_us == tail_us + 3 * 25_000
+
+
+@pytest.mark.asyncio
+async def test_catchup_keeps_overlapping_commit_during_catchup() -> None:
+    """A chunk committed during catch-up that overlaps the cached tail still reaches the joiner."""
+    stream, role2, tail_us = await _setup_deep_buffer_catchup_join()
+
+    stream.prepare_audio(
+        bytes(7200),
+        AudioFormat(sample_rate=48000, bit_depth=24, channels=2),
+    )
+    await stream.commit_audio(play_start_us=tail_us - 5_000)
+    await _drain_catchup_tasks(stream)
+
+    received = sorted(role2.received, key=lambda c: c.timestamp_us)
+    assert received
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    # The 20 ms past the old tail arrives as 960 s16 stereo frames.
+    last = received[-1]
+    assert (last.timestamp_us, len(last.data)) == (tail_us, 960 * 4)
 
 
 @pytest.mark.asyncio
@@ -3893,6 +3926,203 @@ def test_encode_pcm_sequence_yields_while_replaying_deep_cache(
     ]
 
 
+_HOLD_BACK_FRAMES = 480
+
+
+class _HoldBackGraph:
+    """Resample graph that always holds back the last `_HOLD_BACK_FRAMES` frames until EOF."""
+
+    def __init__(self, graph: Any) -> None:
+        self._graph = graph
+        self._held = bytearray()
+        self._frame_stride = 0
+        self._template: tuple[str, str, int] | None = None
+        self._eof = False
+
+    def push(self, frame: Any | None) -> None:
+        self._graph.push(frame)
+        self._eof = frame is None
+        for out in push_stream_module._drain_audio_graph(self._graph):  # noqa: SLF001
+            self._frame_stride = out.format.bytes * len(out.layout.channels)
+            self._template = (out.format.name, out.layout.name, out.sample_rate)
+            self._held.extend(bytes(out.planes[0])[: out.samples * self._frame_stride])
+
+    def pull(self) -> Any:
+        if self._template is None:
+            raise EOFError
+        held_frames = len(self._held) // self._frame_stride
+        release = held_frames if self._eof else held_frames - _HOLD_BACK_FRAMES
+        if release <= 0:
+            raise EOFError
+        fmt, layout, rate = self._template
+        frame = push_stream_module._get_av().AudioFrame(  # noqa: SLF001
+            format=fmt, layout=layout, samples=release
+        )
+        frame.sample_rate = rate
+        frame.planes[0].update(bytes(self._held[: release * self._frame_stride]))
+        del self._held[: release * self._frame_stride]
+        return frame
+
+
+@pytest.fixture
+def hold_back_resampler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every resample graph hold back its last `_HOLD_BACK_FRAMES` frames until EOF."""
+    build = push_stream_module._build_resample_graph  # noqa: SLF001
+    monkeypatch.setattr(
+        push_stream_module,
+        "_build_resample_graph",
+        lambda **kwargs: _HoldBackGraph(build(**kwargs)),
+    )
+
+
+_RAMP_FRAMES = 1_200
+
+
+def _ramp_pcm(index: int, bit_depth: int) -> bytes:
+    """Return 25 ms of 48 kHz stereo PCM whose 16-bit value counts up across slices."""
+    shift = bit_depth - 16
+    width = bit_depth // 8
+    return b"".join(
+        ((value << shift) & ((1 << bit_depth) - 1)).to_bytes(width, "little") * 2
+        for value in range(index * _RAMP_FRAMES, (index + 1) * _RAMP_FRAMES)
+    )
+
+
+def _ramp_values(payloads: list[bytes]) -> list[int]:
+    """Return the left-channel samples of 16-bit stereo payloads."""
+    data = b"".join(payloads)
+    return [int.from_bytes(data[i : i + 2], "little") for i in range(0, len(data), 4)]
+
+
+def test_trimmed_resampler_tail_ends_before_end_us() -> None:
+    """A tail longer than the time left before `end_us` is cut, never rounded past it."""
+    drained = push_stream_module._ResampledPCM(  # noqa: SLF001
+        pcm_data=bytes(17 * 4),
+        output_start_ts=349_604,
+        sample_count=17,
+        needs_s32_to_s24_conversion=False,
+        sample_type="int",
+    )
+
+    # 350 us before end_us holds 16.8 frames at 48 kHz.
+    tail = push_stream_module._trim_tail(drained, 4, 48_000, 349_954)  # noqa: SLF001
+
+    assert tail is not None
+    assert tail.output_start_ts + int(tail.sample_count * 1_000_000 / 48_000) <= 349_954
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hold_back_resampler")
+async def test_source_format_change_keeps_old_resampler_tail() -> None:
+    """Audio still held by the old source format's resampler plays before the new format."""
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48_000,
+            bit_depth=16,
+            channels=2,
+            transformer=None,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group = _DummyGroup(clients=[])
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)
+
+    bit_depths = (32, 32, 24, 24)
+    for index, bit_depth in enumerate(bit_depths):
+        stream.prepare_audio(
+            _ramp_pcm(index, bit_depth),
+            AudioFormat(sample_rate=48_000, bit_depth=bit_depth, channels=2),
+        )
+        await stream.commit_audio()
+
+    for prev, nxt in pairwise(role.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    assert _ramp_values([chunk.data for chunk in role.received]) == list(
+        range(len(bit_depths) * _RAMP_FRAMES - _HOLD_BACK_FRAMES)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hold_back_resampler")
+async def test_format_change_during_source_change_does_not_recache_old_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A player format change while new audio resamples keeps the old key's cache evicted."""
+    old_req = AudioRequirements(
+        sample_rate=48_000,
+        bit_depth=16,
+        channels=2,
+        transformer=None,
+        channel_id=MAIN_CHANNEL,
+        frame_duration_us=25_000,
+    )
+    role = _DummyRole(old_req)
+    group = _DummyGroup(clients=[])
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)
+
+    stream.prepare_audio(
+        _ramp_pcm(0, 32), AudioFormat(sample_rate=48_000, bit_depth=32, channels=2)
+    )
+    await stream.commit_audio()
+    old_tkey = stream._build_transform_key(old_req, MAIN_CHANNEL, role)  # noqa: SLF001
+
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+
+    async def resample_with_format_change(*args: Any, **kwargs: Any) -> Any:
+        role._requirements = replace(old_req, sample_rate=44_100)  # noqa: SLF001
+        stream.on_role_format_changed(role)
+        return await original_resample(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "_resample_for_roles", resample_with_format_change)
+    stream.prepare_audio(
+        _ramp_pcm(1, 24), AudioFormat(sample_rate=48_000, bit_depth=24, channels=2)
+    )
+    await stream.commit_audio()
+
+    assert not stream._role_chunk_cache.get(old_tkey)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hold_back_resampler")
+async def test_catchup_source_format_change_between_batches_keeps_old_resampler_tail() -> None:
+    """A source format change between catch-up batches still encodes the old resampler's tail."""
+    stream = PushStream(loop=MagicMock(), clock=ManualClock(), group=_DummyGroup(clients=[]))
+    req = AudioRequirements(
+        sample_rate=48_000,
+        bit_depth=16,
+        channels=2,
+        transformer=None,
+        channel_id=MAIN_CHANNEL,
+        frame_duration_us=25_000,
+    )
+    resamplers: dict[Any, Any] = {}
+    quantizers: dict[Any, Any] = {}
+
+    bit_depths = (32, 24)
+    encoded: list[CachedChunk] = []
+    for index, bit_depth in enumerate(bit_depths):
+        chunk = CachedPCMChunk(
+            timestamp_us=1_000_000 + index * 25_000,
+            duration_us=25_000,
+            pcm_data=_ramp_pcm(index, bit_depth),
+            sample_rate=48_000,
+            bit_depth=bit_depth,
+            channels=2,
+        )
+        encoded += await stream._encode_pcm_sequence(  # noqa: SLF001
+            [chunk], None, req, MAIN_CHANNEL, resamplers=resamplers, quantizers=quantizers
+        )
+
+    for prev, nxt in pairwise(encoded):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    assert _ramp_values([chunk.payload for chunk in encoded]) == list(
+        range(len(bit_depths) * _RAMP_FRAMES - _HOLD_BACK_FRAMES)
+    )
+
+
 def test_soxr_fallback_caches_failure_per_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4137,6 +4367,119 @@ async def test_explicit_play_start_us_overrides_stale_channel_timing() -> None:
     # duration (25ms @ 48kHz stereo s16 = 25_000us), not first + 2 * duration.
     expected_after_advance = second_play_start_us + 25_000
     assert stream._channel_timing[MAIN_CHANNEL] == expected_after_advance  # noqa: SLF001
+
+
+def _indexed_pcm(first_index: int, frames: int) -> bytes:
+    """Return s16 stereo PCM whose left sample holds each frame's index."""
+    return b"".join(
+        (first_index + i).to_bytes(2, "little", signed=True) + bytes(2) for i in range(frames)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_first_index", "second_frames", "second_start_us", "expected_indices"),
+    [
+        pytest.param(960, 960, 10_020_000 - 1, [*range(1920)], id="within_tolerance_continues"),
+        # 5 ms early = 240 consumed frames; the rest of the chunk is kept.
+        pytest.param(
+            960, 960, 10_015_000, [*range(960), *range(1200, 1920)], id="overlap_skips_head"
+        ),
+        pytest.param(960, 960, 10_000_000, [*range(960)], id="fully_consumed_dropped"),
+        # A re-pushed chunk shorter than the jump tolerance is still consumed, not jitter.
+        pytest.param(936, 24, 10_019_500, [*range(960)], id="short_consumed_not_duplicated"),
+        # 19.5 ms early: the 24 tail frames past the cursor are new audio and are kept.
+        pytest.param(960, 960, 10_000_500, [*range(960), *range(1896, 1920)], id="short_tail_kept"),
+    ],
+)
+async def test_explicit_commit_overlapping_cursor(
+    second_first_index: int, second_frames: int, second_start_us: int, expected_indices: list[int]
+) -> None:
+    """An explicit start before the cursor only drops audio that was already consumed."""
+    group = _DummyGroup(clients=[])
+    role = _make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=0)
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(
+        loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=1_000_000), group=group
+    )
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    for first_index, frames, start_us in (
+        (0, 960, 10_000_000),
+        (second_first_index, second_frames, second_start_us),
+    ):
+        stream.prepare_audio(_indexed_pcm(first_index, frames), fmt)
+        await stream.commit_audio(play_start_us=start_us)
+    stream.stop()
+
+    received = sorted(role.received, key=lambda c: c.timestamp_us)
+    data = b"".join(c.data for c in received)
+    indices = [
+        int.from_bytes(data[i : i + 2], "little", signed=True) for i in range(0, len(data), 4)
+    ]
+    assert indices == expected_indices
+    for prev, nxt in pairwise(received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_catchup_trims_overlapping_cached_chunk() -> None:
+    """A late joiner replays only the unconsumed part of a cached chunk that overlaps."""
+
+    class PassTransformer:
+        pending_timestamp_us: int | None = None
+
+        @property
+        def frame_duration_us(self) -> int:
+            return 25_000
+
+        def process(self, pcm: bytes, _ts: int, dur: int) -> list[tuple[bytes, int]]:
+            return [(pcm, dur)]
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            return
+
+    group = _DummyGroup(clients=[])
+    group.clients.append(
+        _DummyClient([_make_role(required_lead_time_us=0, min_buffer_us=0, output_delay_us=0)])
+    )
+    stream = PushStream(
+        loop=asyncio.get_running_loop(), clock=ManualClock(now_us_value=1_000_000), group=group
+    )
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    # The second chunk starts 5 ms (240 frames) before the first one ends.
+    for first_index, start_us in ((0, 10_000_000), (960, 10_015_000)):
+        stream.prepare_audio(_indexed_pcm(first_index, 960), fmt)
+        await stream.commit_audio(play_start_us=start_us)
+
+    joiner = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=PassTransformer(),
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        ),
+        replay_from_pcm_cache=True,
+        required_lead_time_us=0,
+    )
+    group.clients.append(_DummyClient([joiner]))
+    stream.on_role_join(joiner)
+    await _drain_catchup_tasks(stream)
+    stream.stop()
+
+    data = b"".join(c.data for c in sorted(joiner.received, key=lambda c: c.timestamp_us))
+    indices = [
+        int.from_bytes(data[i : i + 2], "little", signed=True) for i in range(0, len(data), 4)
+    ]
+    assert indices == [*range(960), *range(1200, 1920)]
 
 
 @pytest.mark.asyncio
@@ -4732,3 +5075,521 @@ async def test_catchup_mid_pass_format_change_keeps_chunks_ordered() -> None:
             f"timestamps out of order across format change: "
             f"{prev.timestamp_us} -> {nxt.timestamp_us}"
         )
+
+
+def _pcm_passthrough_role(
+    group: _DummyGroup,
+    bit_depth: int = 16,
+    frame_duration_us: int = 25_000,
+    sample_rate: int = 48000,
+) -> _DummyRole:
+    transformer = group.transformer_pool.get_or_create(
+        PcmPassthrough,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=sample_rate,
+        bit_depth=bit_depth,
+        channels=2,
+        frame_duration_us=frame_duration_us,
+    )
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=sample_rate,
+            bit_depth=bit_depth,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=frame_duration_us,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+    return role
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_delivers_partial_tail_frame(mock_loop: Any) -> None:
+    """flush_audio() sends the end of the input that does not fill a whole frame."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 1500 frames: one full 25 ms frame (1200) plus a 300-frame tail.
+    pcm = bytes(range(256)) * 23 + bytes(range(112))
+    assert len(pcm) == 6000
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    assert len(role.received) == 1
+
+    await stream.flush_audio()
+
+    assert len(role.received) == 2
+    first, tail = role.received
+    assert tail.timestamp_us == first.timestamp_us + first.duration_us
+    assert first.data + tail.data[:1200] == pcm
+    assert tail.data[1200:] == bytes(len(tail.data) - 1200)
+    cached = stream._role_chunk_cache  # noqa: SLF001
+    assert sum(len(chunks) for chunks in cached.values()) == 2
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_without_buffered_audio_sends_nothing(mock_loop: Any) -> None:
+    """flush_audio() is a no-op when the input ended on a frame boundary."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_after_stop_sends_nothing(mock_loop: Any) -> None:
+    """stop() discards the buffered tail, so a later flush_audio() delivers nothing."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    stream.stop()
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail(mock_loop: Any) -> None:
+    """flush_audio() also delivers the samples a resampler still holds back."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms at 44.1 kHz resampled to the role's 48 kHz: 4800 output frames.
+    pcm = b"\x00\x10" * 2 * 4410
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    committed_frames = sum(len(chunk.data) for chunk in role.received) // 4
+    assert committed_frames < 4800
+
+    await stream.flush_audio()
+
+    data = b"".join(chunk.data for chunk in role.received)
+    frames = [data[i : i + 4] for i in range(0, len(data), 4)]
+    last_signal_frame = max(
+        i for i, frame in enumerate(frames) if int.from_bytes(frame[:2], "little") > 64
+    )
+    # Without draining the resampler, its filter tail is replaced by the silence padding
+    # the final frame.
+    assert last_signal_frame >= 4795
+    for prev, nxt in pairwise(role.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail_of_historical_audio(mock_loop: Any) -> None:
+    """flush_audio() drains the resampler of a channel that only received historical audio."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms at 44.1 kHz resampled to the role's 48 kHz: 4800 output frames.
+    pcm = b"\x00\x10" * 2 * 4410
+    stream.prepare_historical_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    data = b"".join(chunk.data for chunk in role.received)
+    frames = [data[i : i + 4] for i in range(0, len(data), 4)]
+    last_signal_frame = max(
+        i for i, frame in enumerate(frames) if int.from_bytes(frame[:2], "little") > 64
+    )
+    assert last_signal_frame >= 4795
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_shared_resampler_for_each_bit_depth(mock_loop: Any) -> None:
+    """Players at different bit depths sharing a float resampler all get its tail."""
+    group = _DummyGroup(clients=[])
+    role_16 = _pcm_passthrough_role(group, bit_depth=16)
+    role_24 = _pcm_passthrough_role(group, bit_depth=24)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # 100 ms of float32 at 44.1 kHz resampled to the roles' 48 kHz: 4800 output frames.
+    pcm = struct.pack("<f", 0.125) * 2 * 4410
+    stream.prepare_audio(
+        pcm, AudioFormat(sample_rate=44100, bit_depth=32, channels=2, sample_type="float")
+    )
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    for role, sample_bytes in ((role_16, 2), (role_24, 3)):
+        data = b"".join(chunk.data for chunk in role.received)
+        frame_bytes = 2 * sample_bytes
+        last_signal_frame = max(
+            i // frame_bytes
+            for i in range(0, len(data), frame_bytes)
+            if int.from_bytes(data[i : i + sample_bytes], "little", signed=True)
+            > 1 << (8 * sample_bytes - 5)
+        )
+        assert last_signal_frame >= 4795
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_delivers_flac_tail_on_every_channel(mock_loop: Any) -> None:
+    """FLAC players on every channel decode the whole input after flush_audio()."""
+    second_channel = UUID("00000000-0000-0000-0000-0000000000a2")
+    group = _DummyGroup(clients=[])
+    players: list[tuple[FlacEncoder, _DummyRole]] = []
+    for channel_id in (MAIN_CHANNEL, second_channel):
+        transformer = group.transformer_pool.get_or_create(
+            FlacEncoder,
+            channel_id=channel_id.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
+        role = _DummyRole(
+            AudioRequirements(
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+                transformer=transformer,
+                channel_id=channel_id,
+                frame_duration_us=25_000,
+            )
+        )
+        players.append((transformer, role))
+    group.clients.append(_DummyClient([role for _, role in players]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    # Two full FLAC frames plus a partial one.
+    frame_count = 2 * players[0][0].frame_samples + 1000
+    pcm = (bytes(range(1, 241)) * (frame_count // 60 + 1))[: frame_count * 4]
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_audio(pcm, fmt)
+    stream.prepare_audio(pcm, fmt, channel_id=second_channel)
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    for transformer, role in players:
+        decoder = create_decoder(
+            "flac",
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            codec_header=transformer.get_header(),
+        )
+        decoded = b"".join(decoder.decode(chunk.data) for chunk in role.received)
+        decoded += decoder.flush()
+        assert decoded[: len(pcm)] == pcm
+        assert decoded[len(pcm) :] == bytes(len(decoded) - len(pcm))
+        for prev, nxt in pairwise(role.received):
+            assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+def _signal_end_us(first_timestamp_us: int, pcm: bytes, sample_rate: int) -> float:
+    """Return when the last loud sample of 16-bit stereo `pcm` ends."""
+    left = struct.unpack(f"<{len(pcm) // 2}h", pcm)[::2]
+    last = max(i for i, sample in enumerate(left) if abs(sample) > 1000)
+    return first_timestamp_us + (last + 1) * 1_000_000 / sample_rate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sample_rate", "tail_samples"),
+    [(48000, 0), (48000, 700), (16000, 210)],
+    ids=["frame_boundary", "short_padding", "low_rate"],
+)
+async def test_flush_audio_delivers_opus_lookahead(
+    mock_loop: Any, sample_rate: int, tail_samples: int
+) -> None:
+    """Opus players play to the end of the input, like PCM players, after flush_audio()."""
+    group = _DummyGroup(clients=[])
+    pcm_role = _pcm_passthrough_role(group, sample_rate=sample_rate)
+    transformer = group.transformer_pool.get_or_create(
+        OpusEncoder,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=sample_rate,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=20_000,
+    )
+    opus_role = _DummyRole(
+        AudioRequirements(
+            sample_rate=sample_rate,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=20_000,
+        )
+    )
+    group.clients.append(_DummyClient([opus_role]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    frame_count = 50 * transformer.frame_samples + tail_samples
+    tone = [
+        round(8000 * math.sin(2 * math.pi * 1000 * i / sample_rate)) for i in range(frame_count)
+    ]
+    pcm = b"".join(struct.pack("<hh", sample, sample) for sample in tone)
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=sample_rate, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    pcm_end_us = _signal_end_us(
+        pcm_role.received[0].timestamp_us,
+        b"".join(chunk.data for chunk in pcm_role.received),
+        sample_rate,
+    )
+    decoder = create_decoder(
+        "opus", sample_rate=sample_rate, bit_depth=16, channels=2, codec_header=None
+    )
+    decoded = b"".join(decoder.decode(chunk.data) for chunk in opus_role.received)
+    opus_end_us = _signal_end_us(opus_role.received[0].timestamp_us, decoded, sample_rate)
+    assert abs(opus_end_us - pcm_end_us) <= 2 * 1_000_000 / sample_rate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("encoder_cls", "codec"), [(FlacEncoder, "flac"), (OpusEncoder, "opus")])
+async def test_flush_audio_delivers_stream_shorter_than_one_encoder_frame(
+    mock_loop: Any, encoder_cls: type[FlacEncoder | OpusEncoder], codec: str
+) -> None:
+    """flush_audio() delivers a stream shorter than one encoder frame, on the PCM timeline."""
+    group = _DummyGroup(clients=[])
+    pcm_role = _pcm_passthrough_role(group)
+    transformer = group.transformer_pool.get_or_create(
+        encoder_cls,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=48000,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=25_000,
+    )
+    role = _DummyRole(
+        AudioRequirements(
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            transformer=transformer,
+            channel_id=MAIN_CHANNEL,
+            frame_duration_us=25_000,
+        )
+    )
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    frame_count = 500
+    tone = (8000 * np.sin(2 * np.pi * 1000 * np.arange(frame_count) / 48000)).astype(np.int16)
+    pcm = np.repeat(tone, 2).tobytes()
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    assert role.received[0].timestamp_us == (
+        pcm_role.received[0].timestamp_us - transformer.lookahead_us
+    )
+
+    decoder = create_decoder(
+        codec, sample_rate=48000, bit_depth=16, channels=2, codec_header=transformer.get_header()
+    )
+    encoded = b"".join(decoder.decode(chunk.data) for chunk in role.received)
+    decoded = np.frombuffer(encoded + decoder.flush(), dtype=np.int16)
+    start = transformer.lookahead_us * 48000 // 1_000_000 * 2
+    signal = decoded[start : start + len(pcm) // 2]
+    if codec == "flac":
+        assert signal.tobytes() == pcm
+        assert not decoded[start + len(pcm) // 2 :].any()
+    else:
+        expected = np.repeat(tone, 2).astype(np.float64)
+        error = signal.astype(np.float64) - expected
+        assert np.sqrt(np.mean(error**2)) < 0.2 * np.sqrt(np.mean(expected**2))
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_defers_joins_until_tail_is_cached(mock_loop: Any) -> None:
+    """A player joining while the tail is being flushed still receives the tail."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    loop = asyncio.get_running_loop()
+    flushing = asyncio.Event()
+    gate = threading.Event()
+    flush_pipelines = stream._flush_pipelines  # noqa: SLF001
+
+    def gated_flush_pipelines(*args: Any) -> Any:
+        loop.call_soon_threadsafe(flushing.set)
+        gate.wait(5)
+        return flush_pipelines(*args)
+
+    stream._flush_pipelines = gated_flush_pipelines  # type: ignore[method-assign]  # noqa: SLF001
+    flush_task = asyncio.create_task(stream.flush_audio())
+    await asyncio.wait_for(flushing.wait(), 5)
+
+    joiner = _pcm_passthrough_role(group)
+    stream.on_role_join(joiner)
+    assert joiner.received == []
+
+    gate.set()
+    await flush_task
+
+    assert len(role.received) == 2
+    assert [chunk.data for chunk in joiner.received] == [chunk.data for chunk in role.received]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("join_before_flush", [True, False])
+async def test_flush_audio_delivers_tail_to_catching_up_player(
+    join_before_flush: bool,  # noqa: FBT001
+) -> None:
+    """A player whose catch-up runs during or after flush_audio() still receives the tail."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    loop = asyncio.get_running_loop()
+    stream = PushStream(loop=loop, clock=ManualClock(), group=group)
+
+    # 500 ms plus a 300-frame tail, nonzero so the silence padding stands out.
+    pcm = (bytes(range(1, 241)) * 410)[: (24_000 + 300) * 4]
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    # A different frame duration gives the joiner its own encoder, so it catches up.
+    if join_before_flush:
+        joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+        stream.on_role_join(joiner)
+        assert stream._catchup_tasks  # noqa: SLF001
+    await stream.flush_audio()
+    if not join_before_flush:
+        joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+        stream.on_role_join(joiner)
+        assert stream._catchup_tasks  # noqa: SLF001
+    await _drain_catchup_tasks(stream)
+
+    assert joiner.received
+    for prev, nxt in pairwise(joiner.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+    start_us = joiner.received[0].timestamp_us - role.received[0].timestamp_us
+    expected = pcm[start_us * 48000 // 1_000_000 * 4 :]
+    data = b"".join(chunk.data for chunk in joiner.received)
+    assert data[: len(expected)] == expected
+    assert data[len(expected) :] == bytes(len(data) - len(expected))
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_drains_resampler_tail_for_catching_up_player() -> None:
+    """A player catching up after flush_audio() also gets the samples its resampler holds back."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    loop = asyncio.get_running_loop()
+    stream = PushStream(loop=loop, clock=ManualClock(), group=group)
+
+    # 500 ms at 44.1 kHz resampled to the players' 48 kHz: 24000 output frames.
+    pcm = b"\x00\x10" * 2 * 22050
+    stream.prepare_audio(pcm, AudioFormat(sample_rate=44100, bit_depth=16, channels=2))
+    await stream.commit_audio()
+    await stream.flush_audio()
+
+    joiner = _pcm_passthrough_role(group, frame_duration_us=20_000)
+    stream.on_role_join(joiner)
+    await _drain_catchup_tasks(stream)
+
+    data = b"".join(chunk.data for chunk in joiner.received)
+    last_signal_frame = max(
+        i // 4 for i in range(0, len(data), 4) if int.from_bytes(data[i : i + 2], "little") > 64
+    )
+    start_frame = (joiner.received[0].timestamp_us - role.received[0].timestamp_us) * 48 // 1000
+    assert start_frame + last_signal_frame >= 23995
+    for prev, nxt in pairwise(joiner.received):
+        assert nxt.timestamp_us == prev.timestamp_us + prev.duration_us
+
+
+@pytest.mark.asyncio
+async def test_flush_audio_caches_tail_for_warm_reattached_player(mock_loop: Any) -> None:
+    """A reattached player waiting for its initial state gets the tail in its replay cache."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+
+    stream.prepare_audio(bytes(6000), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    await stream.commit_audio()
+
+    client = group.clients[0]
+    client.is_connected = False
+    client.has_warm_disconnected_roles = False  # type: ignore[attr-defined]
+    client.has_cold_preinitialized_roles = False  # type: ignore[attr-defined]
+    client.has_warm_reattached_roles = True
+
+    await stream.flush_audio()
+
+    assert len(role.received) == 1
+    cached = stream._role_chunk_cache  # noqa: SLF001
+    assert sum(len(chunks) for chunks in cached.values()) == 2
+
+
+@pytest.mark.parametrize(
+    "switches",
+    [[[44100], [48000]], [[44100, 48000]]],
+    ids=["separate-commits", "one-commit"],
+)
+@pytest.mark.asyncio
+async def test_inflight_switch_away_and_back_keeps_audio_aligned(
+    mock_loop: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    switches: list[list[int]],
+) -> None:
+    """Switching formats away and back mid-commit keeps every sample at its timestamp."""
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player_multi_format(mock_loop, group, "p1")
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    group._push_stream = stream  # noqa: SLF001
+    group.has_active_stream = True
+    role = client.role("player@v1")
+    assert role is not None
+    format_changes = MagicMock(wraps=group.on_role_format_changed)
+    monkeypatch.setattr(group, "on_role_format_changed", format_changes)
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+    next_sample = 0
+
+    async def commit(count: int, switch_to: list[int] | None = None) -> None:
+        nonlocal next_sample
+        for index in range(count):
+            # 30ms commits against 25ms frames leave input buffered in the encoder.
+            values = [(next_sample + i) & 0x7FFF for i in range(1440) for _ in (0, 1)]
+            next_sample += 1440
+            stream.prepare_audio(
+                struct.pack(f"<{len(values)}h", *values),
+                AudioFormat(sample_rate=48000, bit_depth=16, channels=2),
+            )
+            if index == 0 and switch_to is not None:
+
+                async def resample_then_switch(*args: Any, **kwargs: Any) -> Any:
+                    monkeypatch.setattr(stream, "_resample_for_roles", original_resample)
+                    for rate in switch_to:
+                        role.on_client_state(_format_state(rate))
+                    return await original_resample(*args, **kwargs)
+
+                monkeypatch.setattr(stream, "_resample_for_roles", resample_then_switch)
+            await stream.commit_audio()
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+    await commit(21)
+    for switch_to in switches:
+        await commit(7, switch_to=switch_to)
+    await commit(7)
+
+    assert format_changes.call_count == 2
+    # 48kHz frames are 4800 bytes, so their first sample follows from their timestamp.
+    first_us = unpack_player_audio_header(conn.sent_binary[0]).timestamp_us
+    frames_48k = [f for f in conn.sent_binary if len(f) == PLAYER_AUDIO_HEADER_SIZE + 4800]
+    assert len(frames_48k) > 30
+    for frame in frames_48k:
+        elapsed_us = unpack_player_audio_header(frame).timestamp_us - first_us
+        first_value = struct.unpack_from("<h", frame, PLAYER_AUDIO_HEADER_SIZE)[0]
+        assert first_value == (elapsed_us * 48 // 1000) & 0x7FFF

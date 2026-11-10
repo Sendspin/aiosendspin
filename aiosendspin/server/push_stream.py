@@ -10,7 +10,7 @@ import logging
 import threading
 import weakref
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from errno import EAGAIN
 from functools import lru_cache
 from itertools import islice
@@ -31,7 +31,7 @@ from aiosendspin.server.roles.player.audio_transformers import PcmPassthrough
 from aiosendspin.util import create_task
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from collections.abc import Set as AbstractSet
 
     import av
@@ -239,6 +239,74 @@ def _resampler_hold_back_us(source_sample_rate: int, target_sample_rate: int) ->
     return hold_back_us
 
 
+def _trim_tail(
+    drained: _ResampledPCM, frame_stride: int, sample_rate: int, end_us: int | None
+) -> _ResampledPCM | None:
+    """Trim a drained resampler tail so it ends at or before `end_us`.
+
+    Returns None when nothing is left.
+    """
+    sample_count = drained.sample_count
+    if end_us is not None:
+        end_frames = (end_us - drained.output_start_ts) * sample_rate // 1_000_000
+        sample_count = max(0, min(sample_count, end_frames))
+    if sample_count == 0 or not drained.pcm_data:
+        return None
+    return _ResampledPCM(
+        pcm_data=drained.pcm_data[: sample_count * frame_stride],
+        output_start_ts=drained.output_start_ts,
+        sample_count=sample_count,
+        needs_s32_to_s24_conversion=drained.needs_s32_to_s24_conversion,
+        sample_type=drained.sample_type,
+    )
+
+
+def _trim_and_quantize_tail(
+    drained: _ResampledPCM,
+    frame_stride: int,
+    quantizers: dict[_ResamplerKey, _ResamplerState],
+    *,
+    channel_id: UUID,
+    sample_rate: int,
+    channels: int,
+    bit_depth: int,
+    end_us: int | None = None,
+) -> _ResampledPCM | None:
+    """Trim a drained resampler tail to `end_us`, quantized to integer PCM if needed.
+
+    Returns None when nothing is left.
+    """
+    tail = _trim_tail(drained, frame_stride, sample_rate, end_us)
+    if tail is None:
+        return None
+    if tail.sample_type == "float":
+        tail = _quantize_float_pcm(
+            channel_id=channel_id,
+            pcm_data=tail.pcm_data,
+            output_ts=tail.output_start_ts,
+            sample_rate=sample_rate,
+            channels=channels,
+            target_bit_depth=bit_depth,
+            resampler_cache=quantizers,
+        )
+        if tail.sample_count == 0 or not tail.pcm_data:
+            return None
+    return tail
+
+
+def _wire_pcm_for_transformer(
+    pcm: _ResampledPCM, transformer: AudioTransformer | None, bit_depth: int
+) -> bytes:
+    """Pack s32 samples into s24 when a PCM passthrough sends them as 24-bit."""
+    if (
+        pcm.needs_s32_to_s24_conversion
+        and bit_depth == 24
+        and isinstance(transformer, PcmPassthrough)
+    ):
+        return _convert_s32_to_s24(pcm.pcm_data)
+    return pcm.pcm_data
+
+
 def _encode_for_transform_key(
     transformer: AudioTransformer | None,
     pcm_data: bytes,
@@ -369,6 +437,18 @@ class _ResampledPCM:
     sample_type: Literal["int", "float"]
 
 
+@dataclass
+class _FlushGroup:
+    """Roles sharing one PCM key at flush time: their resampler and per-key encoders."""
+
+    channel_id: UUID
+    sample_rate: int
+    bit_depth: int
+    channels: int
+    resampler: _ResamplerState | None
+    transformers: dict[TransformKey, AudioTransformer | None] = field(default_factory=dict)
+
+
 def _create_resampler_state(
     key: _ResamplerKey,
     source_format: AudioFormat,
@@ -421,6 +501,33 @@ def _create_resampler_state(
         target_av_frame_stride=target_av_bytes * target_format.channels,
         needs_s32_to_s24_conversion=needs_s32_to_s24,
         is_passthrough=is_passthrough,
+    )
+
+
+def _unconsumed_input(
+    resampler_state: _ResamplerState,
+    source_pcm: bytes,
+    source_format: AudioFormat,
+    input_timestamp_us: int,
+) -> tuple[bytes, int] | None:
+    """Return the input past the resampler's cursor, or None if it was already consumed."""
+    cursor_us = resampler_state.pending_input_timestamp_us
+    if cursor_us is None or input_timestamp_us >= cursor_us:
+        return source_pcm, input_timestamp_us
+    sample_rate = source_format.sample_rate
+    frame_stride = source_format.bit_depth // 8 * source_format.channels
+    # Frames starting before the cursor, rounded up so no kept frame starts before it.
+    skip = -((input_timestamp_us - cursor_us) * sample_rate // 1_000_000)
+    # Check full consumption in frames before applying the tolerance, so a re-pushed
+    # chunk shorter than the tolerance is not mistaken for jitter.
+    if skip >= len(source_pcm) // frame_stride:
+        return None
+    # Within the jump tolerance the resampler continues its timeline, so nothing is consumed yet.
+    if cursor_us - input_timestamp_us <= _TIMELINE_JUMP_TOLERANCE_US:
+        return source_pcm, input_timestamp_us
+    return (
+        source_pcm[skip * frame_stride :],
+        input_timestamp_us + skip * 1_000_000 // sample_rate,
     )
 
 
@@ -804,6 +911,8 @@ class PushStream:
         self._is_live: bool = False
         # Monotonic lifecycle token used to invalidate in-flight commit work on stop().
         self._stream_generation = 0
+        # Generation that flush_audio() ran in, so catch-ups finishing after it drain their tail.
+        self._flushed_generation: int | None = None
         # Pending audio per channel: channel_id -> (pcm_bytes, audio_format)
         self._channel_buffers: dict[UUID, tuple[bytes, AudioFormat]] = {}
         # Per-channel timing: channel_id -> next_chunk_start_us
@@ -818,6 +927,8 @@ class PushStream:
         self._channel_source_rate: dict[UUID, int] = {}
         # Channels that have committed real audio (live or historical), not just synthetic timing.
         self._channels_with_committed_audio: set[UUID] = set()
+        # Source format of the most recent commit per channel, to find its resamplers.
+        self._channel_committed_format: dict[UUID, AudioFormat] = {}
         # Role-based streaming tracking (for hook-based flow)
         self._started_roles: set[Role] = set()
         # Inline resamplers for role-based audio delivery
@@ -1251,6 +1362,7 @@ class PushStream:
                     channel_id, sample_count, fmt.sample_rate
                 )
                 self._channels_with_committed_audio.add(channel_id)
+                self._channel_committed_format[channel_id] = fmt
 
             # Keep non-prepared active channels on the shared timeline.
             #
@@ -1312,13 +1424,15 @@ class PushStream:
             return min(channel_play_start.values())
         finally:
             self._commit_in_flight -= 1
-            # Flush deferred joins with last commit (in case there ever were multiple
-            # simultaneous commit calls).
-            if self._commit_in_flight == 0 and self._pending_join_roles:
-                pending = list(self._pending_join_roles)
-                self._pending_join_roles.clear()
-                for role in pending:
-                    self._do_role_join(role)
+            self._release_deferred_joins()
+
+    def _release_deferred_joins(self) -> None:
+        """Run the joins deferred while audio was in flight, once the last delivery is done."""
+        if self._commit_in_flight == 0 and self._pending_join_roles:
+            pending = list(self._pending_join_roles)
+            self._pending_join_roles.clear()
+            for role in pending:
+                self._do_role_join(role)
 
     def _resolve_channel_play_start(
         self,
@@ -1468,6 +1582,7 @@ class PushStream:
                 duration_us = self._advance_channel_timing(
                     channel_id, sample_count, fmt.sample_rate
                 )
+                self._channel_committed_format[channel_id] = fmt
 
                 # Cache PCM (if enabled)
                 channel_int = channel_id.int
@@ -1635,14 +1750,10 @@ class PushStream:
             if state is None:
                 state = _create_resampler_state(resampler_key, source_format, target_format)
                 self._cache_resampler(state)
-            elif (
-                state.pending_input_timestamp_us is not None
-                and state.pending_input_timestamp_us > input_timestamp_us
-            ):
-                # Resampler already consumed this chunk (e.g. catch-up task
-                # pre-processed the PCM cache and promoted the warmed graph).
-                # Re-pushing the same input would duplicate samples in the
-                # encoder buffer and shift content vs labels. Emit no output.
+            # A catch-up hand-off may have consumed this input already; re-pushing it
+            # would duplicate samples and shift content vs labels.
+            unconsumed = _unconsumed_input(state, source_pcm, source_format, input_timestamp_us)
+            if unconsumed is None:
                 empty = _ResampledPCM(
                     pcm_data=b"",
                     output_start_ts=state.pending_timestamp_us or input_timestamp_us,
@@ -1653,9 +1764,10 @@ class PushStream:
                 shared_results_by_resampler[resampler_key] = empty
                 results[pcm_key] = empty
                 continue
+            unconsumed_pcm, unconsumed_ts = unconsumed
 
             resampled = await _run_off_loop(
-                _resample_pcm_standalone, state, source_pcm, source_format, input_timestamp_us
+                _resample_pcm_standalone, state, unconsumed_pcm, source_format, unconsumed_ts
             )
             if not self._is_generation_active(commit_generation):
                 # clear() emptied the cache while we were off-loop; do not repopulate it.
@@ -1663,6 +1775,51 @@ class PushStream:
             shared_results_by_resampler[resampler_key] = resampled
             results[pcm_key] = resampled
         return results
+
+    async def _flush_replaced_resamplers(
+        self,
+        roles_by_pcm: dict[
+            tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
+        ],
+        prepared: dict[UUID, tuple[bytes, AudioFormat]],
+        channel_play_start: dict[UUID, int],
+        *,
+        commit_generation: int | None = None,
+    ) -> dict[tuple[UUID, int, int, int], _ResampledPCM]:
+        """Drain resamplers fed by a source format their channel no longer uses."""
+        tails: dict[tuple[UUID, int, int, int], _ResampledPCM] = {}
+        for rkey in list(self._resamplers):
+            if (
+                rkey.channel_id not in prepared
+                or rkey.source_format == prepared[rkey.channel_id][1]
+                # Float-to-int quantizers are keyed by output shape, not source format.
+                or rkey.source_format.sample_type != rkey.target_sample_type
+            ):
+                continue
+            state = self._resamplers.pop(rkey, None)
+            if state is None:
+                continue
+            drained = await _run_off_loop(_flush_resampler, state)
+            if not self._is_generation_active(commit_generation):
+                return {}
+            tail = _trim_tail(
+                drained,
+                state.target_av_frame_stride,
+                rkey.target_sample_rate,
+                channel_play_start[rkey.channel_id],
+            )
+            if tail is None:
+                continue
+            for pcm_key in roles_by_pcm:
+                channel_id, sample_rate, bit_depth, channels = pcm_key
+                if (
+                    channel_id == rkey.channel_id
+                    and sample_rate == rkey.target_sample_rate
+                    and channels == rkey.target_channels
+                    and (rkey.target_sample_type == "float" or bit_depth == rkey.target_bit_depth)
+                ):
+                    tails[pcm_key] = tail
+        return tails
 
     def _resolve_frame_duration_us(self, req: AudioRequirements) -> int:
         if req.frame_duration_us is not None:
@@ -1780,7 +1937,7 @@ class PushStream:
                 )
         return transformed
 
-    async def _transform_and_deliver(  # noqa: PLR0915
+    async def _transform_and_deliver(
         self,
         roles_by_pcm: dict[
             tuple[UUID, int, int, int], list[tuple[SendspinClient, Role, AudioRequirements]]
@@ -1876,6 +2033,14 @@ class PushStream:
             if not self._is_generation_active(commit_generation):
                 return {}
 
+        return self._cache_and_deliver(transformed, roles_by_transform)
+
+    def _cache_and_deliver(
+        self,
+        transformed: dict[TransformKey, list[tuple[bytes, int, int]]],
+        roles_by_transform: Mapping[TransformKey, list[Role]],
+    ) -> dict[TransformKey, list[CachedChunk]]:
+        """Deliver encoded frames to their roles and return them for the late-join cache."""
         cache_results: defaultdict[TransformKey, list[CachedChunk]] = defaultdict(list)
         active_roles = {role for _client, role in self._get_audio_roles()}
         joining_keys = {
@@ -1944,7 +2109,8 @@ class PushStream:
 
         This method:
         1. Groups roles by unique PCM requirements
-        2. Resamples source PCM to each unique target format
+        2. Resamples source PCM to each unique target format, after flushing resamplers
+           of a replaced source format
         3. Transforms and delivers via role.on_audio_chunk()
 
         Returns:
@@ -1956,6 +2122,22 @@ class PushStream:
             roles_by_pcm = self._group_roles_by_pcm_requirements(prepared)
             if not roles_by_pcm:
                 return {}
+            tails = await self._flush_replaced_resamplers(
+                roles_by_pcm, prepared, channel_play_start, commit_generation=commit_generation
+            )
+            if not self._is_generation_active(commit_generation):
+                return {}
+            if tails:
+                tail_results = await self._transform_and_deliver(
+                    {pcm_key: roles_by_pcm[pcm_key] for pcm_key in tails},
+                    tails,
+                    commit_generation=commit_generation,
+                )
+                if not self._is_generation_active(commit_generation):
+                    return {}
+                # Cache before the next await so a format change in between can evict it.
+                for tkey, chunks in tail_results.items():
+                    self._role_chunk_cache[tkey].extend(chunks)
             resampled = await self._resample_for_roles(
                 roles_by_pcm, prepared, channel_play_start, commit_generation=commit_generation
             )
@@ -2421,7 +2603,6 @@ class PushStream:
             resamplers = {}
         if quantizers is None:
             quantizers = {}
-        prev_resampler_key: _ResamplerKey | None = None
         since_yield_us = 0
 
         for chunk in pcm_chunks:
@@ -2451,14 +2632,17 @@ class PushStream:
                 target_sample_type=target_format.sample_type,
             )
             # Format changed: flush prior resampler now to keep output timestamp-ordered.
-            if prev_resampler_key is not None and prev_resampler_key != current_resampler_key:
-                prev_state = resamplers.pop(prev_resampler_key, None)
-                if prev_state is not None:
-                    cached.extend(
-                        self._flush_resampler_to_chunks(
-                            prev_state, quantizers, encoder, req, channel_id
-                        )
+            for prev_resampler_key in [key for key in resamplers if key != current_resampler_key]:
+                cached.extend(
+                    self._flush_resampler_to_chunks(
+                        resamplers.pop(prev_resampler_key),
+                        quantizers,
+                        encoder,
+                        req,
+                        channel_id,
+                        end_us=chunk.timestamp_us,
                     )
+                )
 
             resampler_state = resamplers.get(current_resampler_key)
             if resampler_state is None:
@@ -2468,19 +2652,19 @@ class PushStream:
                     target_format,
                 )
                 resamplers[current_resampler_key] = resampler_state
-            elif (
-                resampler_state.pending_input_timestamp_us is not None
-                and resampler_state.pending_input_timestamp_us > chunk.timestamp_us
-            ):
-                # Drop a chunk starting before the input already consumed, like live delivery.
+            # Skip input the resampler already consumed, like live delivery.
+            unconsumed = _unconsumed_input(
+                resampler_state, chunk.pcm_data, source_format, chunk.timestamp_us
+            )
+            if unconsumed is None:
                 continue
-            prev_resampler_key = current_resampler_key
+            unconsumed_pcm, unconsumed_ts = unconsumed
 
             resampled = _resample_pcm_standalone(
                 resampler_state,
-                chunk.pcm_data,
+                unconsumed_pcm,
                 source_format,
-                chunk.timestamp_us,
+                unconsumed_ts,
             )
             if not resampled.pcm_data:
                 continue
@@ -2563,51 +2747,24 @@ class PushStream:
     ) -> list[CachedChunk]:
         """Drain one resampler's FIR tail up to `end_us` and run it through quantizer/encoder."""
         tkey = self._build_transform_key(req, channel_id)
-        drained = _flush_resampler(resampler_state)
-        sample_count = drained.sample_count
-        if end_us is not None:
-            end_frames = (
-                (end_us - drained.output_start_ts) * req.sample_rate + 500_000
-            ) // 1_000_000
-            sample_count = max(0, min(sample_count, end_frames))
-        if sample_count == 0 or not drained.pcm_data:
+        drained = _trim_and_quantize_tail(
+            _flush_resampler(resampler_state),
+            resampler_state.target_av_frame_stride,
+            quantizers,
+            channel_id=channel_id,
+            sample_rate=req.sample_rate,
+            channels=req.channels,
+            bit_depth=req.bit_depth,
+            end_us=end_us,
+        )
+        if drained is None:
             return []
-
-        resampled_pcm = drained.pcm_data[: sample_count * resampler_state.target_av_frame_stride]
-        needs_s32_to_s24_conversion = drained.needs_s32_to_s24_conversion
-        output_start_ts = drained.output_start_ts
-
-        if drained.sample_type == "float":
-            edge_quantized = _quantize_float_pcm(
-                channel_id=channel_id,
-                pcm_data=resampled_pcm,
-                output_ts=output_start_ts,
-                sample_rate=req.sample_rate,
-                channels=req.channels,
-                target_bit_depth=req.bit_depth,
-                resampler_cache=quantizers,
-            )
-            resampled_pcm = edge_quantized.pcm_data
-            needs_s32_to_s24_conversion = edge_quantized.needs_s32_to_s24_conversion
-            output_start_ts = edge_quantized.output_start_ts
-            sample_count = edge_quantized.sample_count
-            if sample_count == 0 or not resampled_pcm:
-                return []
-
-        if (
-            needs_s32_to_s24_conversion
-            and req.bit_depth == 24
-            and isinstance(encoder, PcmPassthrough)
-        ):
-            resampled_pcm = _convert_s32_to_s24(resampled_pcm)
-        duration_us = int(sample_count * 1_000_000 / req.sample_rate) if sample_count > 0 else 0
-
         encoded_frames = self._encode_transform_for_key(
             tkey,
             encoder,
-            resampled_pcm,
-            output_start_ts,
-            duration_us,
+            _wire_pcm_for_transformer(drained, encoder, req.bit_depth),
+            drained.output_start_ts,
+            int(drained.sample_count * 1_000_000 / req.sample_rate),
         )
         return [
             CachedChunk(
@@ -2699,7 +2856,7 @@ class PushStream:
                 new_pcm = [
                     chunk
                     for chunk in self._pcm_chunk_cache.get(channel_int, [])
-                    if chunk.timestamp_us >= last_source_end_us
+                    if chunk.timestamp_us + chunk.duration_us > last_source_end_us
                 ]
                 if not new_pcm:
                     # Clear-then-recheck guards against the commit_audio set()
@@ -2708,7 +2865,7 @@ class PushStream:
                     new_pcm = [
                         chunk
                         for chunk in self._pcm_chunk_cache.get(channel_int, [])
-                        if chunk.timestamp_us >= last_source_end_us
+                        if chunk.timestamp_us + chunk.duration_us > last_source_end_us
                     ]
                     if not new_pcm:
                         try:
@@ -2745,7 +2902,7 @@ class PushStream:
                 pending = [
                     chunk
                     for chunk in self._pcm_chunk_cache.get(channel_int, [])
-                    if chunk.timestamp_us >= last_source_end_us
+                    if chunk.timestamp_us + chunk.duration_us > last_source_end_us
                 ]
                 if not pending:
                     break
@@ -2762,34 +2919,54 @@ class PushStream:
                     self._role_chunk_cache[cache_key].extend(drained)
                     last_encoded_end_us = drained[-1].timestamp_us + drained[-1].duration_us
 
-            # A shared live graph can release output at a different position than the catch-up
-            # graph, so fill from the catch-up graph's tail up to where the live graph resumes.
-            for rkey, rstate in catchup_resamplers.items():
-                live_state = self._resamplers.get(rkey)
-                if (
-                    rkey not in established_resampler_keys
-                    or live_state is None
-                    or live_state.pending_timestamp_us is None
-                ):
-                    continue
-                bridged = self._flush_resampler_to_chunks(
-                    rstate,
-                    catchup_quantizers,
-                    encoder,
-                    req,
-                    channel_id,
-                    end_us=live_state.pending_timestamp_us,
-                )
-                if bridged and self._catchup_state.get(cache_key) == "catching_up":
-                    self._role_chunk_cache[cache_key].extend(bridged)
+            if self._flushed_generation == self._stream_generation:
+                # flush_audio() did not drain this key, so drain its tail here.
+                tail = [
+                    chunk
+                    for rstate in catchup_resamplers.values()
+                    for chunk in self._flush_resampler_to_chunks(
+                        rstate, catchup_quantizers, encoder, req, channel_id
+                    )
+                ]
+                if encoder is not None:
+                    tail.extend(
+                        CachedChunk(
+                            timestamp_us=ts, duration_us=dur, payload=data, byte_count=len(data)
+                        )
+                        for data, ts, dur in self._flush_transformer_tail(cache_key, encoder)
+                    )
+                if tail and self._catchup_state.get(cache_key) == "catching_up":
+                    self._role_chunk_cache[cache_key].extend(tail)
+            else:
+                # A shared live graph can release output at a different position than the
+                # catch-up graph, so fill from the catch-up graph's tail up to where the live
+                # graph resumes.
+                for rkey, rstate in catchup_resamplers.items():
+                    live_state = self._resamplers.get(rkey)
+                    if (
+                        rkey not in established_resampler_keys
+                        or live_state is None
+                        or live_state.pending_timestamp_us is None
+                    ):
+                        continue
+                    bridged = self._flush_resampler_to_chunks(
+                        rstate,
+                        catchup_quantizers,
+                        encoder,
+                        req,
+                        channel_id,
+                        end_us=live_state.pending_timestamp_us,
+                    )
+                    if bridged and self._catchup_state.get(cache_key) == "catching_up":
+                        self._role_chunk_cache[cache_key].extend(bridged)
 
-            # Promote FIR-warmed catch-up state, skipping shared live keys.
-            for rkey, rstate in catchup_resamplers.items():
-                if rkey not in established_resampler_keys:
-                    self._resamplers[rkey] = rstate
-            for qkey, qstate in catchup_quantizers.items():
-                if qkey not in established_resampler_keys:
-                    self._resamplers[qkey] = qstate
+                # Promote FIR-warmed catch-up state, skipping shared live keys.
+                for rkey, rstate in catchup_resamplers.items():
+                    if rkey not in established_resampler_keys:
+                        self._resamplers[rkey] = rstate
+                for qkey, qstate in catchup_quantizers.items():
+                    if qkey not in established_resampler_keys:
+                        self._resamplers[qkey] = qstate
 
             now_us = self._clock.now_us()
             encoded_cache: deque[CachedChunk] = self._role_chunk_cache.get(cache_key, deque())
@@ -2826,6 +3003,171 @@ class PushStream:
         self._catchup_tasks.clear()
         self._catchup_state.clear()
         self._catchup_roles.clear()
+
+    async def flush_audio(self) -> None:
+        """
+        Deliver audio still buffered in the resamplers and encoders after the final commit.
+
+        Resamplers hold back their filter tail and encoders emit fixed-duration frames,
+        so the end of the input stays buffered until more audio arrives. When a stream
+        ends naturally, call this once after the last commit_audio() and before waiting
+        for players to drain and calling stop(), so players receive the end of the
+        audio. The last frame is padded with silence, so only stop() or clear() may
+        follow. stop() and clear() discard the buffered audio instead.
+
+        Does nothing if the stream is stopped.
+        """
+        if self._is_stopped:
+            return
+        flush_generation = self._stream_generation
+
+        # Joins wait for the tail like they wait for a commit, so their replay includes it.
+        self._commit_in_flight += 1
+        try:
+            async with self._commit_dsp_lock:
+                if not self._is_generation_active(flush_generation):
+                    return
+                self._flushed_generation = flush_generation
+                groups, roles_by_transform = self._collect_flush_groups()
+                if not groups:
+                    return
+                flushed = await _run_off_loop(self._flush_pipelines, groups, flush_generation)
+                if not self._is_generation_active(flush_generation):
+                    return
+                cache_results = self._cache_and_deliver(flushed, roles_by_transform)
+                for cache_key, chunks in cache_results.items():
+                    self._role_chunk_cache[cache_key].extend(chunks)
+                self._prune_role_chunk_cache()
+        finally:
+            self._commit_in_flight -= 1
+            self._release_deferred_joins()
+
+    def _collect_flush_groups(
+        self,
+    ) -> tuple[list[_FlushGroup], dict[TransformKey, list[Role]]]:
+        """Group the live pipelines to flush by PCM key, like commit_audio() delivery does.
+
+        Detaches each group's resampler from the cache, since draining closes its graph;
+        a later commit starts a fresh one.
+        """
+        groups: dict[tuple[UUID, int, int, int], _FlushGroup] = {}
+        detached: dict[_ResamplerKey, _ResamplerState] = {}
+        roles_by_transform: defaultdict[TransformKey, list[Role]] = defaultdict(list)
+        # Reattached roles are flushed without delivery, so their late-join replay has the tail.
+        for _client, role in [*self._get_audio_roles(), *self._get_warm_reattached_audio_roles()]:
+            req = role.get_audio_requirements()
+            if req is None:
+                continue
+            channel_id = req.channel_id or MAIN_CHANNEL
+            tkey = self._build_transform_key(req, channel_id, role)
+            if self._catchup_state.get(tkey) == "catching_up":
+                continue
+            roles_by_transform[tkey].append(role)
+            pcm_key = (channel_id, req.sample_rate, req.bit_depth, req.channels)
+            group = groups.get(pcm_key)
+            if group is None:
+                group = groups[pcm_key] = _FlushGroup(
+                    channel_id=channel_id,
+                    sample_rate=req.sample_rate,
+                    bit_depth=req.bit_depth,
+                    channels=req.channels,
+                    resampler=self._detach_resampler_for_flush(channel_id, req, detached),
+                )
+            group.transformers.setdefault(tkey, req.transformer)
+        return list(groups.values()), roles_by_transform
+
+    def _detach_resampler_for_flush(
+        self,
+        channel_id: UUID,
+        req: AudioRequirements,
+        detached: dict[_ResamplerKey, _ResamplerState],
+    ) -> _ResamplerState | None:
+        """Remove and return the live resampler feeding `req`, if it holds back audio.
+
+        Float sources share one resampler across bit depths, so `detached` keeps the
+        ones already removed for earlier groups.
+        """
+        source_format = self._channel_committed_format.get(channel_id)
+        if source_format is None:
+            return None
+        target_format = _processing_format_for_roles(
+            source_format,
+            target_sample_rate=req.sample_rate,
+            target_bit_depth=req.bit_depth,
+            target_channels=req.channels,
+        )
+        key = _ResamplerKey(
+            channel_id=channel_id,
+            source_format=source_format,
+            target_sample_rate=req.sample_rate,
+            target_channels=req.channels,
+            target_bit_depth=target_format.bit_depth,
+            target_sample_type=target_format.sample_type,
+        )
+        if key in detached:
+            return detached[key]
+        state = self._resamplers.get(key)
+        if state is None or state.is_passthrough or state.graph is None:
+            return None
+        del self._resamplers[key]
+        detached[key] = state
+        return state
+
+    def _flush_pipelines(
+        self,
+        groups: list[_FlushGroup],
+        flush_generation: int,
+    ) -> dict[TransformKey, list[tuple[bytes, int, int]]]:
+        """Drain each resampler into its encoders, then flush the encoders. Worker thread."""
+        flushed: defaultdict[TransformKey, list[tuple[bytes, int, int]]] = defaultdict(list)
+        drained_by_resampler: dict[_ResamplerKey, _ResampledPCM] = {}
+        with self._transformer_lock:
+            if not self._is_generation_active(flush_generation):
+                return {}
+            for group in groups:
+                tail = None
+                if group.resampler is not None:
+                    resampler_key = group.resampler.key
+                    if resampler_key not in drained_by_resampler:
+                        drained_by_resampler[resampler_key] = _flush_resampler(group.resampler)
+                    tail = _trim_and_quantize_tail(
+                        drained_by_resampler[resampler_key],
+                        group.resampler.target_av_frame_stride,
+                        self._resamplers,
+                        channel_id=group.channel_id,
+                        sample_rate=group.sample_rate,
+                        channels=group.channels,
+                        bit_depth=group.bit_depth,
+                    )
+                for tkey, transformer in group.transformers.items():
+                    if tail is not None:
+                        flushed[tkey].extend(
+                            self._encode_transform_for_key(
+                                tkey,
+                                transformer,
+                                _wire_pcm_for_transformer(tail, transformer, group.bit_depth),
+                                tail.output_start_ts,
+                                int(tail.sample_count * 1_000_000 / group.sample_rate),
+                            )
+                        )
+                    if transformer is not None:
+                        flushed[tkey].extend(self._flush_transformer_tail(tkey, transformer))
+        return {tkey: frames for tkey, frames in flushed.items() if frames}
+
+    def _flush_transformer_tail(
+        self, tkey: TransformKey, transformer: AudioTransformer
+    ) -> list[tuple[bytes, int, int]]:
+        """Flush one transformer and timestamp its tail frames on the transformer's timeline."""
+        pending_us = transformer.pending_timestamp_us
+        frames = transformer.flush()
+        if not frames or pending_us is None:
+            return []
+        ts = pending_us + self._transform_ts_offset_us.get(tkey, 0)
+        tail: list[tuple[bytes, int, int]] = []
+        for data, dur in frames:
+            tail.append((data, ts, dur))
+            ts += dur
+        return tail
 
     def stop(self, *, keep_stream: bool = False) -> None:
         """
@@ -2875,6 +3217,7 @@ class PushStream:
         self._transform_last_input_end_us.clear()
         self._transform_ts_offset_us.clear()
         self._channels_with_committed_audio.clear()
+        self._channel_committed_format.clear()
 
     def clear(self, *, end_roles: AbstractSet[Role] = frozenset()) -> None:
         """
@@ -2898,6 +3241,7 @@ class PushStream:
         self._channel_timing_residue.clear()
         self._channel_timing_rate.clear()
         self._channels_with_committed_audio.clear()
+        self._channel_committed_format.clear()
 
         # Clear chunk cache
         self._role_chunk_cache.clear()
