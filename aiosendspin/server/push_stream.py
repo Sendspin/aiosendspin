@@ -2127,7 +2127,6 @@ class PushStream:
             )
             if not self._is_generation_active(commit_generation):
                 return {}
-            tail_results: dict[TransformKey, list[CachedChunk]] = {}
             if tails:
                 tail_results = await self._transform_and_deliver(
                     {pcm_key: roles_by_pcm[pcm_key] for pcm_key in tails},
@@ -2136,19 +2135,19 @@ class PushStream:
                 )
                 if not self._is_generation_active(commit_generation):
                     return {}
+                # Cache before the next await so a format change in between can evict it.
+                for tkey, chunks in tail_results.items():
+                    self._role_chunk_cache[tkey].extend(chunks)
             resampled = await self._resample_for_roles(
                 roles_by_pcm, prepared, channel_play_start, commit_generation=commit_generation
             )
             if not self._is_generation_active(commit_generation):
                 return {}
-            results = await self._transform_and_deliver(
+            return await self._transform_and_deliver(
                 roles_by_pcm,
                 resampled,
                 commit_generation=commit_generation,
             )
-            for tkey, chunks in tail_results.items():
-                results[tkey] = chunks + results.get(tkey, [])
-            return results
 
     def _prune_role_chunk_cache(self) -> None:
         """Remove old chunks from the role-based cache."""

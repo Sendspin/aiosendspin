@@ -8,7 +8,7 @@ import struct
 import sys
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from typing import Any
 from unittest.mock import MagicMock
@@ -4042,6 +4042,47 @@ async def test_source_format_change_keeps_old_resampler_tail() -> None:
     assert _ramp_values([chunk.data for chunk in role.received]) == list(
         range(len(bit_depths) * _RAMP_FRAMES - _HOLD_BACK_FRAMES)
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hold_back_resampler")
+async def test_format_change_during_source_change_does_not_recache_old_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A player format change while new audio resamples keeps the old key's cache evicted."""
+    old_req = AudioRequirements(
+        sample_rate=48_000,
+        bit_depth=16,
+        channels=2,
+        transformer=None,
+        channel_id=MAIN_CHANNEL,
+        frame_duration_us=25_000,
+    )
+    role = _DummyRole(old_req)
+    group = _DummyGroup(clients=[])
+    group.clients.append(_DummyClient([role]))
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)
+
+    stream.prepare_audio(
+        _ramp_pcm(0, 32), AudioFormat(sample_rate=48_000, bit_depth=32, channels=2)
+    )
+    await stream.commit_audio()
+    old_tkey = stream._build_transform_key(old_req, MAIN_CHANNEL, role)  # noqa: SLF001
+
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+
+    async def resample_with_format_change(*args: Any, **kwargs: Any) -> Any:
+        role._requirements = replace(old_req, sample_rate=44_100)  # noqa: SLF001
+        stream.on_role_format_changed(role)
+        return await original_resample(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "_resample_for_roles", resample_with_format_change)
+    stream.prepare_audio(
+        _ramp_pcm(1, 24), AudioFormat(sample_rate=48_000, bit_depth=24, channels=2)
+    )
+    await stream.commit_audio()
+
+    assert not stream._role_chunk_cache.get(old_tkey)  # noqa: SLF001
 
 
 @pytest.mark.asyncio
