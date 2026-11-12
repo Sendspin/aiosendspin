@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import math
 import struct
-import warnings
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
-from aiosendspin import util
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.trust_store import ClientPairingStore, InMemoryClientPairingStore
@@ -20,27 +16,9 @@ from aiosendspin.server import push_stream
 
 
 @pytest.fixture(autouse=True)
-def _reset_deprecation_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give each test a process state in which no deprecation has been reported yet."""
-    monkeypatch.setattr(util, "_WARNED_DEPRECATIONS", set())
-
-
-@pytest.fixture(autouse=True)
 def _clear_resampler_hold_back() -> None:
     """Measure the resampler hold-back afresh, since some tests patch the resample graph."""
     push_stream._resampler_hold_back_us.cache_clear()  # noqa: SLF001
-
-
-@contextmanager
-def recorded_deprecations() -> Iterator[list[str]]:
-    """Collect the messages of every DeprecationWarning raised inside the block."""
-    messages: list[str] = []
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        try:
-            yield messages
-        finally:
-            messages.extend(str(w.message) for w in caught if w.category is DeprecationWarning)
 
 
 def make_sdk_client(
