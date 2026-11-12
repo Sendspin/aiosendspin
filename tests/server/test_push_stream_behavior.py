@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import struct
 import sys
@@ -53,6 +54,8 @@ from aiosendspin.server.roles.player.audio_transformers import (
     OpusEncoder,
     PcmPassthrough,
 )
+from aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
+from tests.server.roles.visualizer.test_v1 import _connect, _make_client_stub
 
 
 @dataclass(slots=True)
@@ -108,6 +111,7 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.sent_json: list[object] = []
         self.sent_binary: list[bytes] = []
+        self.wire: list[object] = []
         self.buffer_tracker = None
         self.dropped_pending_binary: list[list[str] | None] = []
 
@@ -122,6 +126,7 @@ class _FakeConnection:
 
     def send_role_message(self, role: str, message: object) -> None:  # noqa: ARG002
         self.sent_json.append(message)
+        self.wire.append(message)
 
     def send_binary(
         self,
@@ -139,6 +144,7 @@ class _FakeConnection:
         if player_audio_header:
             data = pack_player_audio_header(timestamp_us, 0) + data
         self.sent_binary.append(data)
+        self.wire.append(data)
         if (
             self.buffer_tracker is not None
             and buffer_end_time_us is not None
@@ -159,8 +165,11 @@ class _DummyRole:
         replay_from_pcm_cache: bool = False,
         required_lead_time_us: int = DEFAULT_INITIAL_DELAY_US,
         min_buffer_us: int = 0,
+        supports_timestamped_clear: bool = True,
     ) -> None:
         self._requirements = requirements
+        self._supports_timestamped_clear = supports_timestamped_clear
+        self.clears: list[int] = []
         self._output_delay_us = output_delay_us
         self._replay_from_pcm_cache = replay_from_pcm_cache
         self._required_lead_time_us = required_lead_time_us
@@ -197,6 +206,13 @@ class _DummyRole:
 
     def on_stream_clear(self) -> None:
         return
+
+    def supports_timestamped_clear(self) -> bool:
+        return self._supports_timestamped_clear
+
+    def on_stream_clear_from(self, cut_us: int, chunk_start_us: int) -> None:  # noqa: ARG002
+        self.clears.append(chunk_start_us)
+        self.received = [chunk for chunk in self.received if chunk.timestamp_us < chunk_start_us]
 
 
 class _DummyClient:
@@ -5653,3 +5669,377 @@ async def test_inflight_switch_away_and_back_keeps_audio_aligned(
         elapsed_us = unpack_player_audio_header(frame).timestamp_us - first_us
         first_value = struct.unpack_from("<h", frame, PLAYER_AUDIO_HEADER_SIZE)[0]
         assert first_value == (elapsed_us * 48 // 1000) & 0x7FFF
+
+
+def _client_buffer(conn: _FakeConnection) -> list[tuple[int, bytes]]:
+    """Apply the sent messages like a player and return its buffered chunks in time order."""
+    buffered: dict[int, bytes] = {}
+    for item in conn.wire:
+        if isinstance(item, StreamClearMessage):
+            cut_us = item.payload.from_timestamp
+            buffered = {
+                ts: data for ts, data in buffered.items() if cut_us is not None and ts < cut_us
+            }
+        elif isinstance(item, bytes):
+            timestamp_us = unpack_player_audio_header(item).timestamp_us
+            assert timestamp_us not in buffered
+            buffered[timestamp_us] = item[PLAYER_AUDIO_HEADER_SIZE:]
+    return sorted(buffered.items())
+
+
+def _group_stream(mock_loop: Any, group: _DummyGroup) -> PushStream:
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    group._push_stream = stream  # noqa: SLF001
+    return stream
+
+
+def _tone(value: int, frames: int = 1200) -> bytes:
+    return np.full(frames * 2, value, dtype="<i2").tobytes()
+
+
+_FORMAT_48K = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset_us", [10_000, 0])
+async def test_clear_from_replaces_audio_from_the_cut(mock_loop: Any, offset_us: int) -> None:
+    """A cut inside or at the start of a chunk keeps the audio before it without a gap."""
+    group = _DummyGroup(clients=[])
+    client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+
+    starts = []
+    for index in range(80):
+        stream.prepare_audio(_tone(index + 1), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    sent_before = {unpack_player_audio_header(data).timestamp_us for data in conn.sent_binary}
+    cut_us = starts[60] + offset_us
+
+    assert await stream.clear_from(cut_us) is True
+    for _ in range(4):
+        stream.prepare_audio(_tone(30_000), _FORMAT_48K)
+        assert await stream.commit_audio() >= cut_us
+    await stream.flush_audio()
+
+    clears = [msg for msg in conn.wire if isinstance(msg, StreamClearMessage)]
+    assert [msg.payload.from_timestamp for msg in clears] == [starts[60]]
+    assert starts[60] in sent_before
+    assert sum(isinstance(msg, StreamStartMessage) for msg in conn.wire) == 1
+
+    buffered = _client_buffer(conn)
+    assert [ts for ts, _ in buffered] == [starts[0] + 25_000 * i for i in range(len(buffered))]
+    samples = np.frombuffer(b"".join(data for _, data in buffered), dtype="<i2")[::2]
+    expected = np.concatenate(
+        [
+            np.repeat(np.arange(1, 61), 1200),
+            np.full(offset_us * 48 // 1000, 61),
+            np.full(4800, 30_000),
+        ]
+    )
+    assert samples[: len(expected)].tolist() == expected.tolist()
+
+    tracker = client.role("player@v1").get_buffer_tracker()
+    assert tracker.buffered_bytes == sum(
+        PLAYER_AUDIO_HEADER_SIZE + len(data) for _, data in buffered
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_rate", [48_000, 44_100])
+async def test_clear_from_restarts_each_codec_at_one_of_its_sent_chunks(
+    mock_loop: Any, source_rate: int
+) -> None:
+    """PCM, FLAC and Opus players each continue gapless from a chunk they already got."""
+    group = _DummyGroup(clients=[])
+    roles = {"pcm": _pcm_passthrough_role(group)}
+    for codec, encoder_cls in (("flac", FlacEncoder), ("opus", OpusEncoder)):
+        transformer = group.transformer_pool.get_or_create(
+            encoder_cls,
+            channel_id=MAIN_CHANNEL.int,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            frame_duration_us=25_000,
+        )
+        roles[codec] = _DummyRole(
+            AudioRequirements(
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+                transformer=transformer,
+                channel_id=MAIN_CHANNEL,
+                frame_duration_us=25_000,
+            )
+        )
+        group.clients.append(_DummyClient([roles[codec]]))
+    stream = _group_stream(mock_loop, group)
+    pcm_format = AudioFormat(sample_rate=source_rate, bit_depth=16, channels=2)
+    chunk_frames = source_rate // 40
+
+    def tone(hz: int, chunks: int) -> np.ndarray:
+        frames = np.arange(chunks * chunk_frames)
+        return (8000 * np.sin(2 * np.pi * hz * frames / source_rate)).astype(np.int16)
+
+    async def commit(signal: np.ndarray) -> list[int]:
+        starts = []
+        for chunk in signal.reshape(-1, chunk_frames):
+            stream.prepare_audio(np.repeat(chunk, 2).tobytes(), pcm_format)
+            starts.append(await stream.commit_audio())
+        return starts
+
+    old = tone(440, 80)
+    starts = await commit(old)
+    cut_frames = 60 * chunk_frames + chunk_frames * 2 // 5
+    cut_us = starts[60] + 10_000
+    sent_before = {codec: {c.timestamp_us for c in role.received} for codec, role in roles.items()}
+
+    assert await stream.clear_from(cut_us) is True
+    new = tone(1000, 20)
+    await commit(new)
+    await stream.flush_audio()
+
+    tolerance_us = 2 * 1_000_000 / source_rate
+    for codec, role in roles.items():
+        chunk_start_us = role.clears[0]
+        assert chunk_start_us in sent_before[codec]
+        assert chunk_start_us <= cut_us
+        resent = [c for c in role.received if c.timestamp_us >= chunk_start_us - tolerance_us]
+        assert chunk_start_us <= resent[0].timestamp_us <= chunk_start_us + tolerance_us
+        for previous, chunk in pairwise(role.received):
+            gap_us = chunk.timestamp_us - previous.timestamp_us - previous.duration_us
+            assert abs(gap_us) <= tolerance_us
+
+        if source_rate != 48_000:
+            continue
+        transformer = role.get_audio_requirements().transformer
+        decoder = create_decoder(
+            codec,
+            sample_rate=48000,
+            bit_depth=16,
+            channels=2,
+            codec_header=transformer.get_header(),
+        )
+        decoded = b"".join(decoder.decode(chunk.data) for chunk in role.received)
+        signal = np.frombuffer(decoded + decoder.flush(), dtype=np.int16)[::2]
+        skip = (starts[0] - role.received[0].timestamp_us) * 48 // 1000
+        expected = np.concatenate([old[:cut_frames], new])
+        signal = signal[skip : skip + len(expected)]
+        if codec == "opus":
+            error = signal.astype(np.float64) - expected
+            assert np.sqrt(np.mean(error**2)) < 0.2 * np.sqrt(np.mean(expected.astype(float) ** 2))
+        else:
+            assert signal.tolist() == expected.tolist()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "lead_time",
+        "not_committed",
+        "unsupported_role",
+        "after_flush",
+    ],
+)
+async def test_clear_from_refuses_without_changing_anything(mock_loop: Any, case: str) -> None:
+    """A cut that cannot be made sends nothing and leaves the timeline as it was."""
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    cut_us = starts[30]
+
+    if case == "lead_time":
+        mock_loop.time.return_value = (cut_us - 100_000) / 1_000_000
+    elif case == "not_committed":
+        cut_us = starts[-1] + 25_000
+    elif case == "unsupported_role":
+        _pcm_passthrough_role(group)._supports_timestamped_clear = False  # noqa: SLF001
+    elif case == "after_flush":
+        await stream.flush_audio()
+    wire_before = list(conn.wire)
+
+    assert await stream.clear_from(cut_us) is False
+
+    assert conn.wire == wire_before
+    assert stream._channel_timing[MAIN_CHANNEL] == starts[-1] + 25_000  # noqa: SLF001
+    assert len(stream.get_cached_pcm_chunks()) == 40
+
+
+@pytest.mark.asyncio
+async def test_clear_from_waits_for_a_running_commit(
+    mock_loop: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cut requested during a commit is made once that commit delivered its audio."""
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+    cuts = []
+
+    async def resample_with_cut(*args: Any, **kwargs: Any) -> Any:
+        if not cuts:
+            cuts.append(asyncio.ensure_future(stream.clear_from(starts[30])))
+        return await original_resample(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "_resample_for_roles", resample_with_cut)
+    stream.prepare_audio(bytes(4800), _FORMAT_48K)
+    await stream.commit_audio()
+    # A producer that commits again right away does not delay the cut.
+    stream.prepare_audio(bytes(4800), _FORMAT_48K)
+    assert await stream.commit_audio() == starts[30]
+
+    assert await cuts[0] is True
+    assert len(conn.sent_binary) == 41
+    assert [ts for ts, _ in _client_buffer(conn)] == starts[:30]
+
+
+@pytest.mark.asyncio
+async def test_clear_from_without_audio_roles_moves_the_timeline_to_the_cut(
+    mock_loop: Any,
+) -> None:
+    """With no role receiving audio, the next commit still continues at the cut."""
+    group = _DummyGroup(clients=[])
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+
+    assert await stream.clear_from(starts[-1] + 25_000) is False
+    assert await stream.clear_from(starts[30] + 10_000) is True
+
+    stream.prepare_audio(bytes(4800), _FORMAT_48K)
+    assert await stream.commit_audio() == starts[30] + 10_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offset_us", "join_before_commit"), [(10_000, False), (0, False), (10_000, True)]
+)
+async def test_late_joiner_after_clear_from_gets_the_replaced_audio(
+    mock_loop: Any,
+    offset_us: int,
+    join_before_commit: bool,  # noqa: FBT001
+) -> None:
+    """A player that joins after a cut receives the same audio as one that was cut."""
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for index in range(80):
+        stream.prepare_audio(_tone(index + 1), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    assert await stream.clear_from(starts[60] + offset_us) is True
+
+    async def commit_replacement() -> None:
+        for _ in range(4):
+            stream.prepare_audio(_tone(30_000), _FORMAT_48K)
+            await stream.commit_audio()
+
+    if not join_before_commit:
+        await commit_replacement()
+    joiner, joiner_conn = _make_connected_player(mock_loop, group, "p2")
+    stream.on_role_join(joiner.role("player@v1"))
+    if join_before_commit:
+        await commit_replacement()
+
+    joined = _client_buffer(joiner_conn)
+    assert joined[0][0] < starts[60] < joined[-1][0]
+    assert joined == [chunk for chunk in _client_buffer(conn) if chunk[0] >= joined[0][0]]
+
+
+@pytest.mark.asyncio
+async def test_clear_from_right_after_another_cut(
+    mock_loop: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A second cut is made while the first one still waits for audio to encode again."""
+    caplog.set_level(logging.DEBUG, logger=push_stream_module.__name__)
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    assert await stream.clear_from(starts[30] + 10_000) is True
+
+    assert await stream.clear_from(starts[20] + 10_000) is True
+    assert "idle timeout" not in caplog.text
+
+    for _ in range(2):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        await stream.commit_audio()
+    assert [ts for ts, _ in _client_buffer(conn)] == [starts[0] + 25_000 * i for i in range(22)]
+
+
+@pytest.mark.asyncio
+async def test_clear_from_cuts_the_visualizer_at_the_cut_itself(mock_loop: Any) -> None:
+    """A visualizer sharing a player's audio is cleared at the cut, not at the chunk start."""
+    group = _DummyGroup(clients=[])
+    _make_connected_player(mock_loop, group, "p1")
+    visualizer_client = _make_client_stub()
+    visualizer = VisualizerV1Role(client=visualizer_client)
+    _connect(visualizer)
+    group.clients.append(_DummyClient([visualizer]))
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(80):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    frames_before = visualizer_client.send_binary.call_count
+    cut_us = starts[60] + 10_000
+
+    assert await stream.clear_from(cut_us) is True
+    stream.prepare_audio(bytes(4800), _FORMAT_48K)
+    await stream.commit_audio()
+
+    clear = visualizer_client.send_role_message.call_args.args[1]
+    assert clear.payload.from_timestamp == cut_us
+    resent = [
+        call.kwargs["timestamp_us"]
+        for call in visualizer_client.send_binary.call_args_list[frames_before:]
+    ]
+    assert cut_us <= min(resent) < cut_us + 25_000
+
+
+@pytest.mark.asyncio
+async def test_clear_from_at_the_first_cached_chunk(mock_loop: Any) -> None:
+    """A cut at the start of the oldest cached audio replaces all of it."""
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(4):
+        stream.prepare_audio(_tone(1), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+
+    assert await stream.clear_from(starts[0]) is True
+
+    stream.prepare_audio(_tone(2), _FORMAT_48K)
+    assert await stream.commit_audio() == starts[0]
+    assert _client_buffer(conn) == [(starts[0], _tone(2))]
+
+
+@pytest.mark.asyncio
+async def test_clear_from_refuses_a_cut_below_the_send_ahead_floor(mock_loop: Any) -> None:
+    """A cut the next commit would have to move past is refused."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    role._min_buffer_us = DEFAULT_INITIAL_DELAY_US  # noqa: SLF001
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    # Past the role's lead time, but inside the frame its encoder can hold back.
+    mock_loop.time.return_value = (starts[30] - DEFAULT_INITIAL_DELAY_US - 10_000) / 1_000_000
+
+    assert await stream.clear_from(starts[30]) is False

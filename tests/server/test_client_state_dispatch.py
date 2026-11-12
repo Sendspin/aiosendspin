@@ -23,6 +23,8 @@ from aiosendspin.models.core import (
     ClientHelloPayload,
     ClientStateMessage,
     ClientStatePayload,
+    StreamClearMessage,
+    StreamClearPayload,
     StreamRequestFormatMessage,
     StreamRequestFormatPayload,
 )
@@ -599,3 +601,50 @@ async def test_unrecognized_player_command_rejected_when_strict() -> None:
             ClientStateMessage(payload=payload), timestamp_us=0
         )
     role.on_client_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_timestamped_stream_clear_drops_only_later_held_binary() -> None:
+    """Binary held for the initial state is dropped from a timestamped clear's cut on."""
+    conn, client = _conn_with_client()
+    role = _role("player")
+    role.requires_initial_state.return_value = True
+    client.active_roles = [role]
+    client.get_binary_handling_cached.return_value = None
+    conn.send_binary(b"kept", role="player", timestamp_us=1000, message_type=4)
+    conn.send_binary(b"dropped", role="player", timestamp_us=3000, message_type=4)
+
+    conn.send_role_message(
+        "player",
+        StreamClearMessage(payload=StreamClearPayload(roles=["player"], from_timestamp=2000)),
+    )
+    conn._initial_state_received = True  # noqa: SLF001
+    conn._flush_pending_binary()  # noqa: SLF001
+
+    queued = [
+        entry.binary.data if entry.binary else "clear"
+        for _, _, entry in sorted(conn._role_queues["player"])  # noqa: SLF001
+    ]
+    assert queued == [b"kept", "clear"]
+
+
+@pytest.mark.asyncio
+async def test_held_timestamped_stream_clear_is_dropped_by_a_full_clear() -> None:
+    """A timestamped clear held behind binary does not follow a later full clear."""
+    conn, client = _conn_with_client()
+    role = _role("player")
+    role.requires_initial_state.return_value = True
+    client.active_roles = [role]
+    client.get_binary_handling_cached.return_value = None
+    conn.send_binary(b"held", role="player", timestamp_us=1000, message_type=4)
+    conn.send_role_message(
+        "player",
+        StreamClearMessage(payload=StreamClearPayload(roles=["player"], from_timestamp=2000)),
+    )
+
+    conn.send_role_message("player", StreamClearMessage(payload=StreamClearPayload()))
+    conn._initial_state_received = True  # noqa: SLF001
+    conn._flush_pending_binary()  # noqa: SLF001
+
+    clears = [entry.json_message for _, _, entry in conn._role_queues["player"]]  # noqa: SLF001
+    assert [clear.payload.from_timestamp for clear in clears] == [None]

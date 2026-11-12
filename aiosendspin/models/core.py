@@ -1219,6 +1219,8 @@ class StreamClearPayload(SendspinModel):
     """Timestamp the server transmitted this message in microseconds. Stamped at send."""
     roles: list[str] | None = None
     """Roles to clear: player, visualizer, or both. If omitted, clears both roles."""
+    from_timestamp: int | None = None
+    """Server clock time in microseconds from which data is cleared. If omitted, clears all."""
 
     def __post_init__(self) -> None:
         """Validate role names. Permits known families and `_`-prefixed app roles."""

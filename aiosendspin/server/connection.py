@@ -488,7 +488,7 @@ class SendspinConnection:
         # The spec forbids sending binary before it; flushed once the state arrives.
         # Each entry carries the role's epoch at buffer time so a stream boundary
         # in the meantime (which bumps the epoch) discards it instead of replaying.
-        self._pending_binary: list[tuple[str, int, bool, Callable[[], None]]] = []
+        self._pending_binary: list[tuple[str, int, bool, int, Callable[[], None]]] = []
         # Role families being removed by the activation in progress; their teardown
         # goes out ahead of that server/activate.
         self._retiring_roles: set[str] = set()
@@ -620,7 +620,7 @@ class SendspinConnection:
     def _flush_pending_binary(self) -> None:
         """Enqueue held binary whose role is no longer held, dropping stale entries."""
         pending, self._pending_binary = self._pending_binary, []
-        for role, epoch, epoch_exempt, send in pending:
+        for role, epoch, epoch_exempt, _timestamp_us, send in pending:
             # A stream boundary during the wait bumped the epoch; that data is stale.
             # A role that is still held puts its entry back.
             if epoch_exempt or epoch == self._epoch_by_role[role]:
@@ -654,6 +654,36 @@ class SendspinConnection:
                 self._block_generation[role] += 1
                 self._schedule_role_head(role)
         self._wake_writer()
+
+    def _drop_pending_binary_from(self, roles: list[str] | None, timestamp_us: int) -> None:
+        """Drop queued binary payloads of the specified roles that start at or after a timestamp."""
+        for role in list(self._role_queues) if roles is None else roles:
+            role_queue = self._role_queues.pop(role, [])
+            kept = [
+                item
+                for item in role_queue
+                if item[2].binary is None
+                or item[2].binary.epoch_exempt
+                or item[2].timestamp_us < timestamp_us
+            ]
+            self._queue_size -= len(role_queue) - len(kept)
+            if kept:
+                heapq.heapify(kept)
+                self._role_queues[role] = kept
+            # Messages queued from here on sort after the kept ones, not after the dropped ones.
+            self._last_enqueued_ts_by_role[role] = max((item[0] for item in kept), default=0)
+            if role in self._blocked_until_us:
+                # The backpressure deadline may belong to a dropped message.
+                self._blocked_until_us.pop(role, None)
+                self._block_generation[role] += 1
+                self._schedule_role_head(role)
+        self._pending_binary = [
+            pending
+            for pending in self._pending_binary
+            if (roles is not None and pending[0] not in roles)
+            or pending[2]
+            or pending[3] < timestamp_us
+        ]
 
     async def wait_role_drained(self, role: str) -> None:
         """Return once every message queued for `role` has been sent or discarded."""
@@ -703,6 +733,7 @@ class SendspinConnection:
                     role,
                     self._epoch_by_role[role],
                     epoch_exempt,
+                    timestamp_us,
                     partial(
                         self.send_binary,
                         data,
@@ -845,7 +876,21 @@ class SendspinConnection:
         role's unsent StreamStart and StreamClear, and is skipped when the client has
         no active stream for the role or one is already queued.
         """
-        if isinstance(message, StreamClearMessage | StreamEndMessage):
+        if isinstance(message, StreamClearMessage) and message.payload.from_timestamp is not None:
+            self._drop_pending_binary_from(message.payload.roles, message.payload.from_timestamp)
+            if any(pending[0] == role for pending in self._pending_binary):
+                # Keep the clear behind the earlier binary that is held for the client's state.
+                self._pending_binary.append(
+                    (
+                        role,
+                        self._epoch_by_role[role],
+                        False,
+                        message.payload.from_timestamp,
+                        partial(self.send_role_message, role, message),
+                    )
+                )
+                return
+        elif isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 
         if isinstance(message, StreamEndMessage) and not self._supersede_queued_stream(role):

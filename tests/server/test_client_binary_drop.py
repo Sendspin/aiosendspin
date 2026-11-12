@@ -111,3 +111,40 @@ async def test_stream_clear_drops_queued_binary_before_sending() -> None:
         writer.cancel()
         with suppress(asyncio.CancelledError):
             await writer
+
+
+@pytest.mark.asyncio
+async def test_timestamped_stream_clear_drops_only_later_queued_binary() -> None:
+    """A stream/clear with from_timestamp keeps queued binary before it and sorts after it."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop)
+    sent: list[object] = []
+    wsock = MagicMock()
+    wsock.closed = False
+    wsock.send_bytes = AsyncMock(side_effect=sent.append)
+    wsock.send_str = AsyncMock(side_effect=lambda _text: sent.append("clear"))
+    conn = SendspinConnection(server, wsock_client=wsock)
+    conn._transport = wsock  # noqa: SLF001
+    base_us = server.clock.now_us() + 10_000_000
+
+    for name, offset_us in ((b"kept", 0), (b"dropped", 2000), (b"dropped", 4000)):
+        conn.send_binary(name, role="player", timestamp_us=base_us + offset_us, message_type=4)
+    conn.send_role_message(
+        "player",
+        StreamClearMessage(
+            payload=StreamClearPayload(roles=["player"], from_timestamp=base_us + 2000)
+        ),
+    )
+    conn.send_binary(b"new", role="player", timestamp_us=base_us + 2000, message_type=4)
+
+    writer = asyncio.create_task(conn._writer())  # noqa: SLF001
+    try:
+        for _ in range(50):
+            if len(sent) >= 3:
+                break
+            await asyncio.sleep(0)
+        assert sent == [b"kept", "clear", b"new"]
+    finally:
+        writer.cancel()
+        with suppress(asyncio.CancelledError):
+            await writer

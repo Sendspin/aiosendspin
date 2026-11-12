@@ -44,3 +44,10 @@ def test_stream_end_rejects_unknown_non_underscore_role() -> None:
     """Unknown families without `_` prefix are still rejected."""
     with pytest.raises(ValueError, match="invalid roles"):
         StreamEndPayload(roles=["controller"])
+
+
+def test_stream_clear_from_timestamp_is_omitted_unless_set() -> None:
+    """from_timestamp only appears on the wire for a timestamped clear."""
+    assert "from_timestamp" not in StreamClearPayload(roles=["player"]).to_dict()
+    payload = StreamClearPayload(roles=["player"], from_timestamp=1_500_000)
+    assert payload.to_dict()["from_timestamp"] == 1_500_000

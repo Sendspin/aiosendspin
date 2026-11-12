@@ -879,6 +879,21 @@ def _trim_pcm_chunk_start(chunk: CachedPCMChunk, start_us: int) -> CachedPCMChun
     )
 
 
+def _trim_pcm_chunk_end(chunk: CachedPCMChunk, end_us: int) -> CachedPCMChunk:
+    """Drop the frames of `chunk` that start at or after `end_us`."""
+    frame_stride = chunk.bit_depth // 8 * chunk.channels
+    keep_frames = -(-(end_us - chunk.timestamp_us) * chunk.sample_rate // 1_000_000)
+    return CachedPCMChunk(
+        timestamp_us=chunk.timestamp_us,
+        duration_us=end_us - chunk.timestamp_us,
+        pcm_data=chunk.pcm_data[: keep_frames * frame_stride],
+        sample_rate=chunk.sample_rate,
+        bit_depth=chunk.bit_depth,
+        channels=chunk.channels,
+        sample_type=chunk.sample_type,
+    )
+
+
 class StreamStoppedError(Exception):
     """Raised when trying to commit audio on a stopped stream."""
 
@@ -975,6 +990,13 @@ class PushStream:
         # >0 while commit_audio() is between the _channel_timing advance and _role_chunk_cache
         # update, joiners should be delayed during that
         self._commit_in_flight: int = 0
+        # Resolved once no commit or flush is in flight, for clear_from() to continue.
+        self._idle_waiters: list[asyncio.Future[None]] = []
+        # Set while clear_from() waits for the catch-ups, which then stop waiting for more PCM.
+        self._finish_catchups = False
+        # Cleared while a clear_from() call is waiting, so that new commits wait for its cut.
+        self._no_cut_waiting = asyncio.Event()
+        self._no_cut_waiting.set()
         # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
         self._historical_buffers: dict[UUID, list[tuple[bytes, AudioFormat]]] = {}
         # Optional start timestamps for historical channels (set on first historical chunk).
@@ -1303,6 +1325,7 @@ class PushStream:
             StreamStoppedError: If the stream is already stopped when commit
                 begins.
         """
+        await self._no_cut_waiting.wait()
         # Check if stopped
         if self._is_stopped:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
@@ -1435,12 +1458,18 @@ class PushStream:
             self._release_deferred_joins()
 
     def _release_deferred_joins(self) -> None:
-        """Run the joins deferred while audio was in flight, once the last delivery is done."""
-        if self._commit_in_flight == 0 and self._pending_join_roles:
+        """Run deferred joins and wake clear_from() once the last delivery is done."""
+        if self._commit_in_flight:
+            return
+        if self._pending_join_roles:
             pending = list(self._pending_join_roles)
             self._pending_join_roles.clear()
             for role in pending:
                 self._do_role_join(role)
+        for waiter in self._idle_waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+        self._idle_waiters.clear()
 
     def _resolve_channel_play_start(
         self,
@@ -2368,7 +2397,7 @@ class PushStream:
         cache_key = self._build_transform_key(req, channel_id, role)
         cached: deque[CachedChunk] = self._role_chunk_cache.get(cache_key, deque())
 
-        if not cached:
+        if not cached or self._catchup_state.get(cache_key) == "catching_up":
             if cache_key in self._catchup_state:
                 self._catchup_roles.setdefault(cache_key, {})[role] = (
                     self.get_late_join_target_timestamp_us(role=role, channel_id=channel_id)
@@ -2880,6 +2909,8 @@ class PushStream:
                         if chunk.timestamp_us + chunk.duration_us > last_source_end_us
                     ]
                     if not new_pcm:
+                        if self._finish_catchups:
+                            break
                         try:
                             await asyncio.wait_for(signal.wait(), timeout=idle_timeout_s)
                         except TimeoutError:
@@ -3289,3 +3320,195 @@ class PushStream:
                 role.on_stream_end()
             else:
                 role.on_stream_clear()
+
+    def _seed_live_resamplers(
+        self, pipelines: list[tuple[AudioRequirements, UUID]], start_us: int
+    ) -> None:
+        """Create one live resampler per target shape and feed it the cached PCM from `start_us`.
+
+        Catch-ups that start afterwards hand off to these resamplers.
+        """
+        for req, channel_id in pipelines:
+            pcm_chunks = self._pcm_chunk_cache[channel_id.int]
+            if not pcm_chunks:
+                continue
+            source_format = AudioFormat(
+                sample_rate=pcm_chunks[-1].sample_rate,
+                bit_depth=pcm_chunks[-1].bit_depth,
+                channels=pcm_chunks[-1].channels,
+                sample_type=pcm_chunks[-1].sample_type,
+            )
+            target_format = _processing_format_for_roles(
+                source_format,
+                target_sample_rate=req.sample_rate,
+                target_bit_depth=req.bit_depth,
+                target_channels=req.channels,
+            )
+            resampler_key = _ResamplerKey(
+                channel_id=channel_id,
+                source_format=source_format,
+                target_sample_rate=req.sample_rate,
+                target_channels=req.channels,
+                target_bit_depth=target_format.bit_depth,
+                target_sample_type=target_format.sample_type,
+            )
+            if resampler_key in self._resamplers:
+                continue
+            state = _create_resampler_state(resampler_key, source_format, target_format)
+            self._cache_resampler(state)
+            for chunk in pcm_chunks:
+                if chunk.timestamp_us + chunk.duration_us > start_us and (
+                    chunk.sample_rate,
+                    chunk.bit_depth,
+                    chunk.channels,
+                    chunk.sample_type,
+                ) == (
+                    source_format.sample_rate,
+                    source_format.bit_depth,
+                    source_format.channels,
+                    source_format.sample_type,
+                ):
+                    _resample_pcm_standalone(
+                        state, chunk.pcm_data, source_format, chunk.timestamp_us
+                    )
+
+    async def clear_from(self, timestamp_us: int) -> bool:
+        """
+        Replace the audio committed from `timestamp_us` on and keep the audio before it.
+
+        Clients keep what they buffered before the cut, and the next commit_audio()
+        continues at the cut on the same timeline, without a new stream/start. Each
+        role is cleared from the start of its last chunk at or before the cut, and
+        the audio between that chunk start and the cut is sent again.
+
+        Waits for a running commit or flush and for late joiners that are still
+        catching up. Commits started meanwhile wait for the cut, which drops the
+        audio they prepared.
+        Returns False without sending or changing anything when the cut cannot be
+        made, so the caller can use clear() instead: the cut is not inside committed
+        audio, it is closer than a role's lead time, a channel has no PCM cache, or
+        a role cannot keep the audio before a cut. A client that does not know
+        `from_timestamp` drops all its audio, so only call this when every client
+        in the group handles it.
+        """
+        self._no_cut_waiting.clear()
+        try:
+            while not self._is_stopped:
+                if self._commit_in_flight:
+                    waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+                    self._idle_waiters.append(waiter)
+                    await waiter
+                elif self._catchup_tasks:
+                    self._finish_catchups = True
+                    self._signal_pcm_cache_update()
+                    try:
+                        await asyncio.wait(list(self._catchup_tasks.values()))
+                    finally:
+                        self._finish_catchups = False
+                else:
+                    break
+            return self._clear_from_now(timestamp_us)
+        finally:
+            self._no_cut_waiting.set()
+
+    def _clear_from_now(self, timestamp_us: int) -> bool:  # noqa: PLR0915
+        now_us = self._clock.now_us()
+        keys: dict[TransformKey, tuple[AudioRequirements, UUID, int, list[Role]]] = {}
+        reason = None
+        if self._is_stopped or self._flushed_generation == self._stream_generation:
+            reason = "the stream is stopped or flushed"
+        elif not any(timing_us > timestamp_us for timing_us in self._channel_timing.values()):
+            reason = "the cut is not inside committed audio"
+        audio_roles = [] if reason else self._get_audio_roles()
+        for _client, role in audio_roles:
+            req = role.get_audio_requirements()
+            if req is None:
+                continue
+            channel_id = req.channel_id or MAIN_CHANNEL
+            tkey = self._build_transform_key(req, channel_id, role)
+            if tkey not in keys:
+                chunk_start_us = max(
+                    (
+                        chunk.timestamp_us
+                        for chunk in self._role_chunk_cache.get(tkey, ())
+                        if chunk.timestamp_us <= timestamp_us
+                    ),
+                    default=None,
+                )
+                pcm_chunks = self._pcm_chunk_cache.get(channel_id.int)
+                if (
+                    chunk_start_us is None
+                    or not pcm_chunks
+                    # The catch-up starts encoding the resume lead before the chunk start.
+                    or pcm_chunks[0].timestamp_us
+                    > chunk_start_us - _resume_lead_us(req.transformer)
+                    or self._channel_timing.get(channel_id, 0) <= timestamp_us
+                ):
+                    reason = "the cut is not inside cached audio"
+                    break
+                keys[tkey] = (req, channel_id, chunk_start_us, [])
+            keys[tkey][3].append(role)
+            if not role.supports_timestamped_clear():
+                reason = f"the {role.role_family} role does not support it"
+                break
+            # The next commit moves the timeline past a cut that is below the send-ahead floor.
+            lead_us = max(
+                max(role.get_min_buffer_us(), role.get_required_lead_time_us())
+                + role.get_output_delay_us(),
+                self._role_send_ahead_us(role),
+            )
+            if keys[tkey][2] < now_us + lead_us:
+                reason = f"the cut is closer than the {role.role_family} role's lead time"
+                break
+        if reason is not None:
+            _LOGGER.debug("Not clearing from %s: %s", timestamp_us, reason)
+            return False
+
+        self._channel_buffers.clear()
+        self._historical_buffers.clear()
+        self._historical_start_us.clear()
+        for pcm_chunks in self._pcm_chunk_cache.values():
+            while pcm_chunks and pcm_chunks[-1].timestamp_us >= timestamp_us:
+                pcm_chunks.pop()
+            if pcm_chunks and pcm_chunks[-1].timestamp_us + pcm_chunks[-1].duration_us > (
+                timestamp_us
+            ):
+                pcm_chunks[-1] = _trim_pcm_chunk_end(pcm_chunks[-1], timestamp_us)
+        for channel_id, timing_us in self._channel_timing.items():
+            if timing_us > timestamp_us:
+                self._channel_timing[channel_id] = timestamp_us
+                self._channel_timing_residue[channel_id] = 0
+        self._resamplers.clear()
+        if keys:
+            self._seed_live_resamplers(
+                [(req, channel_id) for req, channel_id, _chunk_start_us, _roles in keys.values()],
+                min(
+                    chunk_start_us - _resume_lead_us(req.transformer)
+                    for req, _channel_id, chunk_start_us, _roles in keys.values()
+                ),
+            )
+        self._transform_ts_offset_us.clear()
+        for tkey in [tkey for tkey in self._role_chunk_cache if tkey not in keys]:
+            del self._role_chunk_cache[tkey]
+
+        for tkey, (req, channel_id, chunk_start_us, roles) in keys.items():
+            encode_start_us = chunk_start_us - _resume_lead_us(req.transformer)
+            cached = self._role_chunk_cache[tkey]
+            while cached and cached[-1].timestamp_us + cached[-1].duration_us > encode_start_us:
+                cached.pop()
+            for role in roles:
+                self._resume_at_us[role] = chunk_start_us
+                role.on_stream_clear_from(timestamp_us, chunk_start_us)
+            if encode_start_us >= timestamp_us:
+                # The cut is the chunk start, so there is nothing to encode again.
+                self._transform_last_input_end_us.pop(tkey, None)
+                if req.transformer is not None:
+                    with self._transformer_lock:
+                        req.transformer.reset()
+                continue
+            self._catchup_state[tkey] = "catching_up"
+            self._catchup_roles[tkey] = dict.fromkeys(roles)
+            task = create_task(self._start_catchup_encoding(roles[0], req, channel_id, tkey))
+            if not task.done():
+                self._catchup_tasks[tkey] = task
+        return True
