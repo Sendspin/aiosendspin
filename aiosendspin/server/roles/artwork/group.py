@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -25,6 +26,10 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Kept apart from the default executor so encodes don't queue ahead of audio work, and
+# bounded so many clients can't run more encodes at once.
+_ENCODE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sendspin-artwork")
 
 
 class ArtworkGroupRole(GroupRole):
@@ -139,7 +144,8 @@ class ArtworkGroupRole(GroupRole):
             assert channel_config.width is not None
             assert channel_config.height is not None
             assert channel_config.format is not None
-            img_data = await asyncio.to_thread(
+            encoded = asyncio.get_running_loop().run_in_executor(
+                _ENCODE_EXECUTOR,
                 self._process_and_encode_image,
                 # Pillow images are not safe to share across concurrent encode tasks.
                 image.copy(),
@@ -147,6 +153,13 @@ class ArtworkGroupRole(GroupRole):
                 channel_config.height,
                 channel_config.format,
             )
+            try:
+                img_data = await asyncio.shield(encoded)
+            except asyncio.CancelledError:
+                # Hold the send lock until the encode ends, so a replaced replay never queues
+                # a second image copy for the channel.
+                await asyncio.wait([encoded])
+                raise
             current = role.get_channel_configs().get(channel)
             if current is None or _encoding(current) != _encoding(channel_config):
                 # Reconfigured while encoding; the new configuration triggers its own send.
@@ -315,10 +328,10 @@ class ArtworkGroupRole(GroupRole):
 
         if image_aspect > target_aspect:
             new_width = target_width
-            new_height = int(target_width / image_aspect)
+            new_height = max(1, int(target_width / image_aspect))
         else:
             new_height = target_height
-            new_width = int(target_height * image_aspect)
+            new_width = max(1, int(target_height * image_aspect))
 
         resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
         letterboxed = Image.new("RGB", (target_width, target_height), (0, 0, 0))

@@ -9,6 +9,8 @@ This role handles artwork binary streaming to display clients:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
@@ -34,12 +36,14 @@ from aiosendspin.models.core import (
 from aiosendspin.models.types import ArtworkSource, PictureFormat
 from aiosendspin.server.roles.artwork.group import ArtworkGroupRole
 from aiosendspin.server.roles.base import Role
-from aiosendspin.util import create_task
+from aiosendspin.util import WARN_INTERVAL_S, create_task
 
 if TYPE_CHECKING:
     from aiosendspin.server.client import SendspinClient
 
 MAX_ARTWORK_CHANNELS = 4
+# Channels wider or taller than this are not streamed.
+MAX_ARTWORK_SIDE = 4096
 # A scheduled image is announced at most this long before its timestamp.
 MAX_ANNOUNCE_LEAD_US = 20_000_000
 
@@ -78,6 +82,7 @@ class ArtworkV1Role(Role):
         self._scheduled_announced: set[int] = set()
         self._transfer_task: asyncio.Task[None] | None = None
         self._queue_changed = asyncio.Event()
+        self._last_oversized_log_s: float | None = None
 
     @property
     def role_id(self) -> str:
@@ -328,6 +333,7 @@ class ArtworkV1Role(Role):
 
     def _apply_channels(self, channels: list[ArtworkChannel]) -> None:
         """Stream `channels`, re-announcing the stream when its configuration changed."""
+        channels = self._disable_oversized(channels)
         if not self._client.available:
             # Kept for the stream that starts once the client is available.
             self._channels = channels
@@ -350,6 +356,32 @@ class ArtworkV1Role(Role):
 
         self._channels = channels
         self._start_stream()
+
+    def _disable_oversized(self, channels: list[ArtworkChannel]) -> list[ArtworkChannel]:
+        """Set the source of channels larger than `MAX_ARTWORK_SIDE` to `none`."""
+        oversized = [
+            channel_num
+            for channel_num, channel in enumerate(channels)
+            if channel.source is not ArtworkSource.NONE
+            and max(channel.width or 0, channel.height or 0) > MAX_ARTWORK_SIDE
+        ]
+        if not oversized:
+            return channels
+        now_s = time.monotonic()
+        last_log_s = self._last_oversized_log_s
+        if last_log_s is None or now_s - last_log_s >= WARN_INTERVAL_S:
+            self._client._logger.warning(  # noqa: SLF001
+                "Not streaming artwork channels %s, larger than %d pixels per side",
+                oversized,
+                MAX_ARTWORK_SIDE,
+            )
+            self._last_oversized_log_s = now_s
+        return [
+            dataclasses.replace(channel, source=ArtworkSource.NONE)
+            if channel_num in oversized
+            else channel
+            for channel_num, channel in enumerate(channels)
+        ]
 
     def _start_stream(self) -> None:
         """Send stream/start for the current channels, then their current images."""
