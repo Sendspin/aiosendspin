@@ -884,7 +884,7 @@ class SendspinConnection:
                     (
                         role,
                         self._epoch_by_role[role],
-                        True,
+                        False,
                         message.payload.from_timestamp,
                         partial(self.send_role_message, role, message),
                     )
