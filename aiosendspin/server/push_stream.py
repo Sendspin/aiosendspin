@@ -850,6 +850,14 @@ class CachedPCMChunk:
     sample_type: Literal["int", "float"] = "int"
 
 
+def _resume_lead_us(encoder: AudioTransformer | None) -> int:
+    """Return how far before a resume point encoding starts so that a frame begins at it."""
+    if encoder is None:
+        return 0
+    # TODO: add lookahead_us to AudioTransformer in the next breaking release and read it directly
+    return -getattr(encoder, "lookahead_us", 0) % encoder.frame_duration_us
+
+
 def _trim_pcm_chunk_start(chunk: CachedPCMChunk, start_us: int) -> CachedPCMChunk:
     """Drop the frames of `chunk` that start before `start_us`."""
     frame_stride = chunk.bit_depth // 8 * chunk.channels
@@ -2373,7 +2381,7 @@ class PushStream:
                 channel_pcm_cache = self._pcm_chunk_cache.get(channel_id.int)
                 if channel_pcm_cache:
                     late_join_target_us = (
-                        resume_at_us
+                        resume_at_us - _resume_lead_us(req.transformer)
                         if resume_at_us is not None
                         else self.get_late_join_target_timestamp_us(
                             role=role,
@@ -2392,8 +2400,10 @@ class PushStream:
                             self._ensure_role_started(role)
                         return
 
+                # A format switch always catches up to resume where the old format ended.
                 if (
-                    not role.replay_from_pcm_cache()
+                    resume_at_us is None
+                    and not role.replay_from_pcm_cache()
                     and self._has_established_resampler_for(req, channel_id)
                     and self._skip_replay_keeps_join_near_playhead(channel_id, role)
                 ):
@@ -2796,6 +2806,7 @@ class PushStream:
         # this role's tkey will appear later and are safe to overwrite.
         established_resampler_keys = set(self._resamplers.keys())
 
+        resume_lead_us = _resume_lead_us(encoder)
         try:
             if encoder is not None:
                 encoder.reset()
@@ -2805,6 +2816,7 @@ class PushStream:
             resume_at_us = self._resume_at_us.get(role)
             if resume_at_us is not None:
                 target_ts = encode_start_ts = resume_at_us
+                encode_start_ts -= resume_lead_us
             else:
                 target_ts = self.get_late_join_target_timestamp_us(
                     role=role,
@@ -2820,7 +2832,7 @@ class PushStream:
                 if chunk.timestamp_us + chunk.duration_us > encode_start_ts
             ]
             if resume_at_us is not None and eligible:
-                eligible[0] = _trim_pcm_chunk_start(eligible[0], resume_at_us)
+                eligible[0] = _trim_pcm_chunk_start(eligible[0], encode_start_ts)
 
             if not eligible:
                 if self._channel_timing:

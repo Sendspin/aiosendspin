@@ -5409,6 +5409,66 @@ async def test_flush_audio_delivers_stream_shorter_than_one_encoder_frame(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_rate", "resume_before_end_us", "buffer_at_send_ahead", "reuse_reset_encoder"),
+    [
+        pytest.param(48_000, 0, False, False, id="at_cache_end"),
+        pytest.param(48_000, 10_000, False, False, id="in_cache"),
+        pytest.param(44_100, 10_000, False, False, id="in_cache_resampled"),
+        pytest.param(44_100, 0, True, False, id="steady_state_resampled"),
+        pytest.param(48_000, 0, False, True, id="reset_pooled_encoder"),
+    ],
+)
+async def test_switch_into_opus_starts_at_resume_point(
+    mock_loop: Any,
+    resume_before_end_us: int,
+    source_rate: int,
+    buffer_at_send_ahead: bool,  # noqa: FBT001
+    reuse_reset_encoder: bool,  # noqa: FBT001
+) -> None:
+    """The first Opus frame after a format change starts where the previous format ended."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    stream = PushStream(loop=mock_loop, clock=LoopClock(mock_loop), group=group)
+    pcm_format = AudioFormat(sample_rate=source_rate, bit_depth=16, channels=2)
+    pcm = bytes(source_rate * 25 // 1000 * 4)
+    for _ in range(4):
+        stream.prepare_audio(pcm, pcm_format)
+        await stream.commit_audio()
+    resume_at_us = (
+        role.received[-1].timestamp_us + role.received[-1].duration_us - resume_before_end_us
+    )
+    role.received.clear()
+    if buffer_at_send_ahead:
+        tail_us = stream._channel_timing[MAIN_CHANNEL]  # noqa: SLF001
+        mock_loop.time.return_value = (tail_us - stream._role_send_ahead_us(role)) / 1_000_000  # noqa: SLF001
+
+    transformer = group.transformer_pool.get_or_create(
+        OpusEncoder,
+        channel_id=MAIN_CHANNEL.int,
+        sample_rate=48_000,
+        bit_depth=16,
+        channels=2,
+        frame_duration_us=20_000,
+    )
+    if reuse_reset_encoder:
+        transformer.reset()
+    role._requirements = replace(  # noqa: SLF001
+        role._requirements,  # noqa: SLF001
+        transformer=transformer,
+        frame_duration_us=20_000,
+    )
+    stream.on_role_format_changed(role, resume_at_us=resume_at_us)
+    for _ in range(4):
+        stream.prepare_audio(pcm, pcm_format)
+        await stream.commit_audio()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    assert 0 <= role.received[0].timestamp_us - resume_at_us < 1_000_000 // source_rate
+
+
+@pytest.mark.asyncio
 async def test_flush_audio_defers_joins_until_tail_is_cached(mock_loop: Any) -> None:
     """A player joining while the tail is being flushed still receives the tail."""
     group = _DummyGroup(clients=[])

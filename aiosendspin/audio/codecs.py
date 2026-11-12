@@ -429,7 +429,7 @@ class OpusEncoder:
 
     @property
     def lookahead_us(self) -> int:
-        """Encoder pre-skip, valid once the encoder has been initialized."""
+        """Encoder pre-skip."""
         return self._lookahead_us
 
     @property
@@ -586,7 +586,6 @@ class OpusEncoder:
         self._first_input_timestamp_us = None
         self._chunks_encoded_total = 0
         self._last_input_timestamp_us = None
-        self._lookahead_us = 0
         self._dur_residue = 0
 
 
