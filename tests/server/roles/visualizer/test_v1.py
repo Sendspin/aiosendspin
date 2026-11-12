@@ -2077,3 +2077,46 @@ def test_request_format_partial_preserves_unchanged_fields() -> None:
     assert list(role._stream_config.types) == original_types  # noqa: SLF001
     assert role.get_buffer_tracker().capacity_bytes == original_buffer
     assert role._stream_config.spectrum == original_spectrum  # noqa: SLF001
+
+
+def test_stream_clear_from_sends_no_frame_before_the_cut_again() -> None:
+    """After a timestamped clear, re-delivered audio only emits frames from the cut on."""
+    client = _make_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    for index in range(4):
+        role.on_audio_chunk(_audio_chunk(1_000_000 + index * 25_000))
+    client.send_binary.reset_mock()
+
+    role.on_stream_clear_from(1_060_000, 1_050_000)
+    for index in range(2, 4):
+        role.on_audio_chunk(_audio_chunk(1_000_000 + index * 25_000))
+
+    clear = client.send_role_message.call_args.args[1]
+    assert isinstance(clear, StreamClearMessage)
+    assert clear.payload.from_timestamp == 1_060_000
+    frame_ts = [call.kwargs["timestamp_us"] for call in client.send_binary.call_args_list]
+    assert frame_ts
+    assert min(frame_ts) >= 1_060_000
+
+
+def test_stream_clear_from_drops_pending_beats_from_the_cut_on() -> None:
+    """A timestamped clear keeps the pending beats before the cut and drops the rest."""
+    client = _make_beat_client_stub()
+    role = VisualizerV1Role(client=client)
+    _connect(role)
+    role.on_stream_start()
+    role.append_beats([BeatTiming(1_500_000), BeatTiming(2_500_000), BeatTiming(3_500_000)])
+
+    role.on_stream_clear_from(2_500_000, 2_475_000)
+    client._server.clock.now_us.return_value = 4_000_000  # noqa: SLF001
+    role.on_audio_chunk(_audio_chunk(4_000_000))
+
+    assert [call.kwargs["timestamp_us"] for call in _beat_calls(client)] == [1_500_000]
+    clear = next(
+        call.args[1]
+        for call in client.send_role_message.call_args_list
+        if isinstance(call.args[1], StreamClearMessage)
+    )
+    assert clear.payload.from_timestamp <= 1_500_000

@@ -387,6 +387,17 @@ class Role(ABC):
     def on_stream_clear(self) -> None:  # noqa: B027
         """Handle seek/clear by discarding buffered audio."""
 
+    def supports_timestamped_clear(self) -> bool:
+        """Whether on_stream_clear_from() keeps the data buffered before a timestamp."""
+        return False
+
+    def on_stream_clear_from(self, cut_us: int, chunk_start_us: int) -> None:  # noqa: B027
+        """Handle a clear of the audio from `cut_us` on, while the audio before it is kept.
+
+        The role's chunks are delivered again from `chunk_start_us`, the start of
+        the last chunk it received at or before the cut.
+        """
+
     def on_stream_end(self) -> None:  # noqa: B027
         """Handle stream stop."""
 

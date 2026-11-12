@@ -337,3 +337,18 @@ def test_append_beat_schedule_snapshots_caller_list() -> None:
 
     broadcast = member.append_beats.call_args.args[0]
     assert [b.timestamp_us for b in broadcast] == [1, 2]
+
+
+def test_clear_beat_schedule_from_keeps_earlier_beats() -> None:
+    """clear_beat_schedule(from_us=...) drops later beats and leaves the members alone."""
+    vgr = VisualizerGroupRole(_make_group_stub())
+    member = _make_member_stub()
+    vgr.subscribe(member)
+    vgr.append_beat_schedule([BeatTiming(1_000_000), BeatTiming(2_000_000), BeatTiming(3_000_000)])
+    member.clear_beats.reset_mock()
+
+    vgr.clear_beat_schedule(from_us=2_000_000)
+    vgr.append_beat_schedule([BeatTiming(2_200_000)])
+
+    assert [beat.timestamp_us for beat in vgr.current_beats] == [1_000_000, 2_200_000]
+    member.clear_beats.assert_not_called()

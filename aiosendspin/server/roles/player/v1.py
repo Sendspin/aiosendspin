@@ -422,6 +422,26 @@ class PlayerV1Role(Role):
         if self._buffer_tracker is not None:
             self._buffer_tracker.reset()
 
+    def supports_timestamped_clear(self) -> bool:
+        """Player role keeps the audio buffered before a timestamped stream/clear."""
+        return True
+
+    def on_stream_clear_from(self, cut_us: int, chunk_start_us: int) -> None:  # noqa: ARG002
+        """Send stream/clear from the chunk that holds the cut and forget the audio after it."""
+        if self._sent_end_us is not None:
+            self._sent_end_us = min(self._sent_end_us, chunk_start_us)
+        if not self.has_connection():
+            return
+
+        if self._stream_started:
+            self.send_message(
+                StreamClearMessage(
+                    payload=StreamClearPayload(roles=["player"], from_timestamp=chunk_start_us)
+                )
+            )
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.discard_from(chunk_start_us)
+
     def on_stream_end(self) -> None:
         """Send stream/end for an active stream and reset state."""
         if not self.has_connection():
