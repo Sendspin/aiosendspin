@@ -621,5 +621,8 @@ async def test_timestamped_stream_clear_drops_only_later_held_binary() -> None:
     conn._initial_state_received = True  # noqa: SLF001
     conn._flush_pending_binary()  # noqa: SLF001
 
-    queued = [entry.binary.data for _, _, entry in conn._role_queues["player"] if entry.binary]  # noqa: SLF001
-    assert queued == [b"kept"]
+    queued = [
+        entry.binary.data if entry.binary else "clear"
+        for _, _, entry in sorted(conn._role_queues["player"])  # noqa: SLF001
+    ]
+    assert queued == [b"kept", "clear"]

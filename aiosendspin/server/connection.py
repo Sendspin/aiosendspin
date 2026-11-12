@@ -878,6 +878,18 @@ class SendspinConnection:
         """
         if isinstance(message, StreamClearMessage) and message.payload.from_timestamp is not None:
             self._drop_pending_binary_from(message.payload.roles, message.payload.from_timestamp)
+            if any(pending[0] == role for pending in self._pending_binary):
+                # Keep the clear behind the earlier binary that is held for the client's state.
+                self._pending_binary.append(
+                    (
+                        role,
+                        self._epoch_by_role[role],
+                        True,
+                        message.payload.from_timestamp,
+                        partial(self.send_role_message, role, message),
+                    )
+                )
+                return
         elif isinstance(message, StreamClearMessage | StreamEndMessage):
             self.drop_pending_binary(message.payload.roles)
 

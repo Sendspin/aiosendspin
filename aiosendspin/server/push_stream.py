@@ -3330,6 +3330,8 @@ class PushStream:
         """
         for req, channel_id in pipelines:
             pcm_chunks = self._pcm_chunk_cache[channel_id.int]
+            if not pcm_chunks:
+                continue
             source_format = AudioFormat(
                 sample_rate=pcm_chunks[-1].sample_rate,
                 bit_depth=pcm_chunks[-1].bit_depth,
@@ -3449,8 +3451,13 @@ class PushStream:
             if not role.supports_timestamped_clear():
                 reason = f"the {role.role_family} role does not support it"
                 break
-            lead_us = max(role.get_min_buffer_us(), role.get_required_lead_time_us())
-            if keys[tkey][2] < now_us + lead_us + role.get_output_delay_us():
+            # The next commit moves the timeline past a cut that is below the send-ahead floor.
+            lead_us = max(
+                max(role.get_min_buffer_us(), role.get_required_lead_time_us())
+                + role.get_output_delay_us(),
+                self._role_send_ahead_us(role),
+            )
+            if keys[tkey][2] < now_us + lead_us:
                 reason = f"the cut is closer than the {role.role_family} role's lead time"
                 break
         if reason is not None:

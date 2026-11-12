@@ -6008,3 +6008,38 @@ async def test_clear_from_cuts_the_visualizer_at_the_cut_itself(mock_loop: Any) 
         for call in visualizer_client.send_binary.call_args_list[frames_before:]
     ]
     assert cut_us <= min(resent) < cut_us + 25_000
+
+
+@pytest.mark.asyncio
+async def test_clear_from_at_the_first_cached_chunk(mock_loop: Any) -> None:
+    """A cut at the start of the oldest cached audio replaces all of it."""
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(4):
+        stream.prepare_audio(_tone(1), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+
+    assert await stream.clear_from(starts[0]) is True
+
+    stream.prepare_audio(_tone(2), _FORMAT_48K)
+    assert await stream.commit_audio() == starts[0]
+    assert _client_buffer(conn) == [(starts[0], _tone(2))]
+
+
+@pytest.mark.asyncio
+async def test_clear_from_refuses_a_cut_below_the_send_ahead_floor(mock_loop: Any) -> None:
+    """A cut the next commit would have to move past is refused."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    role._min_buffer_us = DEFAULT_INITIAL_DELAY_US  # noqa: SLF001
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    # Past the role's lead time, but inside the frame its encoder can hold back.
+    mock_loop.time.return_value = (starts[30] - DEFAULT_INITIAL_DELAY_US - 10_000) / 1_000_000
+
+    assert await stream.clear_from(starts[30]) is False
