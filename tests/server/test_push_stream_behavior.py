@@ -6043,3 +6043,37 @@ async def test_clear_from_refuses_a_cut_below_the_send_ahead_floor(mock_loop: An
     mock_loop.time.return_value = (starts[30] - DEFAULT_INITIAL_DELAY_US - 10_000) / 1_000_000
 
     assert await stream.clear_from(starts[30]) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_rate", [44_100, 96_000])
+@pytest.mark.parametrize("offset_us", [0, 100])
+async def test_clear_from_near_a_resampled_chunk_start(
+    mock_loop: Any, new_rate: int, offset_us: int
+) -> None:
+    """A resampled player whose chunk starts at or just before the cut gets no gap."""
+    group = _DummyGroup(clients=[])
+    role = _pcm_passthrough_role(group)
+    other = _pcm_passthrough_role(group, frame_duration_us=20_000)
+    stream = _group_stream(mock_loop, group)
+
+    async def commit(rate: int, chunks: int) -> None:
+        pcm_format = AudioFormat(sample_rate=rate, bit_depth=32, channels=2, sample_type="float")
+        for _ in range(chunks):
+            stream.prepare_audio(np.full(rate // 10 * 2, 0.1, dtype="<f4").tobytes(), pcm_format)
+            await stream.commit_audio()
+
+    await commit(44_100, 120)
+    chunk_us = role.received[401].timestamp_us
+    assert chunk_us not in {chunk.timestamp_us for chunk in other.received}
+    cut_us = chunk_us + offset_us
+
+    assert await stream.clear_from(cut_us) is True
+    await commit(new_rate, 20)
+    await stream.flush_audio()
+
+    assert role.clears == [chunk_us - 25_000]
+    for received in (role.received, other.received):
+        for previous, chunk in pairwise(received):
+            gap_us = chunk.timestamp_us - previous.timestamp_us - previous.duration_us
+            assert abs(gap_us) <= 2 * 1_000_000 / 44_100

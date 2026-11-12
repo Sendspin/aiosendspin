@@ -3427,15 +3427,29 @@ class PushStream:
             channel_id = req.channel_id or MAIN_CHANNEL
             tkey = self._build_transform_key(req, channel_id, role)
             if tkey not in keys:
+                pcm_chunks = self._pcm_chunk_cache.get(channel_id.int) or ()
+                source_rate = next(
+                    (
+                        chunk.sample_rate
+                        for chunk in reversed(pcm_chunks)
+                        if chunk.timestamp_us < timestamp_us
+                    ),
+                    req.sample_rate,
+                )
+                # The live resampler resumes its hold-back before the cut, in audio sent again.
+                hold_back_us = (
+                    _resampler_hold_back_us(source_rate, req.sample_rate)
+                    if source_rate != req.sample_rate
+                    else 0
+                )
                 chunk_start_us = max(
                     (
                         chunk.timestamp_us
                         for chunk in self._role_chunk_cache.get(tkey, ())
-                        if chunk.timestamp_us <= timestamp_us
+                        if chunk.timestamp_us <= timestamp_us - hold_back_us
                     ),
                     default=None,
                 )
-                pcm_chunks = self._pcm_chunk_cache.get(channel_id.int)
                 if (
                     chunk_start_us is None
                     or not pcm_chunks
