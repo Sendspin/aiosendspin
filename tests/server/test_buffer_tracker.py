@@ -366,3 +366,16 @@ def test_reset_empties_count_and_retained_chunks() -> None:
 
     assert tracker.buffered_bytes == 0
     assert tracker.oversize_logged is False
+
+
+def test_discard_from_stops_counting_only_later_chunks() -> None:
+    """discard_from() keeps the chunks that start before the timestamp."""
+    tracker = BufferTracker(clock=_FakeClock(), client_id="test", capacity_bytes=10000)
+    tracker.register(end_time_us=100_000, byte_count=1000, duration_us=100_000)
+    tracker.register(end_time_us=200_000, byte_count=2000, duration_us=100_000)
+    tracker.register(end_time_us=300_000, byte_count=4000, duration_us=100_000)
+
+    tracker.discard_from(100_000)
+
+    assert tracker.buffered_bytes == 1000
+    assert tracker.buffered_duration_us == 100_000
