@@ -3857,6 +3857,8 @@ class SendspinConnection:
             if self.is_encrypted:
                 self._subscribe_activity_events()
             self._start_message_loops()
+            if self.is_encrypted and self._url is not None and self._client is not None:
+                self._server._run_queued_pairing(self._url, self._client.client_id, self)  # noqa: SLF001
             await self._connection_done.wait()
         except HandshakeAbortedError as exc:
             self._logger.debug("Noise handshake aborted: %s", exc)
