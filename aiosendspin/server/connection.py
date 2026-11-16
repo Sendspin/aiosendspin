@@ -931,23 +931,36 @@ class SendspinConnection:
 
     def _supersede_queued_stream(self, role: str) -> bool:
         """Drop queued stream/start and stream/clear, and return whether a stream/end is owed."""
-        if role_queue := self._role_queues.get(role):
-            kept = [
-                item
-                for item in role_queue
-                if not isinstance(item[2].json_message, StreamStartMessage | StreamClearMessage)
-            ]
-            self._queue_size = max(self._queue_size - (len(role_queue) - len(kept)), 0)
-            if kept:
-                heapq.heapify(kept)
-                self._role_queues[role] = kept
-            else:
-                del self._role_queues[role]
-                if drained := self._role_drained.pop(role, None):
-                    drained.set()
-            if any(isinstance(item[2].json_message, StreamEndMessage) for item in kept):
-                return False
+        self._take_queued_messages(role, (StreamStartMessage, StreamClearMessage))
+        if any(
+            isinstance(item[2].json_message, StreamEndMessage)
+            for item in self._role_queues.get(role, ())
+        ):
+            return False
         return role in self._streaming_roles
+
+    def _take_queued_messages(
+        self, role: str, message_types: tuple[type[ServerMessage], ...]
+    ) -> list[ServerMessage]:
+        """Remove a role's queued JSON messages of ``message_types`` and return them in order."""
+        role_queue = self._role_queues.get(role)
+        if not role_queue:
+            return []
+        taken = [item for item in role_queue if isinstance(item[2].json_message, message_types)]
+        if not taken:
+            return []
+        kept = [item for item in role_queue if not isinstance(item[2].json_message, message_types)]
+        self._queue_size = max(self._queue_size - len(taken), 0)
+        if kept:
+            heapq.heapify(kept)
+            self._role_queues[role] = kept
+        else:
+            del self._role_queues[role]
+            if drained := self._role_drained.pop(role, None):
+                drained.set()
+        return [
+            message for _, _, entry in sorted(taken) if (message := entry.json_message) is not None
+        ]
 
     def send_message(self, message: ServerMessage) -> None:
         """Enqueue a non-role JSON message (sent in FIFO order, not tied to any role)."""
