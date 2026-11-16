@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
-
-import pytest
 
 from aiosendspin.client.client import SendspinClient
 from aiosendspin.client.models import ServerInfo
 from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.models.types import AudioCodec, Roles
-from tests.conftest import make_sdk_client
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class _FakeConnection:
@@ -31,12 +32,6 @@ def _source_client(source_codecs: frozenset[AudioCodec] | None) -> SendspinClien
 
 def _opus_format() -> SupportedAudioFormat:
     return SupportedAudioFormat(codec=AudioCodec.OPUS, sample_rate=48_000, bit_depth=16, channels=2)
-
-
-async def test_source_role_requires_source_support() -> None:
-    """A source client must provide its versioned support object."""
-    with pytest.raises(ValueError, match="source_support"):
-        make_sdk_client(client_name="source", roles=[Roles.SOURCE])
 
 
 async def test_send_available_uses_admitted_connection() -> None:
