@@ -34,7 +34,7 @@ from aiosendspin.models.player import (
     PlayerStatePayload,
     SupportedAudioFormat,
 )
-from aiosendspin.models.source import ClientHelloSourceSupport, SourceStatePayload
+from aiosendspin.models.source import SourceStatePayload
 from aiosendspin.models.types import (
     ArtworkSource,
     AudioCodec,
@@ -44,6 +44,7 @@ from aiosendspin.models.types import (
     PlaybackStateType,
     PlayerCommand,
     Roles,
+    SignalState,
 )
 from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, VisualizerStatePayload
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
@@ -98,7 +99,6 @@ def _hello(roles: list[str], *, legacy: bool = False) -> ClientHelloPayload:
             supported_commands=[] if legacy else None,
         ),
         artwork_support=ClientHelloArtworkSupport(channels=[_ARTWORK_CHANNEL]) if legacy else None,
-        source_support=ClientHelloSourceSupport(),
         visualizer_support=ClientHelloVisualizerSupport(
             buffer_capacity=10_000,
             rate_max=30 if legacy else None,
@@ -613,6 +613,18 @@ async def test_strict_server_waits_for_a_late_initial_state_without_a_deadline()
 
 
 @pytest.mark.asyncio
+async def test_strict_server_activates_source_without_a_support_object() -> None:
+    """A client/hello listing source@v1 without source@v1_support activates the role."""
+    conn, _fake = await _connect(
+        _strict_hello(["source@v1"]),
+        send_state=False,
+        category=PskCategory.LONG_TERM,
+        server=_strict_server(),
+    )
+    assert isinstance(_client(conn).role("source@v1"), SourceV1Role)
+
+
+@pytest.mark.asyncio
 async def test_strict_server_holds_a_reactivated_role_without_a_deadline() -> None:
     """A strict server keeps a re-added player held until its client/state object arrives."""
     conn, _fake = await _connect(_strict_hello([Roles.PLAYER.value]), server=_strict_server())
@@ -755,7 +767,9 @@ async def test_reactivated_source_start_waits_for_its_client_state() -> None:
         with patch.object(conn, "_flag_noncompliance") as flag:
             await conn._handle_client_state(  # noqa: SLF001
                 ClientStatePayload(
-                    available=True, player=_PLAYER_STATE, source=SourceStatePayload()
+                    available=True,
+                    player=_PLAYER_STATE,
+                    source=SourceStatePayload(signal=SignalState.ABSENT),
                 )
             )
         flag.assert_not_called()

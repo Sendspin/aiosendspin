@@ -16,10 +16,14 @@ from aiosendspin.models.source import (
     ClientStreamStartSource,
     SourceStatePayload,
 )
-from aiosendspin.models.types import AudioCodec, BinaryMessageType, Roles
+from aiosendspin.models.types import AudioCodec, BinaryMessageType, Roles, SignalState
 from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.server.compliance import ClientComplianceError
-from aiosendspin.server.roles.source import SourceStreamEndedEvent, SourceStreamStartedEvent
+from aiosendspin.server.roles.source import (
+    SourceSignalChangedEvent,
+    SourceStreamEndedEvent,
+    SourceStreamStartedEvent,
+)
 from aiosendspin.server.roles.source.v1 import SourceV1Role
 from tests.server.test_role_activation import _PLAYER_STATE, _client, _connect, _hello
 
@@ -45,9 +49,11 @@ _INVALID_START = ClientStreamStartMessage(
 _CHUNK = pack_binary_header_raw(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 1) + bytes(4)
 
 
-def _state(*, available: bool = True) -> ClientStatePayload:
+def _state(
+    *, available: bool = True, signal: SignalState = SignalState.ABSENT
+) -> ClientStatePayload:
     return ClientStatePayload(
-        available=available, player=_PLAYER_STATE, source=SourceStatePayload()
+        available=available, player=_PLAYER_STATE, source=SourceStatePayload(signal=signal)
     )
 
 
@@ -93,8 +99,13 @@ class _Source:
     def chunk(self) -> None:
         self.conn._route_inbound_binary(_CHUNK)  # noqa: SLF001
 
-    async def state(self, *, available: bool = True) -> None:
-        await self.conn._handle_client_state(_state(available=available))  # noqa: SLF001
+    async def state(
+        self, *, available: bool = True, signal: SignalState = SignalState.ABSENT
+    ) -> None:
+        await self.conn._handle_client_state(_state(available=available, signal=signal))  # noqa: SLF001
+
+    def signals(self) -> list[SignalState]:
+        return [e.signal for e in self.events if isinstance(e, SourceSignalChangedEvent)]
 
     async def activate(self, roles: list[str]) -> None:
         self.conn._send_activation(roles)  # noqa: SLF001
@@ -159,6 +170,40 @@ async def test_start_crossing_role_removal_is_tolerated_until_its_end() -> None:
 
     with pytest.raises(ClientComplianceError):
         source.chunk()
+
+
+@pytest.mark.asyncio
+async def test_declined_start_authorizes_no_later_opening() -> None:
+    """A client-stream/end with no input stream open declines the start, which then lapses."""
+    source = await _source()
+    await source.send_start()
+    source.strict()
+
+    await source.stream_end()
+    assert source.stream_events() == []
+
+    with pytest.raises(ClientComplianceError):
+        await source.stream_start()
+
+
+@pytest.mark.asyncio
+async def test_first_signal_after_availability_returns_is_surfaced() -> None:
+    """The signal a client reports on becoming available again counts as a change."""
+    source = await _source()
+    await source.state(signal=SignalState.PRESENT)
+    await source.state(available=False, signal=SignalState.PRESENT)
+    startable: list[bool] = []
+    source.client.add_event_listener(
+        lambda _client, event: (
+            startable.append(source.role.can_start)
+            if isinstance(event, SourceSignalChangedEvent)
+            else None
+        )
+    )
+    await source.state(available=True, signal=SignalState.PRESENT)
+
+    assert source.signals() == [SignalState.ABSENT, SignalState.PRESENT, SignalState.PRESENT]
+    assert startable == [True]
 
 
 @pytest.mark.asyncio

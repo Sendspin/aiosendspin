@@ -164,7 +164,7 @@ class RepeatMode(Enum):
 
 
 class SignalState(Enum):
-    """Line-sensing/signal presence reported by a source that supports it."""
+    """Whether a source has input audio to offer."""
 
     PRESENT = "present"
     ABSENT = "absent"

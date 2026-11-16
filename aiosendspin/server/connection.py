@@ -459,7 +459,8 @@ class SendspinConnection:
         self._declared_activities: list[Activity] | None = None
         # Activities of the pairing server/activate, until the next activation replaces it.
         self._pairing_activities: list[Activity] | None = None
-        # Source start commands sent that no client-stream/start has opened a stream for yet.
+        # Source start commands sent that no client-stream/start has opened a stream for
+        # and no client-stream/end has declined yet.
         # Each is counted: a start crossing a stop or role removal can still open a stream.
         self._source_starts_pending = 0
         # Whether the client's input stream is open; stop, unavailability and role
@@ -1694,6 +1695,9 @@ class SendspinConnection:
             self._flag_legacy_artwork_wire(client_info.artwork_support)
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
+        # DEPRECATED(spec-pr-335): remove in aiosendspin <version>
+        if client_info.source_support is not None:
+            self._flag_noncompliance("client/hello sent the removed source@v1_support")
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
         visualizer_support = client_info.visualizer_support
         if visualizer_support is not None and visualizer_support.has_stream_config:
@@ -3064,6 +3068,9 @@ class SendspinConnection:
             self._flag_superseded_message_type(message.type)
             if message.payload_missing:
                 self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+            if not self._source_input_open and self._source_starts_pending:
+                # A client-stream/end with no input stream open declines a start.
+                self._source_starts_pending -= 1
             self._source_input_open = False
             for role in self._client.active_roles:
                 role.on_client_stream_end()

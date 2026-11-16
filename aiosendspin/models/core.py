@@ -374,8 +374,9 @@ class ClientHelloPayload(SendspinModel):
     """Roles whose support object was provided without listing the role in
     ``supported_roles`` (dropped during parse), recorded for the server to flag.
     Not part of the wire schema (omitted when None)."""
+    # DEPRECATED(spec-pr-335): remove in aiosendspin <version>
     source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
-    """Source support configuration."""
+    """Removed source support object, still parsed from older clients."""
     missing_support_roles: list[str] | None = None
     """Listed role versions whose required support object is missing, recorded for the
     server to flag and never activate. Not part of the wire schema (omitted when None)."""
@@ -494,10 +495,8 @@ class ClientHelloPayload(SendspinModel):
                 unlisted.append("visualizer@_draft_r1")
             self.visualizer_draft_r1_support = None
 
-        source_role_supported = Roles.SOURCE.value in self.supported_roles
-        if source_role_supported and self.source_support is None:
-            missing.append(Roles.SOURCE.value)
-        if not source_role_supported:
+        # DEPRECATED(spec-pr-335): remove in aiosendspin <version>
+        if Roles.SOURCE.value not in self.supported_roles:
             if self.source_support is not None:
                 unlisted.append(Roles.SOURCE.value)
             self.source_support = None

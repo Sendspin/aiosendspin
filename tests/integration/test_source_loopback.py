@@ -15,8 +15,6 @@ from aiosendspin.clock import RawMonotonicClock
 from aiosendspin.models.core import ClientStatePayload
 from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.models.source import (
-    ClientHelloSourceFeatures,
-    ClientHelloSourceSupport,
     ClientStreamStartPayload,
     ClientStreamStartSource,
     SourceStatePayload,
@@ -43,13 +41,6 @@ class _ServerSideClient:
 
     def __init__(self) -> None:
         self.events: list[Any] = []
-
-        class _Info:
-            source_support = ClientHelloSourceSupport(
-                features=ClientHelloSourceFeatures(line_sense=True)
-            )
-
-        self.info = _Info()
         self.connection = _ServerSideConnection()
         self.available = True
         self.sent: list[Any] = []
