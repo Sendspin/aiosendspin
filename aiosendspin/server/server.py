@@ -627,7 +627,8 @@ class SendspinServer:
         ``pairing_attempt`` carries an operator-initiated pairing intent for this dial;
         when a dial task already exists it is queued for that task's next dial. When the
         attempt's client (its ``client_id``, or the client known at ``url``) is connected,
-        the attempt runs on that connection instead and nothing is dialed.
+        the attempt runs on that connection instead and nothing is dialed. It is dropped when
+        that connection is already in a pairing attempt.
 
         A ``PLAYBACK`` reason applies to the next connection only. Later reconnects use
         ``DISCOVERY``.
@@ -727,12 +728,11 @@ class SendspinServer:
         client_id = attempt.client_id or self.get_client_id_for_url(url)
         client = self.get_client(client_id) if client_id is not None else None
         connection = client.connection if client is not None else None
-        if (
-            connection is None
-            or connection._disconnecting  # noqa: SLF001
-            or connection._pairing_attempt is not None  # noqa: SLF001
-        ):
+        if connection is None or connection._disconnecting:  # noqa: SLF001
             return False
+        if connection._pairing_attempt is not None:  # noqa: SLF001
+            logger.debug("Dropping pairing attempt: client %s is already pairing", client_id)
+            return True
         create_task(self._pair_in_background(connection, attempt))
         return True
 

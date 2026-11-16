@@ -4571,7 +4571,7 @@ async def test_connect_with_pairing_runs_on_a_connected_client(wait: bool) -> No
 
 
 async def test_connect_with_pairing_leaves_a_running_attempt_alone() -> None:
-    """A connect call carrying a pairing attempt does not break an attempt already running."""
+    """A connect call with an attempt for a pairing client neither dials nor breaks its attempt."""
     server = _make_server(InMemoryServerPairingStore())
     identity = Identity.generate()
     displayed = asyncio.Event()
@@ -4612,6 +4612,7 @@ async def test_connect_with_pairing_leaves_a_running_attempt_alone() -> None:
                     client_id=identity.peer_id,
                 ),
             )
+            assert "ws://127.0.0.1:9/sendspin" not in server._connection_tasks  # noqa: SLF001
             await asyncio.sleep(0.1)
 
             assert not running.done()
