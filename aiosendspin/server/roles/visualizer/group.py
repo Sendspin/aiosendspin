@@ -156,14 +156,21 @@ class VisualizerGroupRole(GroupRole):
             if isinstance(role, VisualizerRoleProtocol):
                 role.append_beats(new_segment)
 
-    def clear_beat_schedule(self) -> None:
+    def clear_beat_schedule(self, *, from_us: int | None = None) -> None:
         """Drop the stored schedule and broadcast a clear marker.
 
         Also resets availability to `PENDING` — each track starts fresh,
         so a previous `UNAVAILABLE` declaration does not silently
         block the next track's schedule. Server can redeclare
         `UNAVAILABLE` after the next `append_beat_schedule` if needed.
+
+        With `from_us`, only the stored beats at or after it are dropped and
+        nothing is broadcast. Use it after `PushStream.clear_from()`, which
+        already drops those beats from the roles.
         """
+        if from_us is not None:
+            self._current_beats = [b for b in self._current_beats if b.timestamp_us < from_us]
+            return
         self._current_beats = []
         self._beat_availability = BeatAvailability.PENDING
         for role in list(self._members):

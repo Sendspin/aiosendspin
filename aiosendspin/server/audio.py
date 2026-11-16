@@ -297,6 +297,16 @@ class BufferTracker:
         if chunk is self._transmitting:
             self._transmitting = None
 
+    def discard_from(self, timestamp_us: int) -> None:
+        """Stop counting the chunks that start at or after `timestamp_us`."""
+        self.buffered_chunks = deque(
+            chunk
+            for chunk in self.buffered_chunks
+            if chunk.end_time_us - chunk.duration_us < timestamp_us
+        )
+        self.buffered_bytes = sum(chunk.byte_count for chunk in self.buffered_chunks)
+        self.buffered_duration_us = sum(chunk.duration_us for chunk in self.buffered_chunks)
+
     def reset(self) -> None:
         """Clear all tracked chunks and reset counters to zero."""
         self.buffered_chunks.clear()

@@ -158,6 +158,8 @@ class VisualizerV1Role(Role):
         # interleave with audio-chunk-driven periodic frames to satisfy
         # it. None means the cursor has not been primed yet.
         self._last_wire_emit_ts_us: int | None = None
+        # Cut of the last timestamped clear. Frames before it were sent before the clear.
+        self._clear_from_us: int | None = None
         # Beat availability for the current source. UNAVAILABLE drops
         # `beat` from the negotiated set and discards pending beats.
         self._beat_availability: BeatAvailability = BeatAvailability.PENDING
@@ -327,6 +329,7 @@ class VisualizerV1Role(Role):
         self._pending_beats.clear()
         self._has_beats_landed = False
         self._last_wire_emit_ts_us = None
+        self._clear_from_us = None
         self._beat_availability = BeatAvailability.PENDING
         self._cancel_release_timer()
         self._pending_frames.clear()
@@ -410,6 +413,8 @@ class VisualizerV1Role(Role):
             return
         end_time_us = chunk.timestamp_us + chunk.duration_us
         for frame in self._extractor.process_chunk(chunk.data, chunk.timestamp_us):
+            if self._clear_from_us is not None and frame.timestamp_us < self._clear_from_us:
+                continue
             self._drain_beats_up_to(frame.timestamp_us)
             self._emit_frame(frame, end_time_us=end_time_us, duration_us=chunk.duration_us)
 
@@ -721,6 +726,7 @@ class VisualizerV1Role(Role):
         self._pending_frames.clear()
         self._rearm_warmup_holdback()
         self._last_wire_emit_ts_us = None
+        self._clear_from_us = None
         if self._stream_started:
             self.send_message(StreamClearMessage(payload=StreamClearPayload(roles=["visualizer"])))
         self.reset_binary_timing()
@@ -730,6 +736,35 @@ class VisualizerV1Role(Role):
             # `beat` is no longer in the negotiated types until a fresh
             # schedule arrives; tell the client.
             self._reissue_stream_start()
+
+    def supports_timestamped_clear(self) -> bool:
+        """Visualizer role keeps the data buffered before a timestamped stream/clear."""
+        return True
+
+    def on_stream_clear_from(self, cut_us: int, chunk_start_us: int) -> None:  # noqa: ARG002
+        """Send stream/clear from the cut and drop the frames and beats queued after it.
+
+        Frames and beats before the cut that are still held back are sent after
+        the clear, so it starts right after the last timestamp sent when that is earlier.
+        """
+        if self._extractor is not None:
+            self._extractor.reset()
+        self._pending_beats = deque(b for b in self._pending_beats if b.timestamp_us < cut_us)
+        self._pending_frames = deque(f for f in self._pending_frames if f[0] < cut_us)
+        self._clear_from_us = cut_us
+        from_us = cut_us
+        if self._last_wire_emit_ts_us is not None:
+            # The client discards everything from the cut on, so the cursor may move back to it.
+            self._last_wire_emit_ts_us = min(self._last_wire_emit_ts_us, cut_us - 1)
+            from_us = self._last_wire_emit_ts_us + 1
+        if self._stream_started:
+            self.send_message(
+                StreamClearMessage(
+                    payload=StreamClearPayload(roles=["visualizer"], from_timestamp=from_us)
+                )
+            )
+        if self._buffer_tracker is not None:
+            self._buffer_tracker.discard_from(from_us)
 
     def on_stream_end(self) -> None:
         """End the visualizer stream and reset state.
@@ -742,6 +777,7 @@ class VisualizerV1Role(Role):
         self._pending_beats.clear()
         self._has_beats_landed = False
         self._last_wire_emit_ts_us = None
+        self._clear_from_us = None
         self._cancel_release_timer()
         self._pending_frames.clear()
         self._holdback_active = False
