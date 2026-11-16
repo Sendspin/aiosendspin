@@ -112,7 +112,6 @@ from aiosendspin.models.source import (
 from aiosendspin.models.types import (
     CLOSING_ABORT_REASONS,
     Activity,
-    AudioCodec,
     BinaryMessageType,
     ClientMessage,
     ConnectionReason,
@@ -1662,11 +1661,6 @@ class SendspinConnection:
                 "client/hello sent a mac_address not in lowercase colon-separated form"
             )
         player_support = client_info.player_support
-        if player_support is not None and not any(
-            fmt.codec in (AudioCodec.FLAC, AudioCodec.PCM)
-            for fmt in player_support.supported_formats
-        ):
-            self._flag_noncompliance("client/hello player@v1_support listed neither flac nor pcm")
         if client_info.legacy_support_keys_used:
             self._flag_noncompliance(
                 "client/hello used unversioned support keys: "

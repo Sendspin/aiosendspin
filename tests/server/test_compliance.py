@@ -401,9 +401,6 @@ async def test_hello_wire_type_deviation_is_flagged_before_attach(
         assert f"[unknown-client] non-compliant client Kitchen: {reason}" in caplog.messages
 
 
-_OPUS_FORMAT = {"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
-
-
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
@@ -416,14 +413,6 @@ _OPUS_FORMAT = {"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth
             {"supported_roles": ["controller@v1", "metadata"]},
             "client/hello listed roles not of the form role@version",
             id="unversioned-role",
-        ),
-        pytest.param(
-            {
-                "supported_roles": ["player@v1"],
-                "player@v1_support": {"supported_formats": [_OPUS_FORMAT], "buffer_capacity": 1},
-            },
-            "client/hello player@v1_support listed neither flac nor pcm",
-            id="opus-only-player",
         ),
         pytest.param(
             {
@@ -517,6 +506,35 @@ async def test_strict_server_rejects_hello_deviation_before_attach(
 
     assert str(excinfo.value) == reason
     assert server.get_client("dev") is None
+
+
+@pytest.mark.asyncio
+async def test_strict_server_accepts_opus_only_player() -> None:
+    """A player listing only opus formats passes the strict hello checks."""
+    server = _make_server(allow_noncompliant_clients=False)
+    opus = {"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth": 16}
+    payload = {
+        "name": "Kitchen",
+        "supported_roles": ["player@v1"],
+        "player@v1_support": {"supported_formats": [opus], "buffer_capacity": 1},
+        "supported_pair_methods": {"pairing_psk": {}},
+        "unpaired_access": {"enabled": False},
+    }
+    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    psk = generate_psk()
+    conn._client_id = "dev"  # noqa: SLF001
+    conn._noise_psk = ResolvedPsk(  # noqa: SLF001
+        psk_id=psk_id_for(psk),
+        psk=psk,
+        category=PskCategory.LONG_TERM,
+        counterparty_id="dev",
+    )
+
+    raw = orjson.dumps({"type": "client/hello", "payload": payload}).decode()
+    await conn._ingest_client_hello_checked(raw)  # noqa: SLF001
+    await server.close()
+
+    assert server.get_client("dev") is not None
 
 
 @pytest.mark.parametrize(
