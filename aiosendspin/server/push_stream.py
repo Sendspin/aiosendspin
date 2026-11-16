@@ -997,6 +997,7 @@ class PushStream:
         # Cleared while a clear_from() call is waiting, so that new commits wait for its cut.
         self._no_cut_waiting = asyncio.Event()
         self._no_cut_waiting.set()
+        self._cuts_waiting = 0
         # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
         self._historical_buffers: dict[UUID, list[tuple[bytes, AudioFormat]]] = {}
         # Optional start timestamps for historical channels (set on first historical chunk).
@@ -3391,6 +3392,7 @@ class PushStream:
         `from_timestamp` drops all its audio, so only call this when every client
         in the group handles it.
         """
+        self._cuts_waiting += 1
         self._no_cut_waiting.clear()
         try:
             while not self._is_stopped:
@@ -3409,7 +3411,9 @@ class PushStream:
                     break
             return self._clear_from_now(timestamp_us)
         finally:
-            self._no_cut_waiting.set()
+            self._cuts_waiting -= 1
+            if not self._cuts_waiting:
+                self._no_cut_waiting.set()
 
     def _clear_from_now(self, timestamp_us: int) -> bool:  # noqa: PLR0915
         now_us = self._clock.now_us()

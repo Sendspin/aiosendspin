@@ -5987,6 +5987,41 @@ async def test_clear_from_waits_for_a_running_commit(
 
 
 @pytest.mark.asyncio
+async def test_commit_waits_for_a_cut_after_another_cut_is_cancelled(
+    mock_loop: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cut that is still waiting holds new commits back after an overlapping cut is cancelled."""
+    group = _DummyGroup(clients=[])
+    _client, conn = _make_connected_player(mock_loop, group, "p1")
+    stream = _group_stream(mock_loop, group)
+    starts = []
+    for _ in range(40):
+        stream.prepare_audio(bytes(4800), _FORMAT_48K)
+        starts.append(await stream.commit_audio())
+    original_resample = stream._resample_for_roles  # noqa: SLF001
+    cuts = []
+
+    async def resample_with_cuts(*args: Any, **kwargs: Any) -> Any:
+        if not cuts:
+            cuts.append(asyncio.ensure_future(stream.clear_from(starts[30])))
+            cuts.append(asyncio.ensure_future(stream.clear_from(starts[20])))
+            await asyncio.sleep(0)
+            cuts[0].cancel()
+            await asyncio.sleep(0)
+        return await original_resample(*args, **kwargs)
+
+    monkeypatch.setattr(stream, "_resample_for_roles", resample_with_cuts)
+    stream.prepare_audio(bytes(4800), _FORMAT_48K)
+    await stream.commit_audio()
+    stream.prepare_audio(bytes(4800), _FORMAT_48K)
+    assert await stream.commit_audio() == starts[20]
+
+    assert cuts[0].cancelled()
+    assert await cuts[1] is True
+    assert [ts for ts, _ in _client_buffer(conn)] == starts[:20]
+
+
+@pytest.mark.asyncio
 async def test_clear_from_without_audio_roles_moves_the_timeline_to_the_cut(
     mock_loop: Any,
 ) -> None:
