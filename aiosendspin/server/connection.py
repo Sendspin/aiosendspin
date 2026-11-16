@@ -459,7 +459,8 @@ class SendspinConnection:
         self._declared_activities: list[Activity] | None = None
         # Activities of the pairing server/activate, until the next activation replaces it.
         self._pairing_activities: list[Activity] | None = None
-        # Source start commands sent that no client-stream/start has opened a stream for yet.
+        # Source start commands sent that no client-stream/start has opened a stream for
+        # and no client-stream/end has declined yet.
         # Each is counted: a start crossing a stop or role removal can still open a stream.
         self._source_starts_pending = 0
         # Whether the client's input stream is open; stop, unavailability and role
@@ -3067,6 +3068,9 @@ class SendspinConnection:
             self._flag_superseded_message_type(message.type)
             if message.payload_missing:
                 self._flag_noncompliance(_NO_PAYLOAD_OBJECT)
+            if not self._source_input_open and self._source_starts_pending:
+                # A client-stream/end with no input stream open declines a start.
+                self._source_starts_pending -= 1
             self._source_input_open = False
             for role in self._client.active_roles:
                 role.on_client_stream_end()

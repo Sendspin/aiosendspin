@@ -173,6 +173,20 @@ async def test_start_crossing_role_removal_is_tolerated_until_its_end() -> None:
 
 
 @pytest.mark.asyncio
+async def test_declined_start_authorizes_no_later_opening() -> None:
+    """A client-stream/end with no input stream open declines the start, which then lapses."""
+    source = await _source()
+    await source.send_start()
+    source.strict()
+
+    await source.stream_end()
+    assert source.stream_events() == []
+
+    with pytest.raises(ClientComplianceError):
+        await source.stream_start()
+
+
+@pytest.mark.asyncio
 async def test_first_signal_after_availability_returns_is_surfaced() -> None:
     """The signal a client reports on becoming available again counts as a change."""
     source = await _source()
