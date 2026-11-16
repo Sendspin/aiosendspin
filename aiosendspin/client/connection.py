@@ -339,7 +339,7 @@ class SendspinConnection:
         self._reported_volume = client.initial_volume
         self._reported_muted = client.initial_muted
         self._reported_supported_commands: frozenset[PlayerCommand] = frozenset()
-        self._reported_source_signal: SignalState | None = None
+        self._reported_source_signal = SignalState.ABSENT
         self._selected_pairing: ActivatePairing | None = None
         self._pairing_index = 0
         self._pairing_attempt_in_progress = False
@@ -1293,14 +1293,7 @@ class SendspinConnection:
             await self._send_bytes_locked(header + frame)
 
     async def send_source_signal(self, signal: SignalState) -> None:
-        """
-        Report source signal presence.
-
-        Raises RuntimeError unless the client advertised the ``line_sense`` feature.
-        """
-        support = self._client.source_support
-        if support is None or support.features is None or not support.features.line_sense:
-            raise RuntimeError("Source signal requires the line_sense feature")
+        """Report whether the source has input audio to offer."""
         self._ensure_source_authorized()
         self._reported_source_signal = signal
         if not self.is_time_synchronized():
@@ -1335,7 +1328,6 @@ class SendspinConnection:
             device_info=self._client.device_info,
             player_support=player_support,
             visualizer_support=self._client.visualizer_support,
-            source_support=self._client.source_support,
             supported_pair_methods=await self._build_supported_pair_methods(),
             unpaired_access=UnpairedAccess(enabled=await self._unpaired_access_enabled()),
         )

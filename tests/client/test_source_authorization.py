@@ -12,11 +12,7 @@ import pytest
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.models.core import ServerActivatePayload, ServerCommandPayload
 from aiosendspin.models.player import PlayerCommandPayload
-from aiosendspin.models.source import (
-    ClientHelloSourceFeatures,
-    ClientHelloSourceSupport,
-    SourceCommandServerPayload,
-)
+from aiosendspin.models.source import SourceCommandServerPayload
 from aiosendspin.models.types import Activity, AudioCodec, PlayerCommand, Roles
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from tests.client.test_source_deactivation import _connection, _FakeClient, _FakeWs
@@ -243,7 +239,6 @@ async def test_disconnect_clears_pending_start() -> None:
     client = make_sdk_client(
         client_name="source",
         roles=[Roles.SOURCE],
-        source_support=ClientHelloSourceSupport(features=ClientHelloSourceFeatures()),
     )
     conn = SendspinConnection(client)
     conn._ws = AsyncMock(closed=False)  # noqa: SLF001

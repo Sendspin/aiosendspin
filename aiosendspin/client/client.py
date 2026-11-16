@@ -21,7 +21,6 @@ from aiosendspin.models.core import (
     StreamStartMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
-from aiosendspin.models.source import ClientHelloSourceSupport
 from aiosendspin.models.types import (
     Activity,
     AudioCodec,
@@ -169,8 +168,6 @@ class SendspinClient:
     """Visualizer capabilities (only set if VISUALIZER role is supported)."""
     _visualizer_state: VisualizerStatePayload | None
     """Visualizer stream configuration reported via client/state."""
-    _source_support: ClientHelloSourceSupport | None
-    """Source capabilities."""
     _session: ClientSession | None
     """Optional aiohttp ClientSession for WebSocket connection."""
 
@@ -269,7 +266,6 @@ class SendspinClient:
         artwork_channels: Sequence[ArtworkChannel] | None = None,
         visualizer_support: ClientHelloVisualizerSupport | None = None,
         visualizer_state: VisualizerStatePayload | None = None,
-        source_support: ClientHelloSourceSupport | None = None,
         session: ClientSession | None = None,
         output_delay_ms: float = 0.0,
         required_lead_time_ms: float = 250.0,
@@ -326,12 +322,6 @@ class SendspinClient:
             self._visualizer_support = None
             self._visualizer_state = None
 
-        if Roles.SOURCE in self._roles:
-            if source_support is None:
-                raise ValueError("source_support is required when SOURCE role is specified")
-            self._source_support = source_support
-        else:
-            self._source_support = None
         self._session = session
         self._owns_session = session is None
         self._loop = asyncio.get_running_loop()
@@ -419,11 +409,6 @@ class SendspinClient:
     def visualizer_state(self) -> VisualizerStatePayload | None:
         """Visualizer stream configuration reported via client/state."""
         return self._visualizer_state
-
-    @property
-    def source_support(self) -> ClientHelloSourceSupport | None:
-        """Source capabilities."""
-        return self._source_support
 
     def create_source_capture(self, audio_format: SupportedAudioFormat) -> SourceCapture:
         """

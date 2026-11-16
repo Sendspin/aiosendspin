@@ -12,7 +12,6 @@ from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.source import SourceCapture
 from aiosendspin.models.core import ServerActivatePayload
 from aiosendspin.models.player import SupportedAudioFormat
-from aiosendspin.models.source import ClientHelloSourceFeatures, ClientHelloSourceSupport
 from aiosendspin.models.types import (
     Activity,
     AudioCodec,
@@ -47,9 +46,6 @@ def _streaming_source_connection(ws: _Ws) -> SendspinConnection:
     client = make_sdk_client(
         client_name="src",
         roles=[Roles.SOURCE],
-        source_support=ClientHelloSourceSupport(
-            features=ClientHelloSourceFeatures(line_sense=True)
-        ),
     )
     conn = SendspinConnection(client)
     conn._ws = ws  # type: ignore[assignment]  # noqa: SLF001

@@ -17,7 +17,6 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from aiosendspin.models.player import SupportedAudioFormat
-from aiosendspin.models.source import ClientHelloSourceFeatures, ClientHelloSourceSupport
 from aiosendspin.models.types import AudioCodec, Roles
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.trust_store import (
@@ -53,10 +52,6 @@ async def _serve(server: SendspinServer) -> AsyncIterator[str]:
     finally:
         await test_server.close()
         await server.close()
-
-
-def _source_support() -> ClientHelloSourceSupport:
-    return ClientHelloSourceSupport(features=ClientHelloSourceFeatures(line_sense=True))
 
 
 def _pcm_format() -> SupportedAudioFormat:
@@ -98,7 +93,6 @@ async def test_paired_source_client_streams_pcm_end_to_end() -> None:
             pairing_store=client_store,
             client_name="src",
             roles=[Roles.SOURCE],
-            source_support=_source_support(),
         )
         await pair_client.connect(url)
         async with asyncio.timeout(5):
@@ -115,7 +109,6 @@ async def test_paired_source_client_streams_pcm_end_to_end() -> None:
             pairing_store=client_store,
             client_name="src",
             roles=[Roles.SOURCE],
-            source_support=_source_support(),
         )
         try:
             await play_client.connect(url)
@@ -182,7 +175,6 @@ async def test_unpaired_source_client_cannot_activate_source() -> None:
             pairing_store=client_store,
             client_name="unpaired-src",
             roles=[Roles.SOURCE],
-            source_support=_source_support(),
         )
         try:
             await client.connect(url)

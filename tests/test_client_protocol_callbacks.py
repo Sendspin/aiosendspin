@@ -51,11 +51,7 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
     pack_player_audio_header,
 )
-from aiosendspin.models.source import (
-    ClientHelloSourceFeatures,
-    ClientHelloSourceSupport,
-    ServerHelloSourceSupport,
-)
+from aiosendspin.models.source import ServerHelloSourceSupport
 from aiosendspin.models.types import (
     Activity,
     ArtworkSource,
@@ -639,9 +635,6 @@ async def test_lapsed_source_role_ends_its_stream() -> None:
     connection = await _connection(
         PskCategory.SENTINEL,
         roles=[Roles.SOURCE],
-        source_support=ClientHelloSourceSupport(
-            features=ClientHelloSourceFeatures(line_sense=True)
-        ),
     )
     connection._active_roles = [Roles.SOURCE.value]  # noqa: SLF001
     connection._source_stream_active = True  # noqa: SLF001
@@ -1733,49 +1726,20 @@ async def test_player_and_source_states_carry_source_object() -> None:
     connection, sent = await _state_connection(
         [Roles.PLAYER.value, Roles.SOURCE.value],
         roles=[Roles.PLAYER, Roles.SOURCE],
-        source_support=ClientHelloSourceSupport(),
     )
 
     await connection.start()
     await connection._handle_server_time(_SERVER_TIME, connection.now_us())  # noqa: SLF001
 
     assert [(state["available"], "player" in state, state.get("source")) for state in sent] == [
-        (False, True, {}),
-        (True, True, {}),
+        (False, True, {"signal": "absent"}),
+        (True, True, {"signal": "absent"}),
     ]
 
 
-@pytest.mark.parametrize(
-    "features",
-    [None, ClientHelloSourceFeatures(), ClientHelloSourceFeatures(line_sense=False)],
-)
-async def test_source_signal_requires_line_sense(
-    features: ClientHelloSourceFeatures | None,
-) -> None:
-    """A source that did not advertise line_sense cannot report a signal."""
-    connection, sent = await _state_connection(
-        [Roles.SOURCE.value],
-        roles=[Roles.SOURCE],
-        source_support=ClientHelloSourceSupport(features=features),
-    )
-    await connection._handle_server_time(_SERVER_TIME, connection.now_us())  # noqa: SLF001
-
-    with pytest.raises(RuntimeError, match="line_sense"):
-        await connection.send_source_signal(SignalState.PRESENT)
-    await connection.send_available(available=True)
-
-    assert [state["source"] for state in sent] == [{}, {}]
-
-
-async def test_source_signal_is_reported_with_line_sense() -> None:
-    """A source that advertised line_sense reports its signal in client/state."""
-    connection, sent = await _state_connection(
-        [Roles.SOURCE.value],
-        roles=[Roles.SOURCE],
-        source_support=ClientHelloSourceSupport(
-            features=ClientHelloSourceFeatures(line_sense=True)
-        ),
-    )
+async def test_source_signal_is_reported() -> None:
+    """A source reports its signal in client/state."""
+    connection, sent = await _state_connection([Roles.SOURCE.value], roles=[Roles.SOURCE])
     await connection._handle_server_time(_SERVER_TIME, connection.now_us())  # noqa: SLF001
 
     await connection.send_source_signal(SignalState.PRESENT)
