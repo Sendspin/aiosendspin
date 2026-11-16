@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import warnings
-from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
 
 from aiosendspin.models.core import ClientHelloPayload, DeviceInfo
-from aiosendspin.models.types import ConnectionReason, PairMethod
+from aiosendspin.models.types import PairMethod
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import (
@@ -88,50 +86,6 @@ async def test_flag_noncompliance_strict_raises_and_logs_error(
     assert len(hits) == 1
     assert hits[0].levelno == logging.ERROR
     assert hits[0].message == "[dev] rejecting non-compliant client Kitchen (Acme): legacy thing"
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-@pytest.mark.asyncio
-async def test_management_connection_reason_warns_once(caplog: pytest.LogCaptureFixture) -> None:
-    """Dialing with ConnectionReason.MANAGEMENT warns once, naming the embedder's call."""
-    server = _make_server()
-    url = "ws://127.0.0.1:9/sendspin"
-    try:
-        with caplog.at_level(logging.WARNING), warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            server.connect_to_client(url, connection_reason=ConnectionReason.MANAGEMENT)
-            server.connect_to_client(url, connection_reason=ConnectionReason.MANAGEMENT)
-            server.connect_to_client(url, connection_reason=ConnectionReason.PLAYBACK)
-    finally:
-        await server.close()
-
-    deprecations = [w for w in caught if w.category is DeprecationWarning]
-    assert len(deprecations) == 1
-    assert str(deprecations[0].message).startswith("ConnectionReason.MANAGEMENT is deprecated")
-    assert deprecations[0].filename == __file__
-    logged = [r for r in caplog.records if r.message.startswith("ConnectionReason.MANAGEMENT")]
-    assert len(logged) == 1
-
-
-# DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-@pytest.mark.asyncio
-async def test_management_connection_reason_warns_on_wait_too() -> None:
-    """connect_to_client_and_wait also names the embedder's call in its warning."""
-    server = _make_server()
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            with suppress(OSError, TimeoutError):
-                async with asyncio.timeout(5):
-                    await server.connect_to_client_and_wait(
-                        "ws://127.0.0.1:9/sendspin",
-                        connection_reason=ConnectionReason.MANAGEMENT,
-                    )
-    finally:
-        await server.close()
-
-    deprecations = [w for w in caught if w.category is DeprecationWarning]
-    assert [w.filename for w in deprecations] == [__file__]
 
 
 @pytest.mark.parametrize(
@@ -512,13 +466,12 @@ async def test_strict_server_rejects_hello_deviation_before_attach(
 
 
 @pytest.mark.parametrize(
-    ("pair_methods", "method", "legacy_hello", "strict"),
+    ("pair_methods", "method", "strict"),
     [
-        pytest.param(None, PairMethod.STATIC_PAIRING_CODE, False, False, id="no-pair-methods"),
+        pytest.param(None, PairMethod.STATIC_PAIRING_CODE, False, id="no-pair-methods"),
         pytest.param(
             {"static_pairing_code": {}},
             PairMethod.PAIRING_PSK,
-            False,
             False,
             id="no-pairing-psk",
         ),
@@ -529,22 +482,14 @@ async def test_strict_server_rejects_hello_deviation_before_attach(
                 "dynamic_pairing_code": {"formats": ["digits"], "out_channels": ["display"]},
             },
             PairMethod.STATIC_PAIRING_CODE,
-            False,
             True,
             id="both-pairing-code-methods-strict",
-        ),
-        pytest.param(
-            {"pairing_psk": {}},
-            PairMethod.STATIC_PAIRING_CODE,
-            True,
-            False,
-            id="management-capable",
         ),
     ],
 )
 @pytest.mark.asyncio
 async def test_server_passes_through_a_method_the_parsed_hello_lacks(
-    pair_methods: dict[str, object] | None, method: PairMethod, *, legacy_hello: bool, strict: bool
+    pair_methods: dict[str, object] | None, method: PairMethod, *, strict: bool
 ) -> None:
     """The server keeps the pass-through for a method the hello offered or may offer."""
     server = _make_server(allow_noncompliant_clients=not strict)
@@ -557,7 +502,6 @@ async def test_server_passes_through_a_method_the_parsed_hello_lacks(
     conn._noise_psk = ResolvedPsk(  # noqa: SLF001
         psk_id=psk_id_for(psk), psk=psk, category=PskCategory.LONG_TERM, counterparty_id="dev"
     )
-    conn._legacy_hello = legacy_hello  # noqa: SLF001
     attempt = (
         PairingAttempt(method=method, pairing_psk=psk, client_id="dev")
         if method is PairMethod.PAIRING_PSK

@@ -57,13 +57,13 @@ from aiosendspin.models.core import (
     ServerStatePayload,
     ServerTimeMessage,
     ServerTimePayload,
+    ServerUnpairMessage,
     StreamClearMessage,
     StreamEndMessage,
     StreamStartMessage,
     SupportedPairMethods,
     UnpairedAccess,
 )
-from aiosendspin.models.management import ServerUnpairMessage
 from aiosendspin.models.player import (
     PLAYER_AUDIO_HEADER_SIZE,
     PlayerStatePayload,

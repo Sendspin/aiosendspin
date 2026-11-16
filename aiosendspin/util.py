@@ -6,7 +6,6 @@ import asyncio
 import logging
 import socket
 import sys
-import warnings
 from collections.abc import Coroutine
 from typing import Any
 
@@ -23,9 +22,6 @@ TASKS: set[asyncio.Task[Any]] = set()
 # many occurrences it stands for, so a sustained fault keeps its magnitude visible
 # at default level without emitting one line per event.
 WARN_INTERVAL_S = 30.0
-
-# APIs whose deprecation this process has already reported.
-_WARNED_DEPRECATIONS: set[str] = set()
 
 
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
@@ -123,20 +119,6 @@ def get_local_ip() -> str | None:
             return result
     except OSError:
         return None
-
-
-def warn_deprecated(api: str, reason: str) -> None:
-    """Report once per process that ``api`` is deprecated.
-
-    The first call for ``api`` emits a ``DeprecationWarning`` attributed to the caller of
-    ``api`` and logs a warning; later calls are silent.
-    """
-    if api in _WARNED_DEPRECATIONS:
-        return
-    _WARNED_DEPRECATIONS.add(api)
-    message = f"{api} is deprecated: {reason}"
-    warnings.warn(message, DeprecationWarning, stacklevel=3)
-    _LOGGER.warning(message)
 
 
 class PrefixLoggerAdapter(logging.LoggerAdapter[logging.Logger]):

@@ -59,7 +59,7 @@ async def test_retry_decision_per_goodbye_reason(
         (None, True),
         ([], True),
         ([Activity.PLAYBACK], True),
-        ([Activity.MANAGEMENT], False),
+        ([Activity.PAIRING], False),
     ],
 )
 @pytest.mark.asyncio

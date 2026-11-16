@@ -33,7 +33,6 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 
 from aiosendspin.clock import Clock, RawMonotonicClock
 from aiosendspin.models.core import ClientHelloPayload
-from aiosendspin.models.management import MANAGEMENT_DEPRECATION
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason, PairMethod
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import (
@@ -45,7 +44,7 @@ from aiosendspin.noise.pairing import (
     PairingTimeoutError,
 )
 from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedClient
-from aiosendspin.util import create_task, get_local_ip, warn_deprecated
+from aiosendspin.util import create_task, get_local_ip
 
 from .client import SendspinClient
 from .connection import SendspinConnection
@@ -628,9 +627,6 @@ class SendspinServer:
         A ``PLAYBACK`` reason applies to the next connection only. Later reconnects use
         ``DISCOVERY``.
         """
-        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-        if connection_reason is ConnectionReason.MANAGEMENT:
-            warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
         self._redial_if_closing(url)
         self._dial(
             url,
@@ -688,9 +684,6 @@ class SendspinServer:
         self._redial_if_closing(url)
         self._mdns_goodbye_urls.discard(url)
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
-        # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-        if connection_reason is ConnectionReason.MANAGEMENT:
-            warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
         self._connection_reasons[url] = connection_reason
         if url in self._initial_connect_succeeded:
             return
@@ -866,26 +859,6 @@ class SendspinServer:
         If an attempt has already been finalized by the client, it completes as a success instead.
         """
         await self._connection_for(client_id).end_pairing()
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    def enable_management(self, client_id: str) -> SendspinConnection:
-        """Enable a management session on a connected client and return its connection.
-
-        Deprecated: the Sendspin spec no longer defines the management activity.
-        """
-        warn_deprecated("SendspinServer.enable_management", MANAGEMENT_DEPRECATION)
-        connection = self._connection_for(client_id)
-        connection._set_management(active=True)  # noqa: SLF001
-        return connection
-
-    # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
-    def disable_management(self, client_id: str) -> None:
-        """End a client's management session, leaving any playback on the connection intact.
-
-        Deprecated: the Sendspin spec no longer defines the management activity.
-        """
-        warn_deprecated("SendspinServer.disable_management", MANAGEMENT_DEPRECATION)
-        self._connection_for(client_id)._set_management(active=False)  # noqa: SLF001
 
     async def unpair(self, client_id: str) -> None:
         """Drop the pairing with a connected client: remove our record and tell it to drop its own.
