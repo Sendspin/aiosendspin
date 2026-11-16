@@ -4480,6 +4480,246 @@ async def test_pairing_psk_dial_pairs_the_token_client() -> None:
         await server.close()
 
 
+@pytest.mark.parametrize("call", ["initiate_pairing", "connect", "connect_and_wait"])
+async def test_pairing_queued_on_a_connecting_dial_runs_on_it(
+    monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    """Pairing a known client whose dial is mid-handshake pairs on that connection."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+    )
+    in_hello = asyncio.Event()
+    release_hello = asyncio.Event()
+    reload_trusted_unpaired = SendspinConnection._reload_trusted_unpaired  # noqa: SLF001
+
+    async def gated_reload(self: SendspinConnection) -> None:
+        in_hello.set()
+        await release_hello.wait()
+        await reload_trusted_unpaired(self)
+
+    monkeypatch.setattr(SendspinConnection, "_reload_trusted_unpaired", gated_reload)
+    sdk = make_sdk_client(
+        identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+    )
+    try:
+        async with _host_incoming_client(sdk) as url:
+            server.get_or_create_client(identity.peer_id)
+            server.register_client_url(identity.peer_id, url)
+            server.connect_to_client(url)
+            async with asyncio.timeout(5):
+                await in_hello.wait()
+            dialed = server._dial_connections[url]  # noqa: SLF001
+            if call == "initiate_pairing":
+                pairing_task = asyncio.create_task(
+                    server.initiate_pairing(identity.peer_id, attempt)
+                )
+                await asyncio.sleep(0)
+            elif call == "connect":
+                server.connect_to_client(url, pairing_attempt=attempt)
+            else:
+                await server.connect_to_client_and_wait(url, pairing_attempt=attempt)
+            release_hello.set()
+
+            if call == "initiate_pairing":
+                async with asyncio.timeout(5):
+                    await pairing_task
+            await _await_paired_session(sdk)
+            assert await server_store.record_by_client_id(identity.peer_id) is not None
+            assert server._dial_connections[url] is dialed  # noqa: SLF001
+            await sdk.disconnect()
+    finally:
+        await sdk.disconnect()
+        await server.close()
+
+
+@pytest.mark.parametrize("wait", [False, True])
+async def test_connect_with_pairing_runs_on_a_connected_client(wait: bool) -> None:  # noqa: FBT001
+    """A connect call carrying a pairing attempt for a connected client pairs without dialing."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    attempt = PairingAttempt(
+        method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+    )
+    other_address = "ws://127.0.0.1:9/sendspin"
+
+    async with _serve(server) as url:
+        sdk = make_sdk_client(
+            identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+        )
+        try:
+            await sdk.connect(url)
+            await _find_connection_by_client_id(server, identity.peer_id)
+            if wait:
+                await server.connect_to_client_and_wait(other_address, pairing_attempt=attempt)
+            else:
+                server.connect_to_client(other_address, pairing_attempt=attempt)
+
+            assert other_address not in server._connection_tasks  # noqa: SLF001
+            await _await_long_term_record(client_store, server.id)
+            assert await server_store.record_by_client_id(identity.peer_id) is not None
+        finally:
+            await sdk.disconnect()
+
+
+async def test_connect_with_pairing_leaves_a_running_attempt_alone() -> None:
+    """A connect call with an attempt for a pairing client neither dials nor breaks its attempt."""
+    server = _make_server(InMemoryServerPairingStore())
+    identity = Identity.generate()
+    displayed = asyncio.Event()
+    never: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        if pairing_code is not None:
+            displayed.set()
+
+    async with _serve(server) as url:
+        sdk = make_sdk_client(
+            identity=identity,
+            pairing_store=InMemoryClientPairingStore(),
+            client_name="c",
+            roles=[Roles.CONTROLLER],
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        try:
+            await sdk.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            running = asyncio.create_task(
+                server.initiate_pairing(
+                    identity.peer_id,
+                    PairingAttempt(
+                        method=PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=lambda: never,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    ),
+                )
+            )
+            async with asyncio.timeout(5):
+                await displayed.wait()
+            server.connect_to_client(
+                "ws://127.0.0.1:9/sendspin",
+                pairing_attempt=PairingAttempt(
+                    method=PairMethod.PAIRING_PSK,
+                    pairing_psk=generate_psk(),
+                    client_id=identity.peer_id,
+                ),
+            )
+            assert "ws://127.0.0.1:9/sendspin" not in server._connection_tasks  # noqa: SLF001
+            await asyncio.sleep(0.1)
+
+            assert not running.done()
+            client = server.get_client(identity.peer_id)
+            assert client is not None
+            assert client.connection is conn
+        finally:
+            never.cancel()
+            await sdk.disconnect()
+            with suppress(BaseException):
+                await running
+
+
+async def test_pairing_attempt_started_while_leaving_playback_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second attempt on a long-term session leaving playback for the first is refused."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    quiescing = asyncio.Event()
+    release = asyncio.Event()
+    quiesce = SendspinConnection._quiesce_for_pairing  # noqa: SLF001
+
+    async def gated_quiesce(self: SendspinConnection) -> None:
+        quiescing.set()
+        await release.wait()
+        await quiesce(self)
+
+    monkeypatch.setattr(SendspinConnection, "_quiesce_for_pairing", gated_quiesce)
+
+    def attempt() -> PairingAttempt:
+        return PairingAttempt(
+            method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id=identity.peer_id
+        )
+
+    async with _serve(server) as url:
+        sdk = make_sdk_client(
+            identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+        )
+        try:
+            await sdk.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            first = asyncio.create_task(conn.initiate_pairing(attempt()))
+            async with asyncio.timeout(5):
+                await quiescing.wait()
+
+            with pytest.raises(PairingError, match="already in a pairing attempt"):
+                await conn.initiate_pairing(attempt())
+        finally:
+            release.set()
+            first.cancel()
+            with suppress(BaseException):
+                await first
+            await sdk.disconnect()
+
+
+async def test_pairing_attempt_started_during_the_final_rehandshake_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second attempt while a finalized one re-keys onto its record is refused."""
+    server = _make_server(InMemoryServerPairingStore())
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    rekeying = asyncio.Event()
+    release = asyncio.Event()
+    rehandshake = SendspinConnection._rehandshake_to  # noqa: SLF001
+
+    async def gated_rehandshake(self: SendspinConnection, *args: Any) -> bool:
+        if self._pairing_attempt is None:
+            rekeying.set()
+            await release.wait()
+        return await rehandshake(self, *args)
+
+    monkeypatch.setattr(SendspinConnection, "_rehandshake_to", gated_rehandshake)
+
+    def attempt() -> PairingAttempt:
+        return PairingAttempt(
+            method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+        )
+
+    async with _serve(server) as url:
+        sdk = make_sdk_client(
+            identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+        )
+        try:
+            await sdk.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            first = asyncio.create_task(conn.initiate_pairing(attempt()))
+            async with asyncio.timeout(5):
+                await rekeying.wait()
+
+            with pytest.raises(PairingError, match="already in a pairing attempt"):
+                await conn.initiate_pairing(attempt())
+            release.set()
+            async with asyncio.timeout(5):
+                await first
+        finally:
+            release.set()
+            await sdk.disconnect()
+
+
 async def test_pairing_psk_dial_without_the_client_psk_reconnects_onto_the_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

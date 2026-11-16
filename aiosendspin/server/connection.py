@@ -1240,6 +1240,11 @@ class SendspinConnection:
         return self._noise_psk.category is PskCategory.PAIRING
 
     @property
+    def _attempt_running(self) -> bool:
+        """Whether a pairing attempt runs, through its final re-handshake."""
+        return self._pairing_attempt is not None or self._pairing_message_queue is not None
+
+    @property
     def _pairing_in_progress(self) -> bool:
         """Whether the connection is in pairing, including on connect."""
         return self._in_pairing or self._pairing_message_queue is not None
@@ -1944,7 +1949,7 @@ class SendspinConnection:
         Any other failure propagates for the caller to disconnect.
         Leaving pairing closes a connection that fails to return to its pairing record.
         """
-        if self._pairing_attempt is not None:
+        if self._attempt_running:
             raise PairingError("connection is already in a pairing attempt")
         if attempt.method is PairMethod.PAIRING_PSK and attempt.client_id != self._client_id:
             raise InvalidPairingCodeError("pairing token is for another client")
@@ -1952,18 +1957,17 @@ class SendspinConnection:
         if not isinstance(transport, EncryptedWebSocket):
             raise PairingError("cannot pair over an unencrypted connection")
         self._refuse_unadvertised_pairing(attempt)
+        # Claimed before leaving playback, so an attempt started meanwhile is refused.
+        self._pairing_attempt = attempt
         if not self._in_pairing:
-            if self._pairing_quiesces:
-                await self._quiesce_for_pairing()
-            # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
-            # Legacy-generation clients read only pairing messages during an attempt.
-            if self._legacy_hello:
-                await self._pause_writer()
-            self._in_pairing = True
+            try:
+                await self._enter_pairing()
+            except BaseException:
+                self._pairing_attempt = None
+                raise
         # Pairing messages arriving outside an attempt are discarded rather than queued.
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_message_queue = queue
-        self._pairing_attempt = attempt
         dispatched = QueuedEncryptedWebSocket(transport, queue)
         # Awaited below, so skip create_task's unhandled-exception logging.
         task = asyncio.Task(self._pair(dispatched), loop=self._server.loop, eager_start=True)
@@ -2085,6 +2089,15 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
         # Legacy-generation clients admit no activity set that mixes pairing and playback.
         return self._legacy_hello or self._is_long_term_paired
+
+    async def _enter_pairing(self) -> None:
+        if self._pairing_quiesces:
+            await self._quiesce_for_pairing()
+        # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+        # Legacy-generation clients read only pairing messages during an attempt.
+        if self._legacy_hello:
+            await self._pause_writer()
+        self._in_pairing = True
 
     async def _quiesce_for_pairing(self) -> None:
         """Quiesce playback and roles for pairing, then wait for the teardown to flush."""
@@ -3882,6 +3895,8 @@ class SendspinConnection:
             if self.is_encrypted:
                 self._subscribe_activity_events()
             self._start_message_loops()
+            if self.is_encrypted and self._url is not None and self._client is not None:
+                self._server._run_queued_pairing(self._url, self._client.client_id, self)  # noqa: SLF001
             await self._connection_done.wait()
         except HandshakeAbortedError as exc:
             self._logger.debug("Noise handshake aborted: %s", exc)
