@@ -1915,10 +1915,24 @@ class SendspinConnection:
         desired = self._desired_activities
         if desired == self._declared_activities:
             return
+        self._end_playback_streams_first(self._declared_activities, desired)
         self._declared_activities = desired
         self.send_priority_message(
             ServerActivateMessage(payload=ServerActivatePayload(activities=desired))
         )
+
+    def _end_playback_streams_first(
+        self, previous: list[Activity], activities: list[Activity]
+    ) -> None:
+        """Send queued stream/end of roles that need playback ahead of an activation dropping it."""
+        if self._client is None:
+            return
+        if Activity.PLAYBACK not in previous or Activity.PLAYBACK in activities:
+            return
+        for role in self._client.active_roles:
+            if role.requires_playback:
+                for message in self._take_queued_messages(role.role_family, (StreamEndMessage,)):
+                    self.send_priority_message(message)
 
     def _subscribe_activity_events(self) -> None:
         """Watch the client's group/playback transitions to keep activities current."""
@@ -2418,7 +2432,9 @@ class SendspinConnection:
             if self._url is not None:
                 self._server._consume_playback_reason(self._url)  # noqa: SLF001
         else:
+            previous = self._pairing_activities or self._declared_activities
             self._declared_activities = self._desired_activities
+            self._end_playback_streams_first(previous, self._declared_activities)
         self._send_activation(self._roles_to_activate)
         self._priority_messages.extend(held)
         # The writer is paused here, so put the queued activation on the wire now.

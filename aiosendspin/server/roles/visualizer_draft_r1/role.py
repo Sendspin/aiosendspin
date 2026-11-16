@@ -46,6 +46,8 @@ _deprecation_logged = False
 class VisualizerDraftR1Role(Role):
     """Role implementation for draft visualizer streaming."""
 
+    requires_playback = True
+
     def __init__(self, client: SendspinClient | None = None) -> None:
         """Initialize VisualizerDraftR1Role."""
         if client is None:

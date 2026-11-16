@@ -36,6 +36,7 @@ from aiosendspin.models.player import (
 )
 from aiosendspin.models.source import SourceStatePayload
 from aiosendspin.models.types import (
+    Activity,
     ArtworkSource,
     AudioCodec,
     BinaryMessageType,
@@ -976,3 +977,48 @@ async def test_revoking_source_approval_during_pairing_ends_pairing() -> None:
     with patch.object(conn, "end_pairing", new=AsyncMock()) as end_pairing:
         await conn.refresh_trusted_unpaired()
     end_pairing.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_player_stream_before_dropping_playback() -> None:
+    """group.stop() sends stream/end ahead of the server/activate that drops playback."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value]))
+    conn._subscribe_activity_events()  # noqa: SLF001
+    client = _client(conn)
+    client.group.start_stream()
+    player = client.role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
+    await _drain_priority(conn, fake)
+    fake.sent.clear()
+
+    await client.group.stop()
+
+    assert await _drain_priority(conn, fake) == ["stream/end", "server/activate"]
+
+
+@pytest.mark.asyncio
+async def test_leaving_pairing_ends_player_stream_before_dropping_playback() -> None:
+    """A group stopped during pairing gets stream/end ahead of the activation leaving pairing."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value]))
+    conn._subscribe_activity_events()  # noqa: SLF001
+    client = _client(conn)
+    client.group.start_stream()
+    player = client.role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
+    await _drain_priority(conn, fake)
+    conn._in_pairing = True  # noqa: SLF001
+    conn._pairing_activities = [Activity.PLAYBACK, Activity.PAIRING]  # noqa: SLF001
+    await client.group.stop()
+    fake.sent.clear()
+
+    conn._in_pairing = False  # noqa: SLF001
+    await conn._activate()  # noqa: SLF001
+
+    assert [payload["type"] for payload in fake.sent_payloads()] == [
+        "stream/end",
+        "server/activate",
+    ]
