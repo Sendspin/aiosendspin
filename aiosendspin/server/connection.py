@@ -1835,6 +1835,17 @@ class SendspinConnection:
             and self._legacy_hello
         )
 
+    def _roles_awaiting_playback(self) -> list[Role]:
+        if self._client is None:
+            return []
+        return [role for role in self._client.active_roles if self._client.awaits_playback(role)]
+
+    def _join_roles(self, roles: list[Role]) -> None:
+        if self._client is None:
+            return
+        for role in roles:
+            self._client.join_active_stream(role)
+
     @property
     def _client_in_playback(self) -> bool:
         """Whether the client's group is in active/upcoming (non-stopped) playback."""
@@ -2184,11 +2195,13 @@ class SendspinConnection:
                 else ServerActivateMessage(activation_payload)
             )
             self._awaiting_rehandshake_activate = False
+            awaiting_playback = self._roles_awaiting_playback()
             # Count first, since the client's reply can be routed before the send returns.
             self._pairing_index += 1
             # Finish the send through a cancel so the count matches the activations sent.
             _, cancelled = await finish_despite_cancel(transport.send_str(activation.to_json()))
             self._pairing_activities = activation_payload.activities
+            self._join_roles(awaiting_playback)
             if cancelled:
                 await abort_pairing(transport, PairAbortReason.USER_CANCELLED)
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
@@ -2427,6 +2440,7 @@ class SendspinConnection:
         # Messages queued while the writer was stopped (a re-handshake) follow the activation.
         held = self._priority_messages.copy()
         self._priority_messages.clear()
+        awaiting_playback = self._roles_awaiting_playback()
         if self._declared_activities is None:
             self._declared_activities = self._initial_activities
             if self._url is not None:
@@ -2436,6 +2450,7 @@ class SendspinConnection:
             self._declared_activities = self._desired_activities
             self._end_playback_streams_first(previous, self._declared_activities)
         self._send_activation(self._roles_to_activate)
+        self._join_roles(awaiting_playback)
         self._priority_messages.extend(held)
         # The writer is paused here, so put the queued activation on the wire now.
         while await self._process_priority_messages(self._transport):

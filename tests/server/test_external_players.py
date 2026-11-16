@@ -32,6 +32,7 @@ from aiosendspin.server.roles.registry import ROLE_FACTORIES
 
 class _DummyConnection:
     receives_group_updates = True
+    _declares_playback = True
 
     clears_role_state_with_null = False
 

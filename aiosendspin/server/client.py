@@ -624,6 +624,15 @@ class SendspinClient:
         """Stop holding every role."""
         self._roles_awaiting_state.clear()
 
+    def awaits_playback(self, role: Role) -> bool:
+        """Whether a role's stream waits for the connection to declare 'playback'."""
+        return (
+            role.requires_playback
+            and self._connection is not None
+            and not self._connection._declares_playback  # noqa: SLF001
+            and self._connection.is_encrypted
+        )
+
     def join_active_stream(self, role: Role) -> None:
         """Join an active, released role to its group's running stream.
 

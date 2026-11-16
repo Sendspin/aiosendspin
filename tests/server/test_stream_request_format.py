@@ -28,6 +28,7 @@ from aiosendspin.server.roles.player.v1 import PlayerV1Role
 
 class _FakeConnection:
     receives_group_updates = True
+    _declares_playback = True
 
     def __init__(self) -> None:
         self.sent: list[object] = []

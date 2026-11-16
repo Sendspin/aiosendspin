@@ -34,6 +34,7 @@ from aiosendspin.models.core import (
     ServerActivatePayload,
     ServerHelloMessage,
     ServerTimeMessage,
+    StreamStartMessage,
 )
 from aiosendspin.models.player import ClientHelloPlayerSupport, SupportedAudioFormat
 from aiosendspin.models.types import (
@@ -90,6 +91,7 @@ from aiosendspin.noise.trust_store import (
 from aiosendspin.noise.wire import EncryptedWebSocket
 from aiosendspin.server import connection as connection_module
 from aiosendspin.server import server as server_module
+from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
@@ -4005,6 +4007,103 @@ async def test_live_pairing_runs_alongside_playback() -> None:
             assert suspended == [True, False]
         finally:
             await client.disconnect()
+
+
+@pytest.mark.parametrize(
+    "trigger", ["start_before_pairing_activation", "start_mid_attempt", "join_playing_group"]
+)
+async def test_stream_started_during_pairing_waits_for_playback(trigger: str) -> None:  # noqa: PLR0915
+    """A stream reaching a pairing client sends player stream/start only with playback."""
+    server = _make_server(InMemoryServerPairingStore())
+    identity = Identity.generate()
+    other_identity = Identity.generate()
+    await server.trust_unpaired(identity.peer_id)
+    await server.trust_unpaired(other_identity.peer_id)
+    code: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    fmt = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        if pairing_code is not None and not code.done():
+            code.set_result(pairing_code)
+
+    async with _serve(server) as url:
+        client = make_sdk_client(
+            identity=identity,
+            pairing_store=await _unpaired_enabled_store(),
+            client_name="c",
+            roles=[Roles.PLAYER],
+            player_support=_player_support(),
+            pairing_support=PairingSupport(pairing_code_display=display),
+        )
+        other = make_sdk_client(
+            identity=other_identity,
+            pairing_store=await _unpaired_enabled_store(),
+            client_name="d",
+            roles=[Roles.PLAYER],
+            player_support=_player_support(),
+        )
+        try:
+            await client.connect(url)
+            await other.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            server_client = conn._client  # noqa: SLF001
+            assert server_client is not None
+            other_conn = await _find_connection_by_client_id(server, other_identity.peer_id)
+            assert other_conn._client is not None  # noqa: SLF001
+            other_group = other_conn._client.group  # noqa: SLF001
+            await _wait_until(client.is_time_synchronized)
+            await _wait_until(lambda: server_client.available)
+            sdk_conn = client._admitted_connection  # noqa: SLF001
+            assert sdk_conn is not None
+            player_starts_with_playback: list[bool] = []
+            handle_stream_start = sdk_conn._handle_stream_start  # noqa: SLF001
+
+            async def recording_stream_start(message: StreamStartMessage) -> None:
+                if message.payload.player is not None:
+                    player_starts_with_playback.append(Activity.PLAYBACK in sdk_conn.activities)
+                await handle_stream_start(message)
+
+            sdk_conn._handle_stream_start = recording_stream_start  # type: ignore[method-assign]  # noqa: SLF001
+
+            async def play() -> None:
+                group = other_group if trigger == "join_playing_group" else server_client.group
+                stream = group.start_stream()
+                for _ in range(10):
+                    stream.prepare_audio(bytes(4800), fmt)
+                    await stream.commit_audio()
+                if group is not server_client.group:
+                    await group.add_client(server_client)
+
+            rehandshake = conn._rehandshake_for_pairing_if_needed  # noqa: SLF001
+
+            async def play_then_rehandshake(transport: Any) -> bool:
+                await play()
+                return await rehandshake(transport)
+
+            if trigger == "start_before_pairing_activation":
+                conn._rehandshake_for_pairing_if_needed = play_then_rehandshake  # type: ignore[method-assign]  # noqa: SLF001
+
+            async def provide() -> str:
+                await _wait_until(lambda: Activity.PAIRING in client.activities)
+                if trigger != "start_before_pairing_activation":
+                    assert Activity.PLAYBACK not in client.activities
+                    await play()
+                    await asyncio.sleep(0.1)
+                return await code
+
+            await conn.initiate_pairing(
+                PairingAttempt(
+                    method=PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=provide,
+                    pairing_format=PairingCodeFormat.DIGITS,
+                )
+            )
+            await _await_paired_session(client)
+            await _wait_until(lambda: bool(player_starts_with_playback))
+            assert all(player_starts_with_playback)
+        finally:
+            await client.disconnect()
+            await other.disconnect()
 
 
 async def test_revoking_approval_mid_attempt_ends_pairing() -> None:

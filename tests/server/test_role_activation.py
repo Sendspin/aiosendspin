@@ -319,6 +319,8 @@ async def test_reactivated_role_waits_for_its_client_state(family: str) -> None:
         _hello([Roles.PLAYER.value, Roles.ARTWORK.value, Roles.VISUALIZER.value])
     )
     client = _client(conn)
+    conn._subscribe_activity_events()  # noqa: SLF001
+    client.group._set_playback_state(PlaybackStateType.PLAYING)  # noqa: SLF001
     await _set_trusted(conn, trusted=False)
 
     with patch.object(client.group, "on_role_activated") as activated:
