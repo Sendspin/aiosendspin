@@ -45,7 +45,13 @@ from aiosendspin.noise.pairing import (
     PairingTimeoutError,
 )
 from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedClient
-from aiosendspin.util import create_task, get_local_ip, warn_deprecated
+from aiosendspin.util import (
+    FRIENDLY_NAME_MAX_BYTES,
+    create_task,
+    get_local_ip,
+    truncate_utf8,
+    warn_deprecated,
+)
 
 from .client import SendspinClient
 from .connection import SendspinConnection
@@ -247,7 +253,8 @@ class SendspinServer:
         Args:
             loop: Event loop the server runs on.
             identity: The server's long-term Noise identity.
-            server_name: Human-readable name advertised to clients.
+            server_name: Human-readable name advertised to clients, who get at most
+                64 bytes of it in UTF-8.
             client_session: Shared aiohttp session, or None to create and own one.
             pairing_store: Persistent store for pairing records and config.
             allow_unencrypted: Accept legacy unencrypted clients over the non-spec
@@ -280,6 +287,12 @@ class SendspinServer:
         self._identity = identity
         self._id = identity.peer_id
         self._name = server_name
+        if len(server_name.encode()) > FRIENDLY_NAME_MAX_BYTES:
+            logger.debug(
+                "Server name is over %d bytes in UTF-8, clients get it truncated: %s",
+                FRIENDLY_NAME_MAX_BYTES,
+                server_name,
+            )
         self._languages = tuple(languages) if languages is not None else None
         self._pairing_store = pairing_store
         self._allow_unencrypted = allow_unencrypted
@@ -1404,7 +1417,7 @@ class SendspinServer:
         service_type = "_sendspin-server._tcp.local."
         properties: dict[str, str] = {}
         if self._name:
-            properties["name"] = self._name
+            properties["name"] = truncate_utf8(self._name, FRIENDLY_NAME_MAX_BYTES)
         properties["path"] = path
 
         try:

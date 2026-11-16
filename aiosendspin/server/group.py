@@ -24,6 +24,7 @@ from aiosendspin.server.events import (
 )
 from aiosendspin.server.roles import GroupRole, MetadataGroupRole
 from aiosendspin.server.roles.registry import create_group_roles
+from aiosendspin.util import FRIENDLY_NAME_MAX_BYTES, truncate_utf8
 
 from .audio_transformers import AudioTransformer, TransformerPool
 from .channels import ChannelResolver, default_channel_resolver
@@ -208,7 +209,7 @@ class SendspinGroup:
             GroupUpdateServerPayload(
                 playback_state=self._current_state,
                 group_id=self.group_id,
-                group_name=self.group_name,
+                group_name=truncate_utf8(self.group_name, FRIENDLY_NAME_MAX_BYTES),
             )
         )
 
@@ -393,7 +394,16 @@ class SendspinGroup:
         return self._clients[0].name if self._clients else ""
 
     def set_group_name(self, name: str | None) -> None:
-        """Name this group, publishing the change; ``None`` restores the default."""
+        """Name this group, publishing the change; ``None`` restores the default.
+
+        Clients get at most 64 bytes of the name in UTF-8.
+        """
+        if name is not None and len(name.encode()) > FRIENDLY_NAME_MAX_BYTES:
+            logger.debug(
+                "Group name is over %d bytes in UTF-8, clients get it truncated: %s",
+                FRIENDLY_NAME_MAX_BYTES,
+                name,
+            )
         previous = self.group_name
         self._group_name = name
         self._publish_if_name_changed(previous)

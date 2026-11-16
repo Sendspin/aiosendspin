@@ -130,6 +130,19 @@ async def test_an_overridden_name_reaches_the_wire() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_long_name_is_cut_on_the_wire() -> None:
+    """Members get at most 64 bytes in UTF-8, without a split character."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client = _connected_member(server, "c1", "Kitchen Speaker")
+
+    client.group.set_group_name("a" + "ä" * 40)
+
+    assert _group_updates(client)[-1].payload.group_name == "a" + "ä" * 31
+    assert client.group.group_name == "a" + "ä" * 40
+
+
+@pytest.mark.asyncio
 async def test_setting_the_name_publishes_once_per_change() -> None:
     """Naming a group tells its members; naming it the same again tells no one."""
     loop = asyncio.get_running_loop()
