@@ -776,7 +776,9 @@ class SendspinServer:
         if client is not None and client.connection is None:
             await self._pair_by_dial(client_id, attempt)
             return
-        connection = self._connection_for(client_id)
+        await self._pair_on(self._connection_for(client_id), attempt)
+
+    async def _pair_on(self, connection: SendspinConnection, attempt: PairingAttempt) -> None:
         try:
             await connection.initiate_pairing(attempt)
         except (PairingAbortError, PairingTimeoutError, InvalidPairingCodeError):
