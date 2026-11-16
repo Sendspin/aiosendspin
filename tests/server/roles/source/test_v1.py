@@ -38,7 +38,10 @@ class _FakeInfo:
 
 
 class _FakeConnection:
-    pass
+    _declares_playback = True
+
+    def _refresh_activities(self) -> None:
+        pass
 
 
 class _FakeServer:

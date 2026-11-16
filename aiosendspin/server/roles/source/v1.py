@@ -179,6 +179,7 @@ class SourceV1Role(Role):
                 payload=ServerCommandPayload(source=SourceCommandServerPayload(command="stop"))
             )
         )
+        self._refresh_activities()
 
     @staticmethod
     def check_client_stream_start(
@@ -454,10 +455,24 @@ class SourceV1Role(Role):
             return
         self._stream_wanted = False
         self._end_stream()
+        self._refresh_activities()
+
+    @property
+    def _wants_playback(self) -> bool:
+        """Whether the connection must declare 'playback' for a start that is due or sent."""
+        return self._stream_wanted or (self._start_queued and self.can_start)
+
+    def _refresh_activities(self) -> None:
+        if (connection := self._client.connection) is not None:
+            connection._refresh_activities()  # noqa: SLF001
 
     def _send_queued_start(self) -> None:
-        """Send the queued start command once `can_start` allows it."""
+        """Send the queued start command once `can_start` allows it and 'playback' is declared."""
         if not self._start_queued or not self.can_start:
+            return
+        self._refresh_activities()
+        connection = self._client.connection
+        if connection is None or not connection._declares_playback:  # noqa: SLF001
             return
         self._start_queued = False
         self._stream_wanted = True

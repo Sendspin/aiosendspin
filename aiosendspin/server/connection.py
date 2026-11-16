@@ -1827,6 +1827,20 @@ class SendspinConnection:
         )
 
     @property
+    def _source_wants_playback(self) -> bool:
+        """Whether the client's source role has a start to send or still wants its stream."""
+        return self._client is not None and any(
+            isinstance(role, SourceV1Role) and role._wants_playback  # noqa: SLF001
+            for role in self._client.roles_by_family("source")
+        )
+
+    @property
+    def _declares_playback(self) -> bool:
+        """Whether the activities in effect include 'playback'."""
+        activities = self._pairing_activities or self._declared_activities or []
+        return Activity.PLAYBACK in activities
+
+    @property
     def _is_long_term_paired(self) -> bool:
         """Whether the connection was admitted by a long-term Sendspin PSK (trust ``user``)."""
         return self._noise_psk is not None and self._noise_psk.category is PskCategory.LONG_TERM
@@ -1850,9 +1864,9 @@ class SendspinConnection:
 
     @property
     def _desired_activities(self) -> list[Activity]:
-        """Activities the live group state warrants, plus management when enabled."""
+        """Activities the live group state and source use warrant, plus management when enabled."""
         activities: list[Activity] = []
-        if self._playback_capable and self._client_in_playback:
+        if self._playback_capable and (self._client_in_playback or self._source_wants_playback):
             activities.append(Activity.PLAYBACK)
         # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if self._management_active and self._management_capable:
@@ -2026,6 +2040,11 @@ class SendspinConnection:
     async def _resume_service(self) -> None:
         """Re-activate the connection after pairing, returning it to its record if it left it."""
         await self._activate()
+        assert self._client is not None
+        for role in self._client.roles_by_family("source"):
+            if isinstance(role, SourceV1Role):
+                # A start requested during pairing waited for this activation's 'playback'.
+                role._send_queued_start()  # noqa: SLF001
         # End the attempt before re-keying, since some clients reject a re-handshake mid-exchange.
         await self._return_to_record()
 
