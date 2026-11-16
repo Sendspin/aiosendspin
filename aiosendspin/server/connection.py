@@ -1830,7 +1830,9 @@ class SendspinConnection:
     def _source_wants_playback(self) -> bool:
         """Whether the client's source role has a start to send or still wants its stream."""
         return self._client is not None and any(
-            isinstance(role, SourceV1Role) and role._wants_playback  # noqa: SLF001
+            isinstance(role, SourceV1Role)
+            and role.role_id in self._roles_to_activate
+            and role._wants_playback  # noqa: SLF001
             for role in self._client.roles_by_family("source")
         )
 
@@ -3350,6 +3352,9 @@ class SendspinConnection:
             and message.payload.source is not None
             and message.payload.source.command == "start"
         ):
+            if not self._declares_playback:
+                # An activation dropping 'playback' went out ahead of this queued start.
+                return
             self.record_source_start()
         if isinstance(message, StreamStartMessage):
             payload = message.payload

@@ -9,11 +9,12 @@ import pytest
 from aiosendspin.models.core import ClientStatePayload
 from aiosendspin.models.source import SourceStatePayload
 from aiosendspin.models.types import Activity, PlaybackStateType, Roles
-from aiosendspin.noise.trust_store import PskCategory
+from aiosendspin.noise.trust_store import PskCategory, TrustedUnpairedClient
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.roles.source.v1 import SourceV1Role
 from tests.server.test_role_activation import (
     _PLAYER_STATE,
+    CLIENT_ID,
     _client,
     _connect,
     _drain_priority,
@@ -64,6 +65,33 @@ async def test_source_only_client_gets_playback_ahead_of_start_until_stop() -> N
     fake.sent.clear()
     role.request_stop()
     assert await _send_all(conn, fake) == [{"activities": []}, {"source": {"command": "stop"}}]
+
+
+@pytest.mark.asyncio
+async def test_start_stopped_before_it_is_sent_never_reaches_the_wire() -> None:
+    """A start still queued when a stop drops 'playback' is not sent after that activation."""
+    conn, fake, role = await _source(["source@v1"])
+
+    role.request_start()
+    role.request_stop()
+
+    sent = await _send_all(conn, fake)
+    assert {"source": {"command": "start"}} not in sent
+    assert sent[-1] == {"source": {"command": "stop"}}
+
+
+@pytest.mark.asyncio
+async def test_revoking_source_approval_drops_playback() -> None:
+    """A wanted source whose approval is revoked no longer holds 'playback'."""
+    conn, _fake, role = await _source(["source@v1"], category=PskCategory.SENTINEL)
+    role.request_start()
+    assert conn._declared_activities == [Activity.PLAYBACK]  # noqa: SLF001
+
+    store = conn._server.pairing_store  # noqa: SLF001
+    await store.add_trusted_unpaired(TrustedUnpairedClient(client_id=CLIENT_ID))
+    await conn.refresh_trusted_unpaired()
+
+    assert conn._declared_activities == []  # noqa: SLF001
 
 
 @pytest.mark.asyncio
