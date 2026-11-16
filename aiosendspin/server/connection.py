@@ -1694,6 +1694,9 @@ class SendspinConnection:
             self._flag_legacy_artwork_wire(client_info.artwork_support)
             # DEPRECATED(spec-pr-287): remove in aiosendspin <version>
             self._expects_rehandshake_hellos = True
+        # DEPRECATED(spec-pr-335): remove in aiosendspin <version>
+        if client_info.source_support is not None:
+            self._flag_noncompliance("client/hello sent the removed source@v1_support")
         # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
         visualizer_support = client_info.visualizer_support
         if visualizer_support is not None and visualizer_support.has_stream_config:

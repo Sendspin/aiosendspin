@@ -13,8 +13,6 @@ from aiosendspin.audio.format import AudioFormat
 from aiosendspin.clock import ManualClock
 from aiosendspin.models.core import ClientStatePayload
 from aiosendspin.models.source import (
-    ClientHelloSourceFeatures,
-    ClientHelloSourceSupport,
     ClientStreamStartPayload,
     ClientStreamStartSource,
     SourceStatePayload,
@@ -30,13 +28,6 @@ from aiosendspin.server.roles.source.v1 import SourceV1Role
 from tests.conftest import flac_frame, sine_pcm_16bit
 
 
-class _FakeInfo:
-    def __init__(self, *, line_sense: bool) -> None:
-        self.source_support = ClientHelloSourceSupport(
-            features=ClientHelloSourceFeatures(line_sense=line_sense)
-        )
-
-
 class _FakeConnection:
     _declares_playback = True
 
@@ -50,19 +41,14 @@ class _FakeServer:
 
 
 class _FakeClient:
-    def __init__(self, *, line_sense: bool = True) -> None:
+    def __init__(self) -> None:
         self.events: list[Any] = []
-        self._info = _FakeInfo(line_sense=line_sense)
         self.connection = _FakeConnection()
         self.sent: list[Any] = []
         self.available = True
         self.noncompliance: list[str] = []
         self.held = False
         self._server = _FakeServer()
-
-    @property
-    def info(self) -> _FakeInfo:
-        return self._info
 
     def flag_noncompliance(self, reason: str) -> None:
         self.noncompliance.append(reason)
@@ -589,24 +575,13 @@ async def test_teardown_ends_active_stream(teardown: str) -> None:
     role.on_binary_chunk(BinaryMessageType.SOURCE_AUDIO_CHUNK.value, 0, b"\x00\x00\x00\x00")
 
 
-def test_client_state_surfaces_signal_only_when_advertised() -> None:
-    """Signal is surfaced only when the source advertised the line_sense feature."""
-    advertised = _FakeClient(line_sense=True)
-    role = SourceV1Role(client=advertised)  # type: ignore[arg-type]
-    role.on_connect()
-    role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT)))
-    event = next(e for e in advertised.events if isinstance(e, SourceSignalChangedEvent))
-    assert event.signal is SignalState.PRESENT
-
-    state = ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT))
-    assert role.client_state_deviations(state) == []
-
-    unadvertised = _FakeClient(line_sense=False)
-    role = SourceV1Role(client=unadvertised)  # type: ignore[arg-type]
-    role.on_connect()
-    assert role.client_state_deviations(state) == ["source signal sent without line_sense support"]
-    role.on_client_state(state)
-    assert not any(isinstance(e, SourceSignalChangedEvent) for e in unadvertised.events)
+def test_source_state_without_signal_is_flagged() -> None:
+    """A source object must carry signal."""
+    role, _client = _connected_role()
+    without = ClientStatePayload(source=SourceStatePayload())
+    with_signal = ClientStatePayload(source=SourceStatePayload(signal=SignalState.ABSENT))
+    assert role.client_state_deviations(without) == ["source object omitted the required signal"]
+    assert role.client_state_deviations(with_signal) == []
 
 
 def test_request_start_and_stop_send_server_command() -> None:
@@ -620,7 +595,7 @@ def test_request_start_and_stop_send_server_command() -> None:
 
 def test_client_state_signal_event_only_fires_on_change() -> None:
     """Clients repeat the signal in every state, so only transitions are surfaced."""
-    client = _FakeClient(line_sense=True)
+    client = _FakeClient()
     role = SourceV1Role(client=client)  # type: ignore[arg-type]
     role.on_connect()
 
@@ -635,13 +610,14 @@ def test_client_state_signal_event_only_fires_on_change() -> None:
     assert signals == [SignalState.PRESENT, SignalState.ABSENT]
 
 
-def test_reconnect_resurfaces_the_current_signal() -> None:
-    """A disconnect forgets the signal, so the client's next report is surfaced again."""
-    client = _FakeClient(line_sense=True)
+@pytest.mark.parametrize("teardown", ["on_disconnect", "on_deactivate"])
+def test_reactivation_resurfaces_the_current_signal(teardown: str) -> None:
+    """A disconnect or deactivation forgets the signal, so the next report is surfaced again."""
+    client = _FakeClient()
     role = SourceV1Role(client=client)  # type: ignore[arg-type]
     role.on_connect()
     role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT)))
-    role.on_disconnect()
+    getattr(role, teardown)()
     role.on_client_state(ClientStatePayload(source=SourceStatePayload(signal=SignalState.PRESENT)))
 
     signals = [e.signal for e in client.events if isinstance(e, SourceSignalChangedEvent)]

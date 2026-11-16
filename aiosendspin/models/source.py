@@ -9,6 +9,7 @@ from .base import SendspinConfig, SendspinModel
 from .types import AudioCodec, ClientMessage, SignalState
 
 
+# DEPRECATED(spec-pr-335): remove in aiosendspin <version>
 # Client -> Server: client/hello source@v1 support object
 @dataclass
 class ClientHelloSourceFeatures(SendspinModel):
@@ -60,7 +61,7 @@ class SourceStatePayload(SendspinModel):
     """Source state reported in client/state."""
 
     signal: SignalState | None = None
-    """Signal/line-sense presence, only if 'line_sense' is supported."""
+    """Whether the source has input audio to offer."""
 
     class Config(SendspinConfig):
         """Config for parsing json messages."""

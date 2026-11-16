@@ -78,6 +78,7 @@ class SourceV1Role(Role):
         # Stamp decoder output produced during flush.
         self._last_timestamp_us = 0
         self._signal: SignalState | None = None
+        self._returning_signal: SignalState | None = None
         self._decode_error_count = 0
         self._last_decode_error_log_s: float | None = None
         self._unsupported_count = 0
@@ -419,30 +420,27 @@ class SourceV1Role(Role):
         if was_active:
             self._client._signal_event(SourceStreamEndedEvent())  # noqa: SLF001
 
+    # DEPRECATED(spec-pr-335): remove in aiosendspin <version>
     def client_state_deviations(self, payload: ClientStatePayload) -> list[str]:
-        """Report a line_sense signal from a source that did not advertise line_sense."""
-        if (
-            payload.source is not None
-            and payload.source.signal is not None
-            and not self._line_sense_supported()
-        ):
-            return ["source signal sent without line_sense support"]
+        """Report a source object without the required signal."""
+        if payload.source is not None and payload.source.signal is None:
+            return ["source object omitted the required signal"]
         return []
 
     def on_client_state(self, payload: ClientStatePayload) -> None:
-        """Send a queued start the state allows, and surface a line_sense signal change."""
+        """Send a queued start the state allows, and surface a signal change."""
         source = payload.source
         if source is not None:
             self._source_state_received = True
         self._send_queued_start()
-        if source is None or source.signal is None or not self._line_sense_supported():
-            return
-        if source.signal == self._signal:
-            return
-        self._signal = source.signal
-        self._client._signal_event(  # noqa: SLF001
-            SourceSignalChangedEvent(signal=source.signal)
-        )
+        signal = source.signal if source is not None else None
+        if payload.available and not self._client.available:
+            # The first signal after the client becomes available again counts as a change.
+            # on_availability_changed surfaces it once the client counts as available.
+            self._signal = None
+            self._returning_signal = signal
+        elif signal is not None:
+            self._surface_signal(signal)
 
     def on_availability_changed(
         self,
@@ -452,6 +450,9 @@ class SourceV1Role(Role):
         """Send a queued start once available, and treat becoming unavailable as a stop."""
         if new_available:
             self._send_queued_start()
+            if self._returning_signal is not None:
+                self._surface_signal(self._returning_signal)
+                self._returning_signal = None
             return
         self._stream_wanted = False
         self._end_stream()
@@ -465,6 +466,13 @@ class SourceV1Role(Role):
     def _refresh_activities(self) -> None:
         if (connection := self._client.connection) is not None:
             connection._refresh_activities()  # noqa: SLF001
+
+    def _surface_signal(self, signal: SignalState) -> None:
+        """Emit SourceSignalChangedEvent when the signal differs from the last one surfaced."""
+        if signal == self._signal:
+            return
+        self._signal = signal
+        self._client._signal_event(SourceSignalChangedEvent(signal=signal))  # noqa: SLF001
 
     def _send_queued_start(self) -> None:
         """Send the queued start command once `can_start` allows it and 'playback' is declared."""
@@ -480,13 +488,4 @@ class SourceV1Role(Role):
             ServerCommandMessage(
                 payload=ServerCommandPayload(source=SourceCommandServerPayload(command="start"))
             )
-        )
-
-    def _line_sense_supported(self) -> bool:
-        """Whether the source advertised the 'line_sense' feature in client/hello."""
-        support = self._client.info.source_support
-        return (
-            support is not None
-            and support.features is not None
-            and bool(support.features.line_sense)
         )

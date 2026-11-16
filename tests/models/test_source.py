@@ -49,17 +49,11 @@ def test_hello_parses_source_support_and_features() -> None:
     assert hello.source_support.features.line_sense is True
 
 
-def test_hello_serializes_support_under_versioned_alias() -> None:
-    """source_support round-trips under the wire key ``source@v1_support``."""
-    hello = ClientHelloPayload.from_dict(_hello_dict())
-    assert "source@v1_support" in hello.to_dict()
-
-
-def test_hello_source_role_without_support_object_is_recorded() -> None:
-    """Listing source@v1 without its versioned support object records it as missing."""
+def test_hello_source_role_needs_no_support_object() -> None:
+    """A listed source@v1 without a support object stays activatable."""
     hello = ClientHelloPayload(name="x", supported_roles=["source@v1"])
-    assert hello.missing_support_roles == ["source@v1"]
-    assert hello.activatable_roles == []
+    assert hello.missing_support_roles is None
+    assert hello.activatable_roles == ["source@v1"]
 
 
 def test_hello_drops_source_support_without_role() -> None:

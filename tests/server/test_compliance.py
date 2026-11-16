@@ -426,6 +426,14 @@ _OPUS_FORMAT = {"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth
             id="opus-only-player",
         ),
         pytest.param(
+            {
+                "supported_roles": ["source@v1"],
+                "source@v1_support": {"features": {"line_sense": True}},
+            },
+            "client/hello sent the removed source@v1_support",
+            id="source-support",
+        ),
+        pytest.param(
             {"device_info": {"mac_address": "AA:BB:CC:DD:EE:FF"}},
             "client/hello sent a mac_address not in lowercase colon-separated form",
             id="uppercase-mac",
