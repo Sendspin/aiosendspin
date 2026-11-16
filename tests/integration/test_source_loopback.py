@@ -28,7 +28,10 @@ from tests.conftest import sine_pcm_16bit
 
 
 class _ServerSideConnection:
-    pass
+    _declares_playback = True
+
+    def _refresh_activities(self) -> None:
+        pass
 
 
 class _ServerSide:
