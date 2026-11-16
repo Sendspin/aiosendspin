@@ -1938,18 +1938,17 @@ class SendspinConnection:
         if not isinstance(transport, EncryptedWebSocket):
             raise PairingError("cannot pair over an unencrypted connection")
         self._refuse_unadvertised_pairing(attempt)
+        # Claimed before leaving playback, so an attempt started meanwhile is refused.
+        self._pairing_attempt = attempt
         if not self._in_pairing:
-            if self._pairing_quiesces:
-                await self._quiesce_for_pairing()
-            # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
-            # Legacy-generation clients read only pairing messages during an attempt.
-            if self._legacy_hello:
-                await self._pause_writer()
-            self._in_pairing = True
+            try:
+                await self._enter_pairing()
+            except BaseException:
+                self._pairing_attempt = None
+                raise
         # Pairing messages arriving outside an attempt are discarded rather than queued.
         queue: asyncio.Queue[WSMessage] = asyncio.Queue()
         self._pairing_message_queue = queue
-        self._pairing_attempt = attempt
         dispatched = QueuedEncryptedWebSocket(transport, queue)
         # Awaited below, so skip create_task's unhandled-exception logging.
         task = asyncio.Task(self._pair(dispatched), loop=self._server.loop, eager_start=True)
@@ -2066,6 +2065,15 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
         # Legacy-generation clients admit no activity set that mixes pairing and playback.
         return self._legacy_hello or self._is_long_term_paired
+
+    async def _enter_pairing(self) -> None:
+        if self._pairing_quiesces:
+            await self._quiesce_for_pairing()
+        # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
+        # Legacy-generation clients read only pairing messages during an attempt.
+        if self._legacy_hello:
+            await self._pause_writer()
+        self._in_pairing = True
 
     async def _quiesce_for_pairing(self) -> None:
         """Quiesce playback and roles for pairing, then wait for the teardown to flush."""

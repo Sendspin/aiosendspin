@@ -4626,6 +4626,52 @@ async def test_connect_with_pairing_leaves_a_running_attempt_alone() -> None:
                 await running
 
 
+async def test_pairing_attempt_started_while_leaving_playback_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second attempt on a long-term session leaving playback for the first is refused."""
+    server_store = InMemoryServerPairingStore()
+    server = _make_server(server_store)
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    await _seed_long_term(server, server_store, client_store, identity.peer_id)
+    quiescing = asyncio.Event()
+    release = asyncio.Event()
+    quiesce = SendspinConnection._quiesce_for_pairing  # noqa: SLF001
+
+    async def gated_quiesce(self: SendspinConnection) -> None:
+        quiescing.set()
+        await release.wait()
+        await quiesce(self)
+
+    monkeypatch.setattr(SendspinConnection, "_quiesce_for_pairing", gated_quiesce)
+
+    def attempt() -> PairingAttempt:
+        return PairingAttempt(
+            method=PairMethod.PAIRING_PSK, pairing_psk=generate_psk(), client_id=identity.peer_id
+        )
+
+    async with _serve(server) as url:
+        sdk = make_sdk_client(
+            identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+        )
+        try:
+            await sdk.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            first = asyncio.create_task(conn.initiate_pairing(attempt()))
+            async with asyncio.timeout(5):
+                await quiescing.wait()
+
+            with pytest.raises(PairingError, match="already in a pairing attempt"):
+                await conn.initiate_pairing(attempt())
+        finally:
+            release.set()
+            first.cancel()
+            with suppress(BaseException):
+                await first
+            await sdk.disconnect()
+
+
 async def test_pairing_psk_dial_without_the_client_psk_reconnects_onto_the_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
