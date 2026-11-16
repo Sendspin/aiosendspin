@@ -1665,6 +1665,91 @@ async def test_late_joiner_shares_group_timeline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_second_joiner_during_catchup_gets_the_catchup_audio() -> None:
+    """A role that joins while another role with the same format catches up gets the same audio."""
+
+    class TransformerA:
+        pending_timestamp_us: int | None = None
+        frame_bytes = 4800
+        held_frames = 0
+
+        def __init__(self) -> None:
+            self._buffer = b""
+
+        @property
+        def frame_duration_us(self) -> int:
+            return self.frame_bytes * 1_000_000 // (48000 * 4)
+
+        def process(self, pcm: bytes, _ts: int, _dur: int) -> list[tuple[bytes, int]]:
+            self._buffer += pcm
+            frames = []
+            while len(self._buffer) >= (1 + self.held_frames) * self.frame_bytes:
+                frames.append((self._buffer[: self.frame_bytes], self.frame_duration_us))
+                self._buffer = self._buffer[self.frame_bytes :]
+            return frames
+
+        def flush(self) -> list[tuple[bytes, int]]:
+            return []
+
+        def get_header(self) -> bytes | None:
+            return None
+
+        def reset(self) -> None:
+            self._buffer = b""
+
+    class TransformerB(TransformerA):
+        frame_bytes = 1920
+        held_frames = 1
+
+    def make_role(transformer: TransformerA) -> _DummyRole:
+        return _DummyRole(
+            AudioRequirements(
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+                transformer=transformer,
+                channel_id=MAIN_CHANNEL,
+                frame_duration_us=transformer.frame_duration_us,
+            ),
+            replay_from_pcm_cache=True,
+        )
+
+    group = _DummyGroup(clients=[])
+    role1 = make_role(TransformerA())
+    group.clients.append(_DummyClient([role1]))
+    clock = ManualClock()
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=clock, group=group)
+
+    async def commit_one() -> None:
+        stream.prepare_audio(bytes(7200), AudioFormat(sample_rate=48000, bit_depth=24, channels=2))
+        await stream.commit_audio()
+
+    for _ in range(4):
+        await commit_one()
+
+    transformer_b = TransformerB()
+    role2 = make_role(transformer_b)
+    role3 = make_role(transformer_b)
+    # The join target lies past the one frame the encoder emits for the last cached
+    # chunk, so the catch-up caches that frame and waits for more audio.
+    tail_us = role1.received[-1].timestamp_us + role1.received[-1].duration_us
+    target_us = stream.get_late_join_target_timestamp_us(role=role2, channel_id=MAIN_CHANNEL)
+    clock.advance_us(tail_us - 12_000 - target_us)
+    group.clients.append(_DummyClient([role2]))
+    stream.on_role_join(role2)
+    group.clients.append(_DummyClient([role3]))
+    stream.on_role_join(role3)
+
+    for _ in range(2):
+        await commit_one()
+    await _drain_catchup_tasks(stream)
+    await commit_one()
+
+    assert role2.received
+    assert [c.timestamp_us for c in role3.received] == [c.timestamp_us for c in role2.received]
+
+
+@pytest.mark.asyncio
 async def test_late_joiner_on_own_channel_shares_timeline_after_stall() -> None:
     """A joiner on its own channel must share the timeline even after a production stall.
 
