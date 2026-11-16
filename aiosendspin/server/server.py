@@ -730,7 +730,7 @@ class SendspinServer:
         connection = client.connection if client is not None else None
         if connection is None or connection._disconnecting:  # noqa: SLF001
             return False
-        if connection._pairing_attempt is not None:  # noqa: SLF001
+        if connection._attempt_running:  # noqa: SLF001
             logger.debug("Dropping pairing attempt: client %s is already pairing", client_id)
             return True
         create_task(self._pair_in_background(connection, attempt))

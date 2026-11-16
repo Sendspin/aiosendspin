@@ -1240,6 +1240,11 @@ class SendspinConnection:
         return self._noise_psk.category is PskCategory.PAIRING
 
     @property
+    def _attempt_running(self) -> bool:
+        """Whether a pairing attempt runs, through its final re-handshake."""
+        return self._pairing_attempt is not None or self._pairing_message_queue is not None
+
+    @property
     def _pairing_in_progress(self) -> bool:
         """Whether the connection is in pairing, including on connect."""
         return self._in_pairing or self._pairing_message_queue is not None
@@ -1930,7 +1935,7 @@ class SendspinConnection:
         Any other failure propagates for the caller to disconnect.
         Leaving pairing closes a connection that fails to return to its pairing record.
         """
-        if self._pairing_attempt is not None:
+        if self._attempt_running:
             raise PairingError("connection is already in a pairing attempt")
         if attempt.method is PairMethod.PAIRING_PSK and attempt.client_id != self._client_id:
             raise InvalidPairingCodeError("pairing token is for another client")

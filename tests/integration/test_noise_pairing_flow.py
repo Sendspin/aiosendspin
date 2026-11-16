@@ -4672,6 +4672,53 @@ async def test_pairing_attempt_started_while_leaving_playback_is_refused(
             await sdk.disconnect()
 
 
+async def test_pairing_attempt_started_during_the_final_rehandshake_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second attempt while a finalized one re-keys onto its record is refused."""
+    server = _make_server(InMemoryServerPairingStore())
+    identity = Identity.generate()
+    client_store = InMemoryClientPairingStore()
+    pairing = generate_psk()
+    await client_store.set_pairing_psk(PairingPsk(psk_id=psk_id_for(pairing), psk=pairing))
+    rekeying = asyncio.Event()
+    release = asyncio.Event()
+    rehandshake = SendspinConnection._rehandshake_to  # noqa: SLF001
+
+    async def gated_rehandshake(self: SendspinConnection, *args: Any) -> bool:
+        if self._pairing_attempt is None:
+            rekeying.set()
+            await release.wait()
+        return await rehandshake(self, *args)
+
+    monkeypatch.setattr(SendspinConnection, "_rehandshake_to", gated_rehandshake)
+
+    def attempt() -> PairingAttempt:
+        return PairingAttempt(
+            method=PairMethod.PAIRING_PSK, pairing_psk=pairing, client_id=identity.peer_id
+        )
+
+    async with _serve(server) as url:
+        sdk = make_sdk_client(
+            identity=identity, pairing_store=client_store, client_name="c", roles=[Roles.CONTROLLER]
+        )
+        try:
+            await sdk.connect(url)
+            conn = await _find_connection_by_client_id(server, identity.peer_id)
+            first = asyncio.create_task(conn.initiate_pairing(attempt()))
+            async with asyncio.timeout(5):
+                await rekeying.wait()
+
+            with pytest.raises(PairingError, match="already in a pairing attempt"):
+                await conn.initiate_pairing(attempt())
+            release.set()
+            async with asyncio.timeout(5):
+                await first
+        finally:
+            release.set()
+            await sdk.disconnect()
+
+
 async def test_pairing_psk_dial_without_the_client_psk_reconnects_onto_the_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
