@@ -703,6 +703,10 @@ class SendspinServer:
             warn_deprecated("ConnectionReason.MANAGEMENT", MANAGEMENT_DEPRECATION)
         self._connection_reasons[url] = connection_reason
         if url in self._initial_connect_succeeded:
+            if pairing_attempt is not None:
+                self._dial(
+                    url, connection_reason=connection_reason, pairing_attempt=pairing_attempt
+                )
             return
 
         waiter: asyncio.Future[None] = self._loop.create_future()

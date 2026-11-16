@@ -4480,10 +4480,9 @@ async def test_pairing_psk_dial_pairs_the_token_client() -> None:
         await server.close()
 
 
-@pytest.mark.parametrize("awaited", [True, False])
+@pytest.mark.parametrize("call", ["initiate_pairing", "connect", "connect_and_wait"])
 async def test_pairing_queued_on_a_connecting_dial_runs_on_it(
-    monkeypatch: pytest.MonkeyPatch,
-    awaited: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch, call: str
 ) -> None:
     """Pairing a known client whose dial is mid-handshake pairs on that connection."""
     server_store = InMemoryServerPairingStore()
@@ -4516,16 +4515,18 @@ async def test_pairing_queued_on_a_connecting_dial_runs_on_it(
             async with asyncio.timeout(5):
                 await in_hello.wait()
             dialed = server._dial_connections[url]  # noqa: SLF001
-            if awaited:
+            if call == "initiate_pairing":
                 pairing_task = asyncio.create_task(
                     server.initiate_pairing(identity.peer_id, attempt)
                 )
                 await asyncio.sleep(0)
-            else:
+            elif call == "connect":
                 server.connect_to_client(url, pairing_attempt=attempt)
+            else:
+                await server.connect_to_client_and_wait(url, pairing_attempt=attempt)
             release_hello.set()
 
-            if awaited:
+            if call == "initiate_pairing":
                 async with asyncio.timeout(5):
                     await pairing_task
             await _await_paired_session(sdk)
