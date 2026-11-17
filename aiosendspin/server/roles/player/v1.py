@@ -164,6 +164,11 @@ class PlayerV1Role(Role):
         self._preferred_format = value
 
     @property
+    def client_format(self) -> SupportedAudioFormat | None:
+        """Return the format the client asked for on this connection, or None without one."""
+        return self._client_format
+
+    @property
     def preferred_codec(self) -> AudioCodec | None:
         """Return the preferred audio codec for this player."""
         return self._preferred_codec
