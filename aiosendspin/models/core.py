@@ -1041,7 +1041,7 @@ class GroupUpdateServerPayload(SendspinModel):
     playback_state: PlaybackStateType | None = None
     """Playback state of the group."""
     group_id: str | None = None
-    """Group identifier."""
+    """Group identifier, 43 base64url characters."""
     group_name: str | None = None
     """Friendly name of the group."""
 
