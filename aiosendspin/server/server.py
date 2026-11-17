@@ -89,6 +89,14 @@ _NO_PLAYBACK_RECLAIM_GOODBYE_REASONS: frozenset[GoodbyeReason] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class _MdnsGoodbyeBlock:
+    """Stops mDNS from redialing a client after a goodbye without a reconnect request."""
+
+    url: str
+    survives_removal: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _ServerInitiatedConnectionOptions:
     """Retry policy for a server-initiated client URL."""
 
@@ -346,8 +354,8 @@ class SendspinServer:
         self._pending_connections = set()
 
         self._mdns_client_urls: dict[str, str] = {}
-        # mDNS URLs whose client said goodbye with a no-reconnect reason.
-        self._mdns_goodbye_urls: set[str] = set()
+        # mDNS service names whose client ended its session without asking for a reconnect.
+        self._mdns_goodbye_blocks: dict[str, _MdnsGoodbyeBlock] = {}
         self._dial_connections: dict[str, SendspinConnection] = {}
         # URLs dialed explicitly while their dial task's connection was closing.
         self._redial_urls: set[str] = set()
@@ -667,7 +675,7 @@ class SendspinServer:
         retry_initial_connection: bool = False,
         pairing_attempt: PairingAttempt | None = None,
     ) -> None:
-        self._mdns_goodbye_urls.discard(url)
+        self._lift_mdns_goodbye_blocks(url)
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         self._connection_reasons[url] = connection_reason
         prev_task = self._connection_tasks.get(url)
@@ -709,7 +717,7 @@ class SendspinServer:
         if self._pair_on_existing_connection(url, pairing_attempt):
             return
         self._redial_if_closing(url)
-        self._mdns_goodbye_urls.discard(url)
+        self._lift_mdns_goodbye_blocks(url)
         self._set_connection_options(url, retry_initial_connection=retry_initial_connection)
         # DEPRECATED(spec-pr-183): remove in aiosendspin <version>
         if connection_reason is ConnectionReason.MANAGEMENT:
@@ -1263,8 +1271,10 @@ class SendspinServer:
                         first_connection_succeeded = False
                     elif not conn.should_retry_server_initiated_connection:
                         reason = conn.goodbye_reason
-                        if url in self._mdns_client_urls.values() and _ended_without_redial(conn):
-                            self._mdns_goodbye_urls.add(url)
+                        names = [n for n, u in self._mdns_client_urls.items() if u == url]
+                        if names and _ended_without_redial(conn):
+                            for name in names:
+                                self._block_mdns_redial(name, url, conn)
                         logger.debug(
                             "Not reconnecting to %s (goodbye reason: %s)",
                             url,
@@ -1540,7 +1550,7 @@ class SendspinServer:
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
 
             def _schedule_add() -> None:
-                create_task(self._handle_service_added(zeroconf, service_type, name, state_change))
+                create_task(self._handle_service_added(zeroconf, service_type, name))
 
             self._loop.call_soon_threadsafe(_schedule_add)
         elif state_change is ServiceStateChange.Removed:
@@ -1551,7 +1561,6 @@ class SendspinServer:
         zeroconf: Zeroconf,
         service_type: str,
         name: str,
-        state_change: ServiceStateChange,
     ) -> None:
         info = AsyncServiceInfo(service_type, name)
         if not info.load_from_cache(zeroconf):
@@ -1561,15 +1570,14 @@ class SendspinServer:
         if url is None:
             return
         old_url = self._mdns_client_urls.get(name)
-        if state_change is ServiceStateChange.Updated and (
-            old_url in self._mdns_goodbye_urls or self._is_closing_without_redial(old_url)
-        ):
+        if old_url is not None and name not in self._mdns_goodbye_blocks:
+            self._block_mdns_redial_if_closing(name, old_url)
+        if (block := self._mdns_goodbye_blocks.get(name)) is not None:
             logger.debug("Not redialing %s after its goodbye on an mDNS update", name)
-            if url != old_url:
-                self._mdns_goodbye_urls.discard(old_url)
-                self._mdns_goodbye_urls.add(url)
-                self._mdns_client_urls[name] = url
-                for client_id in [c for c, u in self._client_urls.items() if u == old_url]:
+            self._mdns_client_urls[name] = url
+            if url != block.url:
+                self._mdns_goodbye_blocks[name] = _MdnsGoodbyeBlock(url, block.survives_removal)
+                for client_id in [c for c, u in self._client_urls.items() if u == block.url]:
                     self.register_client_url(client_id, url)
             return
         if old_url is not None and old_url != url and old_url in self._connection_tasks:
@@ -1621,25 +1629,42 @@ class SendspinServer:
         )
         return True
 
-    def _is_closing_without_redial(self, url: str | None) -> bool:
-        if url is None or not self._dial_closing_for_good(url):
-            return False
-        return url not in self._redial_urls and _ended_without_redial(self._dial_connections[url])
+    def _block_mdns_redial(self, name: str, url: str, conn: SendspinConnection) -> None:
+        survives_removal = conn.goodbye_reason in _NO_REDIAL_GOODBYE_REASONS
+        self._mdns_goodbye_blocks[name] = _MdnsGoodbyeBlock(url, survives_removal)
+
+    def _block_mdns_redial_if_closing(self, name: str, url: str) -> None:
+        """Block a client whose session is ending without a redial, before its dial task does."""
+        if not self._dial_closing_for_good(url) or url in self._redial_urls:
+            return
+        conn = self._dial_connections[url]
+        if _ended_without_redial(conn):
+            self._block_mdns_redial(name, url, conn)
+
+    def _lift_mdns_goodbye_blocks(self, url: str) -> None:
+        for name in [n for n, block in self._mdns_goodbye_blocks.items() if block.url == url]:
+            del self._mdns_goodbye_blocks[name]
 
     def _handle_service_removed(self, name: str) -> None:
         url = self._mdns_client_urls.pop(name, None)
         if url is None:
             return
+        if name not in self._mdns_goodbye_blocks:
+            self._block_mdns_redial_if_closing(name, url)
+        block = self._mdns_goodbye_blocks.get(name)
+        if block is not None and not block.survives_removal:
+            del self._mdns_goodbye_blocks[name]
+            block = None
         if not self._mdns_client_urls:
             self._schedule_mdns_requery(_MDNS_REQUERY_FIRST_S)
-        self._mdns_goodbye_urls.discard(url)
         # Keep the retry loop alive if a normal client still wants to be reached.
         # mDNS can drop ahead of the device coming back, and the device may not
         # re-announce until something else nudges it (router-side delay, ESP
         # firmware that announces only on cold boot).
         if not self._has_persistent_client_for_url(url):
             self.disconnect_from_client(url)
-        create_task(self._cleanup_retained_clients_for_removed_mdns_url(url))
+        if block is None:
+            create_task(self._cleanup_retained_clients_for_removed_mdns_url(url))
 
     def _has_persistent_client_for_url(self, url: str) -> bool:
         for client_id, known_url in self._client_urls.items():
