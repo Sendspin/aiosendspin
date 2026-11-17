@@ -47,16 +47,21 @@ def test_count_zero_branch_seeds_offset_from_first_sample() -> None:
     assert filter_._drift == 0.0
 
 
-def test_zero_error_measurements_do_not_divide_by_zero() -> None:
-    """Repeated zero-error loopback measurements must not raise ZeroDivisionError."""
-    filter_ = SendspinTimeFilter()  # default process_std_dev=0.0
+@pytest.mark.parametrize("max_error", [0, -1])
+def test_measurement_without_positive_max_error_is_discarded(max_error: int) -> None:
+    """A measurement with max_error <= 0 leaves the filter state unchanged."""
+    filter_ = SendspinTimeFilter()
+    t = _feed_constant_offset(filter_, offset_us=1_000, count=3)
 
-    t = 1_000_000
-    for _ in range(5):
-        filter_.update(measurement=0, max_error=0, time_added=t)
-        t += 1_000_000
+    snapshot_count = filter_.count
+    snapshot_offset = filter_.offset
+    snapshot_last_update = filter_._last_update
 
-    assert filter_.count == 5
+    filter_.update(measurement=9_999, max_error=max_error, time_added=t)
+
+    assert filter_.count == snapshot_count
+    assert filter_.offset == snapshot_offset
+    assert filter_._last_update == snapshot_last_update
 
 
 def test_count_one_branch_estimates_drift_from_two_point_slope() -> None:

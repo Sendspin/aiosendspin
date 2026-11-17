@@ -990,7 +990,9 @@ async def test_attempt_runs_alongside_other_traffic(monkeypatch: pytest.MonkeyPa
         now_us = connection.now_us()
         time_reply = ServerTimeMessage(
             payload=ServerTimePayload(
-                client_transmitted=now_us, server_received=now_us, server_transmitted=now_us
+                client_transmitted=now_us - 1_000,
+                server_received=now_us,
+                server_transmitted=now_us,
             )
         )
         await connection._handle_json_message(time_reply.to_json(), connection.now_us())  # noqa: SLF001
