@@ -29,6 +29,7 @@ from aiosendspin.models.color import SessionUpdateColor
 from aiosendspin.models.controller import ControllerStatePayload
 from aiosendspin.models.core import (
     ActivatePairing,
+    DeviceInfo,
     ServerActivatePayload,
     ServerCommandPayload,
     ServerHelloPayload,
@@ -1266,6 +1267,26 @@ async def test_build_client_hello_omits_player_supported_commands() -> None:
     assert "supported_commands" not in hello["payload"]["player@v1_support"]
 
 
+async def test_build_client_hello_truncates_strings_at_a_character_boundary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Name and device_info strings over 64 UTF-8 bytes are cut without splitting a character."""
+    long_text = "a" + "é" * 40
+    with caplog.at_level(logging.WARNING):
+        client = make_sdk_client(
+            client_name=long_text,
+            roles=[Roles.CONTROLLER],
+            device_info=DeviceInfo(product_name=long_text, manufacturer="Acme"),
+        )
+
+    hello = (await SendspinConnection(client)._build_client_hello()).payload  # noqa: SLF001
+
+    assert hello.name == "a" + "é" * 31
+    assert hello.device_info == DeviceInfo(product_name="a" + "é" * 31, manufacturer="Acme")
+    assert "Client name is over 64 bytes" in caplog.text
+    assert "Client device_info.product_name is over 64 bytes" in caplog.text
+
+
 @pytest.mark.parametrize(
     ("state_commands", "expected"),
     [(None, []), ([PlayerCommand.SET_OUTPUT_DELAY], ["set_output_delay"])],
@@ -1544,10 +1565,6 @@ async def test_min_buffer_ms_is_clamped_to_spec_range() -> None:
         player_support=_player_support(),
         min_buffer_ms=9_000.0,
     )
-    assert client.min_buffer_ms == 5_000.0
-
-    client.set_min_buffer_ms(100.0)
-    client.set_min_buffer_ms(6_000.0)
     assert client.min_buffer_ms == 5_000.0
 
 

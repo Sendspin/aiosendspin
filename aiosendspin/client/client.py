@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from aiohttp import ClientSession, web
 
@@ -40,7 +40,7 @@ from aiosendspin.noise.driver import HandshakeAbortedError
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.session import NoiseCipherSuite
 from aiosendspin.noise.trust_store import ClientPairingStore, ResolvedPsk
-from aiosendspin.util import create_task
+from aiosendspin.util import FRIENDLY_NAME_MAX_BYTES, create_task
 
 from .connection import DECODABLE_CODECS, UNSYNCED_PLAY_LEAD_US, SendspinConnection
 from .models import (
@@ -282,6 +282,18 @@ class SendspinClient:
         self._client_id = identity.peer_id
         self._client_name = client_name
         self._device_info = device_info
+        hello_strings = {"name": client_name}
+        if device_info is not None:
+            hello_strings |= {
+                f"device_info.{f.name}": getattr(device_info, f.name) for f in fields(device_info)
+            }
+        for field, value in hello_strings.items():
+            if value is not None and len(value.encode()) > FRIENDLY_NAME_MAX_BYTES:
+                logger.warning(
+                    "Client %s is over %d bytes in UTF-8, servers get it truncated",
+                    field,
+                    FRIENDLY_NAME_MAX_BYTES,
+                )
         self._roles = list(roles)
         self._pairing_store = pairing_store
         self._pairing_support = pairing_support

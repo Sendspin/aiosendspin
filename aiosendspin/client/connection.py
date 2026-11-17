@@ -9,7 +9,7 @@ import struct
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
@@ -123,7 +123,12 @@ from aiosendspin.noise.pairing import (
 from aiosendspin.noise.pairing_code import format_pairing_code
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
-from aiosendspin.util import WARN_INTERVAL_S, _peek_message_type
+from aiosendspin.util import (
+    FRIENDLY_NAME_MAX_BYTES,
+    WARN_INTERVAL_S,
+    _peek_message_type,
+    truncate_utf8,
+)
 
 from .models import AudioFormat, PCMFormat, ServerInfo
 from .time_sync import SendspinTimeFilter
@@ -1322,10 +1327,20 @@ class SendspinConnection:
             # DEPRECATED(spec-pr-177): remove in aiosendspin <version>
             # Player commands are declared in client/state, never in the hello.
             player_support = replace(player_support, supported_commands=None)
+        device_info = self._client.device_info
+        if device_info is not None:
+            device_info = replace(
+                device_info,
+                **{
+                    f.name: truncate_utf8(value, FRIENDLY_NAME_MAX_BYTES)
+                    for f in fields(device_info)
+                    if (value := getattr(device_info, f.name)) is not None
+                },
+            )
         payload = ClientHelloPayload(
-            name=self._client.client_name,
+            name=truncate_utf8(self._client.client_name, FRIENDLY_NAME_MAX_BYTES),
             supported_roles=[r.value for r in self._client.roles],
-            device_info=self._client.device_info,
+            device_info=device_info,
             player_support=player_support,
             visualizer_support=self._client.visualizer_support,
             supported_pair_methods=await self._build_supported_pair_methods(),
