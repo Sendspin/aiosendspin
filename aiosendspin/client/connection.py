@@ -767,29 +767,31 @@ class SendspinConnection:
                 await store.reset_pairing_rounds()
                 # The operator action is spent on lifting the hold-back.
                 self._client.close_pairing_window()
-            with self._attempt_in_progress():
-                await run_dynamic_pairing_code_client(
-                    ws,
-                    handshake_hash=self._handshake_hash,
-                    pairing_index=pairing_index,
-                    pairing_format=pairing_format,
-                    pairing_code_emitter=partial(
-                        self._emit_pairing_code, pairing_format=pairing_format
-                    ),
-                    server_id=self._server_id,
-                    store=store,
-                    on_finalize=self._end_cancellability,
-                    protected_psk_ids=self._client.protected_psk_ids,
-                )
+            try:
+                with self._attempt_in_progress():
+                    await run_dynamic_pairing_code_client(
+                        ws,
+                        handshake_hash=self._handshake_hash,
+                        pairing_index=pairing_index,
+                        pairing_format=pairing_format,
+                        pairing_code_emitter=partial(
+                            self._emit_pairing_code, pairing_format=pairing_format
+                        ),
+                        server_id=self._server_id,
+                        store=store,
+                        on_finalize=self._end_cancellability,
+                        protected_psk_ids=self._client.protected_psk_ids,
+                    )
+            finally:
+                # A window opened before or during an attempt that ends at the round limit does
+                # not lift the hold-back.
+                if (
+                    self._client.pairing_window_admits(self)
+                    and await store.is_pairing_round_limit_reached()
+                ):
+                    self._client.close_pairing_window()
         finally:
             self._end_cancellability()
-            # A window opened before or during an attempt that ends at the round limit does not
-            # lift the hold-back.
-            if (
-                self._client.pairing_window_admits(self)
-                and await store.is_pairing_round_limit_reached()
-            ):
-                self._client.close_pairing_window()
             await self._emit_pairing_code(None, pairing_format=pairing_format)
 
     def _end_cancellability(self) -> None:

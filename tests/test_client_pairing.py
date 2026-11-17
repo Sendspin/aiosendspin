@@ -10,7 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from aiohttp import WSMsgType
+from aiohttp import WSMessage, WSMsgType
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.client.models import PairingSupport, ServerInfo
@@ -426,6 +426,47 @@ async def test_window_opened_during_attempt_does_not_lift_round_limit(
 
     assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 2
     assert await store.pairing_round_count() == PAIRING_ROUND_LIMIT
+
+
+async def test_held_back_attempt_aborted_after_claiming_keeps_the_window() -> None:
+    """A server abort after the hold-back claimed a window leaves it for the next attempt."""
+    prompt_shown = asyncio.Event()
+    prompt_cleared = asyncio.Event()
+
+    async def prompt(active: bool) -> None:  # noqa: FBT001
+        if active:
+            prompt_shown.set()
+            return
+        prompt_cleared.set()
+        await asyncio.Event().wait()
+
+    async def display(pairing_code: str | None, **_kwargs: object) -> None:
+        pass
+
+    connection, ws = _pairing_connection(
+        PairingSupport(gesture_prompt=prompt, pairing_code_display=display)
+    )
+    client = connection._client  # noqa: SLF001
+    store = client.pairing_store
+    for _ in range(PAIRING_ROUND_LIMIT):
+        await store.record_pairing_round()
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
+    )
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    ws.receive = queue.get  # type: ignore[attr-defined]
+    attempt = asyncio.create_task(
+        connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+    )
+    await asyncio.wait_for(prompt_shown.wait(), timeout=1)
+    client.open_pairing_window()
+    await asyncio.wait_for(prompt_cleared.wait(), timeout=1)
+    abort = PairAbortMessage(payload=PairAbortPayload(reason=PairAbortReason.USER_CANCELLED))
+    queue.put_nowait(WSMessage(WSMsgType.TEXT, abort.to_json(), None))
+
+    with pytest.raises(RemotePairingAbortError):
+        await asyncio.wait_for(attempt, timeout=1)
+    assert client.pairing_window_admits(connection)
 
 
 async def _static_attempt_connection() -> tuple[SendspinConnection, _FakeWS]:
