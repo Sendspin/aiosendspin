@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-from aiohttp import web
+from aiohttp import hdrs, web
 from zeroconf import NonUniqueNameException
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
@@ -136,6 +136,8 @@ class ClientListener:
 
     async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
         """Handle an incoming WebSocket connection from a server."""
+        if hdrs.ORIGIN in request.headers:
+            raise web.HTTPForbidden
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 
