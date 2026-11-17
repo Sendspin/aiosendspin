@@ -1024,3 +1024,27 @@ async def test_leaving_pairing_ends_player_stream_before_dropping_playback() -> 
         "stream/end",
         "server/activate",
     ]
+
+
+@pytest.mark.asyncio
+async def test_activation_after_rehandshake_goes_before_stream_end() -> None:
+    """server/activate stays the first message after a re-handshake that drops playback."""
+    conn, fake = await _connect(_hello([Roles.PLAYER.value]))
+    conn._subscribe_activity_events()  # noqa: SLF001
+    client = _client(conn)
+    client.group.start_stream()
+    player = client.role(Roles.PLAYER.value)
+    assert isinstance(player, PlayerV1Role)
+    player._stream_started = True  # noqa: SLF001
+    conn._streaming_roles.add("player")  # noqa: SLF001
+    await _drain_priority(conn, fake)
+    conn._in_pairing = True  # noqa: SLF001
+    conn._pairing_activities = [Activity.PLAYBACK, Activity.PAIRING]  # noqa: SLF001
+    await client.group.stop()
+    fake.sent.clear()
+
+    conn._in_pairing = False  # noqa: SLF001
+    conn._awaiting_rehandshake_activate = True  # noqa: SLF001
+    await conn._activate()  # noqa: SLF001
+
+    assert fake.sent_payloads()[0]["type"] == "server/activate"

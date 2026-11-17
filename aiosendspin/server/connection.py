@@ -2448,7 +2448,9 @@ class SendspinConnection:
         else:
             previous = self._pairing_activities or self._declared_activities
             self._declared_activities = self._desired_activities
-            self._end_playback_streams_first(previous, self._declared_activities)
+            # The first message under re-handshake keys must be server/activate.
+            if not self._awaiting_rehandshake_activate:
+                self._end_playback_streams_first(previous, self._declared_activities)
         self._send_activation(self._roles_to_activate)
         self._join_roles(awaiting_playback)
         self._priority_messages.extend(held)
