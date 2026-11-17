@@ -167,11 +167,13 @@ from aiosendspin.noise.pairing import (
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
 from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
 from aiosendspin.util import (
+    FRIENDLY_NAME_MAX_BYTES,
     WARN_INTERVAL_S,
     PrefixLoggerAdapter,
     _peek_message_type,
     create_task,
     finish_despite_cancel,
+    truncate_utf8,
     warn_deprecated,
 )
 
@@ -1355,7 +1357,7 @@ class SendspinConnection:
                 LegacyServerHelloMessage(
                     payload=LegacyServerHelloPayload(
                         server_id=self._server.id,
-                        name=self._server.name,
+                        name=truncate_utf8(self._server.name, FRIENDLY_NAME_MAX_BYTES),
                         version=1,
                         active_roles=self._negotiated_roles,
                         connection_reason=connection_reason,
@@ -1466,7 +1468,7 @@ class SendspinConnection:
             )
         languages = self._server.languages
         return ServerHelloPayload(
-            name=self._server.name,
+            name=truncate_utf8(self._server.name, FRIENDLY_NAME_MAX_BYTES),
             languages=list(languages) if languages is not None else None,
             source_support=source_support,
         )

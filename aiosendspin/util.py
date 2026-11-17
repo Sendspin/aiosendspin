@@ -24,6 +24,8 @@ TASKS: set[asyncio.Task[Any]] = set()
 # at default level without emitting one line per event.
 WARN_INTERVAL_S = 30.0
 
+FRIENDLY_NAME_MAX_BYTES = 64
+
 # APIs whose deprecation this process has already reported.
 _WARNED_DEPRECATIONS: set[str] = set()
 
@@ -106,6 +108,11 @@ def _peek_message_type(text: str) -> str | None:
         return None
     message_type = decoded.get("type") if isinstance(decoded, dict) else None
     return message_type if isinstance(message_type, str) else None
+
+
+def truncate_utf8(text: str, max_bytes: int) -> str:
+    """Cut ``text`` to at most ``max_bytes`` in UTF-8 without splitting a character."""
+    return text.encode()[:max_bytes].decode(errors="ignore")
 
 
 def get_local_ip() -> str | None:

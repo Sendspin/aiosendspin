@@ -1030,6 +1030,20 @@ class TestServerHelloSourceSupport:
         assert "source@v1_support" not in fake.sent_payloads()[0]["payload"]
 
 
+class TestServerHelloName:
+    """Tests that server/hello keeps the server name within the spec's byte limit."""
+
+    @pytest.mark.asyncio
+    async def test_long_name_is_cut_at_a_character_boundary(self, mock_server: _MockServer) -> None:
+        """A name over 64 bytes in UTF-8 loses the character the cut would split."""
+        mock_server.name = "a" + "ä" * 40
+        conn = SendspinConnection(mock_server, wsock_client=AsyncMock())
+
+        fake = await _exchange_hellos_encrypted(conn, category=PskCategory.LONG_TERM)
+
+        assert fake.sent_payloads()[0]["payload"]["name"] == "a" + "ä" * 31
+
+
 class TestLegacyServerHello:
     """Tests for the legacy (transition-mode) server/hello path."""
 
