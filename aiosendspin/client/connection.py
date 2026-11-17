@@ -783,6 +783,13 @@ class SendspinConnection:
                 )
         finally:
             self._end_cancellability()
+            # A window opened before or during an attempt that ends at the round limit does not
+            # lift the hold-back.
+            if (
+                self._client.pairing_window_admits(self)
+                and await store.is_pairing_round_limit_reached()
+            ):
+                self._client.close_pairing_window()
             await self._emit_pairing_code(None, pairing_format=pairing_format)
 
     def _end_cancellability(self) -> None:

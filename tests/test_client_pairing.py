@@ -391,6 +391,43 @@ async def test_ungated_dynamic_attempt_leaves_an_open_window(
     assert client.pairing_window_open
 
 
+async def test_window_opened_during_attempt_does_not_lift_round_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window opened during an attempt that ends at the round limit leaves the next held back."""
+    connection, ws = _dynamic_pairing_code_connection()
+    client = connection._client  # noqa: SLF001
+    store = client.pairing_store
+    connection._selected_pairing = ActivatePairing(  # noqa: SLF001
+        method=PairMethod.DYNAMIC_PAIRING_CODE, format="digits"
+    )
+
+    async def fake_run(_ws: object, **_kwargs: object) -> None:
+        client.open_pairing_window()
+        for _ in range(PAIRING_ROUND_LIMIT):
+            await store.record_pairing_round()
+        raise LocalPairingAbortError(PairAbortReason.PAIRING_CODE_MISMATCH)
+
+    monkeypatch.setattr("aiosendspin.client.connection.run_dynamic_pairing_code_client", fake_run)
+    with pytest.raises(LocalPairingAbortError):
+        await connection._run_pairing_protocol(_as_ews(ws), 1)  # noqa: SLF001
+
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    ws.receive = queue.get  # type: ignore[attr-defined]
+    attempt = asyncio.create_task(
+        connection._run_pairing_protocol(_as_ews(ws), 2)  # noqa: SLF001
+    )
+    async with asyncio.timeout(1):
+        while not ws.sent:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+    attempt.cancel()
+    with suppress(asyncio.CancelledError):
+        await attempt
+
+    assert ClientPairPendingMessage.from_json(ws.sent[0]).payload.pairing_index == 2
+    assert await store.pairing_round_count() == PAIRING_ROUND_LIMIT
+
+
 async def _static_attempt_connection() -> tuple[SendspinConnection, _FakeWS]:
     """Build a connection whose client has a static pairing code configured and selected."""
     connection, ws = _static_pairing_code_connection()
