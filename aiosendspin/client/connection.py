@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import struct
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -188,6 +189,8 @@ _VISUALIZATION_BINARY_TYPES: frozenset[BinaryMessageType] = frozenset(
 
 # Binary message IDs the spec leaves to application-specific roles.
 _APPLICATION_BINARY_TYPES = range(192, 256)
+
+_GROUP_ID_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 @dataclass(slots=True)
@@ -1770,6 +1773,9 @@ class SendspinConnection:
         self._client.notify_stream_end(ended)
 
     def _handle_group_update(self, payload: GroupUpdateServerPayload) -> None:
+        if payload.group_id is not None and not _GROUP_ID_RE.fullmatch(payload.group_id):
+            self._close_on_protocol_error("group/update group_id is not 43 base64url characters")
+            return
         self._group_state = payload
         self._client.notify_group_callback(payload)
 
