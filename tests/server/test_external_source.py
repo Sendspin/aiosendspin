@@ -68,6 +68,7 @@ class _DummyServer:
 
 class _DummyConnection:
     receives_group_updates = True
+    _declares_playback = True
 
     def __init__(self) -> None:
         self.sent_messages: list[object] = []

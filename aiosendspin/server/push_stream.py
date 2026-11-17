@@ -1043,7 +1043,7 @@ class PushStream:
     @classmethod
     def _role_in_audio_pipeline(cls, client: SendspinClient, role: Role) -> bool:
         """Whether a specific role should participate in transform/delivery processing."""
-        if client.awaits_role_state(role.role_family):
+        if client.awaits_role_state(role.role_family) or client.awaits_playback(role):
             return False
         if cls._client_in_audio_pipeline(client):
             return True
@@ -2381,6 +2381,11 @@ class PushStream:
     def _do_role_join(self, role: Role) -> None:
         """Execute role join with cached chunk replay."""
         self._pending_join_roles.discard(role)
+        if any(
+            role in client.active_roles and client.awaits_playback(role)
+            for client in self._group.clients
+        ):
+            return
         resume_at_us = self._resume_at_us.get(role)
         # A rejoining role (e.g. warm reconnect) must receive on_stream_start()
         # again so the new transport gets stream/start before any audio chunks.

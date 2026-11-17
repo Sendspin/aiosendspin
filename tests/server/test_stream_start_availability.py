@@ -116,6 +116,7 @@ async def _joiner_in_playing_group(
 ) -> tuple[SendspinConnection, PushStream]:
     """Return a connection awaiting its initial client/state, grouped with a playing owner."""
     conn, _fake = await _connect(_hello(roles or [Roles.PLAYER.value]), send_state=False)
+    conn._subscribe_activity_events()  # noqa: SLF001
     server = conn._server  # noqa: SLF001
     monkeypatch.setattr(
         server, "request_client_playback_connection", lambda _client_id: False, raising=False
@@ -537,6 +538,7 @@ async def test_legacy_external_source_player_gets_stream_start(
 ) -> None:
     """A client in the legacy `external_source` state gets stream/start to leave it."""
     conn, _fake = await _connect(_hello([Roles.PLAYER.value]))
+    conn._subscribe_activity_events()  # noqa: SLF001
     monkeypatch.setattr(
         conn._server,  # noqa: SLF001
         "request_client_playback_connection",

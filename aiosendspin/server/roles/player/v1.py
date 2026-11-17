@@ -100,6 +100,8 @@ class PlayerV1Role(Role):
     - on_stream_end(): Send stream/end message
     """
 
+    requires_playback = True
+
     def __init__(
         self,
         client: SendspinClient | None = None,

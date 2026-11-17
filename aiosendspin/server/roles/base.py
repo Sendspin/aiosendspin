@@ -204,6 +204,9 @@ class Role(ABC):
     resources like BufferTracker.
     """
 
+    requires_playback: bool = False
+    """Whether this role's streams need 'playback' in the connection's activities."""
+
     _client: SendspinClient
     """Reference to the owning client."""
 

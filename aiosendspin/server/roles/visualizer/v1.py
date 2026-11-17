@@ -133,6 +133,8 @@ _WARMUP_LEAD_US = 3_000_000
 class VisualizerV1Role(Role):
     """Role implementation for `visualizer@v1` streaming."""
 
+    requires_playback = True
+
     def __init__(self, client: SendspinClient | None = None) -> None:
         """Initialize VisualizerV1Role."""
         if client is None:

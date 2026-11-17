@@ -933,23 +933,36 @@ class SendspinConnection:
 
     def _supersede_queued_stream(self, role: str) -> bool:
         """Drop queued stream/start and stream/clear, and return whether a stream/end is owed."""
-        if role_queue := self._role_queues.get(role):
-            kept = [
-                item
-                for item in role_queue
-                if not isinstance(item[2].json_message, StreamStartMessage | StreamClearMessage)
-            ]
-            self._queue_size = max(self._queue_size - (len(role_queue) - len(kept)), 0)
-            if kept:
-                heapq.heapify(kept)
-                self._role_queues[role] = kept
-            else:
-                del self._role_queues[role]
-                if drained := self._role_drained.pop(role, None):
-                    drained.set()
-            if any(isinstance(item[2].json_message, StreamEndMessage) for item in kept):
-                return False
+        self._take_queued_messages(role, (StreamStartMessage, StreamClearMessage))
+        if any(
+            isinstance(item[2].json_message, StreamEndMessage)
+            for item in self._role_queues.get(role, ())
+        ):
+            return False
         return role in self._streaming_roles
+
+    def _take_queued_messages(
+        self, role: str, message_types: tuple[type[ServerMessage], ...]
+    ) -> list[ServerMessage]:
+        """Remove a role's queued JSON messages of ``message_types`` and return them in order."""
+        role_queue = self._role_queues.get(role)
+        if not role_queue:
+            return []
+        taken = [item for item in role_queue if isinstance(item[2].json_message, message_types)]
+        if not taken:
+            return []
+        kept = [item for item in role_queue if not isinstance(item[2].json_message, message_types)]
+        self._queue_size = max(self._queue_size - len(taken), 0)
+        if kept:
+            heapq.heapify(kept)
+            self._role_queues[role] = kept
+        else:
+            del self._role_queues[role]
+            if drained := self._role_drained.pop(role, None):
+                drained.set()
+        return [
+            message for _, _, entry in sorted(taken) if (message := entry.json_message) is not None
+        ]
 
     def send_message(self, message: ServerMessage) -> None:
         """Enqueue a non-role JSON message (sent in FIFO order, not tied to any role)."""
@@ -1824,6 +1837,17 @@ class SendspinConnection:
             and self._legacy_hello
         )
 
+    def _roles_awaiting_playback(self) -> list[Role]:
+        if self._client is None:
+            return []
+        return [role for role in self._client.active_roles if self._client.awaits_playback(role)]
+
+    def _join_roles(self, roles: list[Role]) -> None:
+        if self._client is None:
+            return
+        for role in roles:
+            self._client.join_active_stream(role)
+
     @property
     def _client_in_playback(self) -> bool:
         """Whether the client's group is in active/upcoming (non-stopped) playback."""
@@ -1904,10 +1928,24 @@ class SendspinConnection:
         desired = self._desired_activities
         if desired == self._declared_activities:
             return
+        self._end_playback_streams_first(self._declared_activities, desired)
         self._declared_activities = desired
         self.send_priority_message(
             ServerActivateMessage(payload=ServerActivatePayload(activities=desired))
         )
+
+    def _end_playback_streams_first(
+        self, previous: list[Activity], activities: list[Activity]
+    ) -> None:
+        """Send queued stream/end of roles that need playback ahead of an activation dropping it."""
+        if self._client is None:
+            return
+        if Activity.PLAYBACK not in previous or Activity.PLAYBACK in activities:
+            return
+        for role in self._client.active_roles:
+            if role.requires_playback:
+                for message in self._take_queued_messages(role.role_family, (StreamEndMessage,)):
+                    self.send_priority_message(message)
 
     def _subscribe_activity_events(self) -> None:
         """Watch the client's group/playback transitions to keep activities current."""
@@ -2159,11 +2197,13 @@ class SendspinConnection:
                 else ServerActivateMessage(activation_payload)
             )
             self._awaiting_rehandshake_activate = False
+            awaiting_playback = self._roles_awaiting_playback()
             # Count first, since the client's reply can be routed before the send returns.
             self._pairing_index += 1
             # Finish the send through a cancel so the count matches the activations sent.
             _, cancelled = await finish_despite_cancel(transport.send_str(activation.to_json()))
             self._pairing_activities = activation_payload.activities
+            self._join_roles(awaiting_playback)
             if cancelled:
                 await abort_pairing(transport, PairAbortReason.USER_CANCELLED)
             # DEPRECATED(spec-pr-272): remove in aiosendspin <version>
@@ -2402,13 +2442,19 @@ class SendspinConnection:
         # Messages queued while the writer was stopped (a re-handshake) follow the activation.
         held = self._priority_messages.copy()
         self._priority_messages.clear()
+        awaiting_playback = self._roles_awaiting_playback()
         if self._declared_activities is None:
             self._declared_activities = self._initial_activities
             if self._url is not None:
                 self._server._consume_playback_reason(self._url)  # noqa: SLF001
         else:
+            previous = self._pairing_activities or self._declared_activities
             self._declared_activities = self._desired_activities
+            # The first message under re-handshake keys must be server/activate.
+            if not self._awaiting_rehandshake_activate:
+                self._end_playback_streams_first(previous, self._declared_activities)
         self._send_activation(self._roles_to_activate)
+        self._join_roles(awaiting_playback)
         self._priority_messages.extend(held)
         # The writer is paused here, so put the queued activation on the wire now.
         while await self._process_priority_messages(self._transport):

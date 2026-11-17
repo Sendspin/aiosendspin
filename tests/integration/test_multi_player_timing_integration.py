@@ -63,6 +63,7 @@ class _CaptureConnection:
     """Capture connection that records JSON + binary messages in order."""
 
     receives_group_updates = True
+    _declares_playback = True
 
     def __init__(self) -> None:
         self.events: list[_Event] = []

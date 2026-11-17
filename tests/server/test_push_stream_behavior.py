@@ -108,6 +108,8 @@ class _DummyGroup:
 
 
 class _FakeConnection:
+    _declares_playback = True
+
     def __init__(self) -> None:
         self.sent_json: list[object] = []
         self.sent_binary: list[bytes] = []
@@ -223,6 +225,9 @@ class _DummyClient:
         self.connection = _FakeConnection()
 
     def awaits_role_state(self, role_family: str) -> bool:  # noqa: ARG002
+        return False
+
+    def awaits_playback(self, role: _DummyRole) -> bool:  # noqa: ARG002
         return False
 
 

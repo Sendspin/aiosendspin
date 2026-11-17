@@ -62,6 +62,8 @@ class _DummyGroup:
 
 
 class _CaptureConnection:
+    _declares_playback = True
+
     def __init__(self) -> None:
         self.sent_json: list[object] = []
         self.sent_binary: list[tuple[int, bytes]] = []
