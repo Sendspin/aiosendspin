@@ -200,6 +200,17 @@ async def test_start_while_role_inactive_is_ignored() -> None:
     assert client.commands == []
 
 
+async def test_start_without_playback_is_ignored() -> None:
+    """A start on a connection without 'playback' is not recorded."""
+    conn, _, client = _source_connection()
+    conn._activities = []  # noqa: SLF001
+
+    await conn._handle_server_command(_command("start"))  # noqa: SLF001
+
+    assert not conn.is_source_start_authorized()
+    assert client.commands == []
+
+
 async def test_unavailable_clears_pending_start() -> None:
     """Becoming unavailable clears a pending start."""
     conn, _, _ = _source_connection()
@@ -213,14 +224,20 @@ async def test_unavailable_clears_pending_start() -> None:
         await _open(conn)
 
 
-async def test_role_removal_clears_pending_start() -> None:
-    """After the source role is removed and reactivated, a new start is required."""
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
+        ServerActivatePayload(activities=[]),
+    ],
+    ids=["source-removed", "playback-dropped"],
+)
+async def test_source_deactivation_clears_pending_start(payload: ServerActivatePayload) -> None:
+    """After source or 'playback' is dropped and reactivated, a new start is required."""
     conn, ws, _ = _source_connection()
     await conn._handle_server_command(_command("start"))  # noqa: SLF001
 
-    await conn._apply_activation(  # noqa: SLF001
-        ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[])
-    )
+    await conn._apply_activation(payload)  # noqa: SLF001
     await conn._apply_activation(  # noqa: SLF001
         ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[Roles.SOURCE.value])
     )
@@ -234,6 +251,41 @@ async def test_role_removal_clears_pending_start() -> None:
     assert _sent_types(ws) == ["client-stream/start"]
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
+        ServerActivatePayload(activities=[]),
+    ],
+    ids=["source-removed", "playback-dropped"],
+)
+async def test_source_deactivation_ends_stream_whose_start_is_in_flight(
+    payload: ServerActivatePayload,
+) -> None:
+    """Dropping source or 'playback' while client-stream/start is being sent still ends it."""
+    conn, ws, _ = _source_connection()
+    await conn._handle_server_command(_command("start"))  # noqa: SLF001
+    release = asyncio.Event()
+    send_str = ws.send_str
+
+    async def _blocking_send(data: str) -> None:
+        await release.wait()
+        await send_str(data)
+
+    ws.send_str = _blocking_send  # type: ignore[method-assign]
+    open_task = asyncio.create_task(_open(conn))
+    await asyncio.sleep(0)
+    activate_task = asyncio.create_task(conn._apply_activation(payload))  # noqa: SLF001
+    await asyncio.sleep(0)
+    release.set()
+
+    await open_task
+    await activate_task
+
+    assert _sent_types(ws) == ["client-stream/start", "client-stream/end"]
+    assert not conn.is_source_stream_active()
+
+
 async def test_disconnect_clears_pending_start() -> None:
     """A pending start does not survive the connection."""
     client = make_sdk_client(
@@ -245,6 +297,7 @@ async def test_disconnect_clears_pending_start() -> None:
     conn._connected = True  # noqa: SLF001
     conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, PskCategory.LONG_TERM)  # noqa: SLF001
     conn._active_roles = [Roles.SOURCE.value]  # noqa: SLF001
+    conn._activities = [Activity.PLAYBACK]  # noqa: SLF001
     await conn._handle_server_command(_command("start"))  # noqa: SLF001
     assert conn.is_source_start_authorized()
 

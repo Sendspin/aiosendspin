@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from aiosendspin.client.connection import SendspinConnection
@@ -25,10 +27,18 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
     pack_player_audio_header,
 )
-from aiosendspin.models.types import Activity, ArtworkSource, AudioCodec, PictureFormat, Roles
+from aiosendspin.models.types import (
+    Activity,
+    ArtworkSource,
+    AudioCodec,
+    BinaryMessageType,
+    PictureFormat,
+    Roles,
+)
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSupport,
     StreamStartVisualizer,
+    VisualizerFrame,
     VisualizerStatePayload,
 )
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
@@ -43,12 +53,15 @@ class _Recorder:
         self.ended: list[list[str] | None] = []
         self.artwork: list[tuple[int, bytes]] = []
         self.audio: list[bytes] = []
+        self.started: list[StreamStartMessage] = []
+        self.visualizer: list[list[VisualizerFrame]] = []
 
 
 async def _streaming_connection(
     active_roles: list[str] | None = None,
+    activities: list[Activity] | None = None,
 ) -> tuple[SendspinConnection, _Recorder]:
-    """Return a long-term connection with active player, artwork and visualizer streams."""
+    """Return a long-term connection that received a player, artwork and visualizer stream/start."""
     client = make_sdk_client(
         client_name="Test Client",
         roles=[Roles.PLAYER, Roles.ARTWORK, Roles.VISUALIZER],
@@ -72,10 +85,13 @@ async def _streaming_connection(
     client.add_stream_end_listener(recorder.ended.append)
     client.add_artwork_listener(lambda channel, data: recorder.artwork.append((channel, data)))
     client.add_audio_chunk_listener(lambda _ts, data, _fmt, _ahead: recorder.audio.append(data))
+    client.add_stream_start_listener(recorder.started.append)
+    client.add_visualizer_listener(recorder.visualizer.append)
 
     conn = SendspinConnection(client)
     conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, PskCategory.LONG_TERM)  # noqa: SLF001
     conn._active_roles = list(_STREAM_ROLES if active_roles is None else active_roles)  # noqa: SLF001
+    conn._activities = [Activity.PLAYBACK] if activities is None else activities  # noqa: SLF001
     await conn._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(
             payload=StreamStartPayload(
@@ -189,3 +205,42 @@ async def test_activation_ends_removed_application_role() -> None:
     assert recorder.ended == [["_acme"]]
     assert conn._stream_active  # noqa: SLF001
     assert conn._artwork_stream_active  # noqa: SLF001
+
+
+def _send_loudness(conn: SendspinConnection) -> None:
+    conn._handle_binary_message(  # noqa: SLF001
+        bytes([BinaryMessageType.VISUALIZATION_LOUDNESS.value])
+        + struct.pack(">q", 1)
+        + struct.pack(">H", 42)
+    )
+
+
+async def test_stream_start_without_playback_applies_only_artwork() -> None:
+    """Without 'playback', stream/start starts artwork and ignores the player and visualizer."""
+    conn, recorder = await _streaming_connection(activities=[])
+
+    [started] = recorder.started
+    assert started.payload.player is None
+    assert started.payload.visualizer is None
+    assert started.payload.artwork is not None
+    assert not conn._stream_active  # noqa: SLF001
+    assert conn._current_audio_format is None  # noqa: SLF001
+    assert not conn._visualizer_stream_active  # noqa: SLF001
+
+
+async def test_dropping_playback_discards_audio_and_visualization() -> None:
+    """After 'playback' is dropped, player audio and visualization data are discarded."""
+    conn, recorder = await _streaming_connection()
+    _send_audio(conn)
+    _send_loudness(conn)
+    assert recorder.audio != []
+    assert recorder.visualizer != []
+    recorder.audio.clear()
+    recorder.visualizer.clear()
+
+    await conn._apply_activation(ServerActivatePayload(activities=[]))  # noqa: SLF001
+    _send_audio(conn)
+    _send_loudness(conn)
+
+    assert recorder.audio == []
+    assert recorder.visualizer == []

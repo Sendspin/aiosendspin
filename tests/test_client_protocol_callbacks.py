@@ -843,6 +843,7 @@ async def test_audio_binary_passes_raw_send_ahead(send_ahead: int) -> None:
     )
 
     connection = SendspinConnection(client)
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     await connection._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
     )
@@ -1664,6 +1665,7 @@ async def _state_connection(
     connection._send_message = _capture  # type: ignore[method-assign]  # noqa: SLF001
     connection._time_filter = _FakeTimeFilter()  # type: ignore[assignment]  # noqa: SLF001
     connection._active_roles = active_roles  # noqa: SLF001
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     connection._reader_loop = _idle  # type: ignore[method-assign]  # noqa: SLF001
     connection._time_sync_loop = _idle  # type: ignore[method-assign]  # noqa: SLF001
     return connection, sent

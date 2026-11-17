@@ -626,10 +626,10 @@ class SendspinConnection:
             ):
                 return GoodbyeReason.PAIRING_REQUIRED
             return GoodbyeReason.UNAUTHORIZED
-        self._activities = payload.activities
         source_dropped = (
             Roles.SOURCE.value in self._active_roles and Roles.SOURCE.value not in effective_roles
-        )
+        ) or (Activity.PLAYBACK in self._activities and Activity.PLAYBACK not in activities)
+        self._activities = payload.activities
         self._discard_removed_role_state(effective_roles)
         self._end_removed_role_streams(effective_roles)
         self._active_roles = effective_roles
@@ -638,7 +638,7 @@ class SendspinConnection:
         self._end_rehandshake_quiet_period()
         if source_dropped:
             self._source_start_authorized = False
-            if self._source_stream_active and self.connected:
+            if self.connected:
                 await self.send_client_stream_end()
         self._selected_pairing = payload.pairing
         await self._client.note_playback_activity(self)
@@ -1543,12 +1543,13 @@ class SendspinConnection:
             self._warn_dropped_binary("Unknown binary message type: %s", raw_type)
             return
 
+        playback = Activity.PLAYBACK in self._activities
         if message_type is BinaryMessageType.AUDIO_CHUNK:
-            role_active = self._stream_active
+            role_active = playback and self._stream_active
         elif message_type in _ARTWORK_BINARY_TYPES:
             role_active = self._artwork_stream_active
         elif message_type in _VISUALIZATION_BINARY_TYPES:
-            role_active = self._visualizer_stream_active
+            role_active = playback and self._visualizer_stream_active
         else:
             role_active = False
 
@@ -1667,6 +1668,12 @@ class SendspinConnection:
             await self._send_full_client_state()
 
     async def _handle_stream_start(self, message: StreamStartMessage) -> None:
+        if Activity.PLAYBACK not in self._activities and (
+            message.payload.player is not None or message.payload.visualizer is not None
+        ):
+            message = replace(
+                message, payload=replace(message.payload, player=None, visualizer=None)
+            )
         if message.payload.visualizer is not None:
             self._current_visualizer_config = message.payload.visualizer
             self._visualizer_stream_active = True
@@ -1914,6 +1921,7 @@ class SendspinConnection:
                 or self._source_stream_active
                 or not self._wire_available()
                 or not self._is_role_active("source")
+                or Activity.PLAYBACK not in self._activities
             ):
                 return False
             self._source_start_authorized = True
