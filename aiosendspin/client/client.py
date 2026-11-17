@@ -736,11 +736,11 @@ class SendspinClient:
         return self._min_buffer_us / 1_000.0
 
     def set_min_buffer_ms(self, buffer_ms: float) -> None:
-        """Update the minimum ongoing buffer duration reported via client/state.
+        """Update the minimum ongoing buffer reported via client/state, clamped to 0-5000 ms.
 
         If changing frequently, the caller must debounce to only report sustained shifts.
         """
-        buffer_ms = max(0.0, min(30000.0, buffer_ms))
+        buffer_ms = max(0.0, min(5000.0, buffer_ms))
         buffer_us = round(buffer_ms * 1_000.0)
         if buffer_us == self._min_buffer_us:
             return

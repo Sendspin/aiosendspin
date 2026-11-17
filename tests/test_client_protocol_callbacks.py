@@ -1536,6 +1536,21 @@ async def test_output_delay_listener_fires_on_changes_only() -> None:
     assert client.output_delay_us == 0
 
 
+async def test_min_buffer_ms_is_clamped_to_spec_range() -> None:
+    """min_buffer_ms above 5000 reports 5000."""
+    client = make_sdk_client(
+        client_name="Test Client",
+        roles=[Roles.PLAYER],
+        player_support=_player_support(),
+        min_buffer_ms=9_000.0,
+    )
+    assert client.min_buffer_ms == 5_000.0
+
+    client.set_min_buffer_ms(100.0)
+    client.set_min_buffer_ms(6_000.0)
+    assert client.min_buffer_ms == 5_000.0
+
+
 async def test_server_command_without_player_only_notifies() -> None:
     """A server/command with no player sub-command leaves the delay unchanged but still notifies."""
     client = make_sdk_client(
