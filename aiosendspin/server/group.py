@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
+import secrets
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from typing import TYPE_CHECKING
@@ -88,7 +88,7 @@ class SendspinGroup:
         assert len(self._clients) > 0, "A group must have at least one client"
         self._server = server
         self._event_cbs = []
-        self._group_id = str(uuid.uuid4())
+        self._group_id = secrets.token_urlsafe(32)
         self._group_name: str | None = None
         self._play_start_time_us: int | None = None
         self._playback_lock = asyncio.Lock()
