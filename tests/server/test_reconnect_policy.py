@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aiosendspin.models.core import ClientGoodbyePayload
 from aiosendspin.models.types import Activity, GoodbyeReason
 from aiosendspin.server.clock import LoopClock
 from aiosendspin.server.connection import SendspinConnection
@@ -35,7 +36,7 @@ def _conn() -> SendspinConnection:
         (GoodbyeReason.RESTART, True),
         (GoodbyeReason.CONCURRENT_ATTEMPT, False),
         (GoodbyeReason.ANOTHER_SERVER, False),
-        (GoodbyeReason.SHUTDOWN, False),
+        (GoodbyeReason.SHUTDOWN, True),
         (GoodbyeReason.USER_REQUEST, False),
         (GoodbyeReason.UNAUTHORIZED, False),
         (GoodbyeReason.PAIRING_REQUIRED, False),
@@ -47,9 +48,9 @@ async def test_retry_decision_per_goodbye_reason(
     reason: GoodbyeReason,
     expected: bool,  # noqa: FBT001
 ) -> None:
-    """Only restart warrants an auto-reconnect."""
+    """Only restart and shutdown warrant an auto-reconnect."""
     conn = _conn()
-    conn._last_goodbye_reason = reason  # noqa: SLF001
+    await conn._handle_goodbye(ClientGoodbyePayload(reason=reason))  # noqa: SLF001
     assert conn.should_retry_server_initiated_connection is expected
 
 
