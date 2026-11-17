@@ -628,36 +628,11 @@ async def test_mdns_removal_keeps_non_retained_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mdns_removal_keeps_connection_task_for_persistent_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A persistent client must keep its retry task alive after mDNS withdrawal.
-
-    Without this guarantee, a transient mDNS drop (network blip while the
-    device is still alive) silently cancels the reconnect loop and the device
-    stays unavailable until MA restart.
-    """
+async def test_mdns_removal_stops_retrying_for_persistent_client() -> None:
+    """A removed mDNS service stops the retry task but keeps the persistent client's URL."""
     session = _PersistentSuccessfulSession()
     server = _make_server(session)
     url = "ws://127.0.0.1:9999/sendspin"
-
-    class _HangingConnection:
-        def __init__(
-            self,
-            _server: SendspinServer,
-            *,
-            wsock_client: object,  # noqa: ARG002
-            url: str | None = None,  # noqa: ARG002
-            expected_client_id: str | None = None,  # noqa: ARG002
-            pairing_attempt: object | None = None,  # noqa: ARG002
-        ) -> None:
-            self.goodbye_reason = None
-            self.should_retry_server_initiated_connection = True
-
-        async def handle_client(self) -> None:
-            await asyncio.Event().wait()
-
-    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _HangingConnection)
 
     persistent_client = MagicMock()
     persistent_client.is_connected = False
@@ -674,8 +649,8 @@ async def test_mdns_removal_keeps_connection_task_for_persistent_client(
     server._handle_service_removed("service._sendspin._tcp.local.")  # noqa: SLF001
     await asyncio.sleep(0)
 
-    assert server._connection_tasks.get(url) is task  # noqa: SLF001
-    assert task.cancelling() == 0
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert task.cancelling() > 0
     assert server._client_urls.get("client-1") == url  # noqa: SLF001
 
 
@@ -729,6 +704,63 @@ def _known_disconnected_client(server: SendspinServer, url: str) -> PairingAttem
     return PairingAttempt(
         method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=AsyncMock(return_value="1")
     )
+
+
+@pytest.mark.asyncio
+async def test_mdns_removal_keeps_live_connection_but_stops_redial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection outlives its mDNS removal, and its dial task ends when it closes."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    service_name = "service._sendspin._tcp.local."
+    created = _patch_controlled_connections(monkeypatch)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", url)
+    server._mdns_client_urls[service_name] = url  # noqa: SLF001
+
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    task = server._connection_tasks.get(url)  # noqa: SLF001
+    assert task is not None
+    assert task.cancelling() == 0
+
+    created[0].end(retry=True)
+    await _wait_for_connection_task_cleanup(server, url)
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_kept_connection_reconnects_after_service_returns_at_same_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection kept through a brief mDNS removal is redialed once its service is back."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://10.0.0.2:9999/sendspin"
+    service_name = "service._sendspin._tcp.local."
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    created = _patch_controlled_connections(monkeypatch)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", url)
+    server._mdns_client_urls[service_name] = url  # noqa: SLF001
+
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    await server._handle_service_added(MagicMock(), "_sendspin._tcp.local.", service_name)  # noqa: SLF001
+    created[0].end(retry=True)
+    await _wait_for_dials(created, 2)
+
+    server.disconnect_from_client(url)
+    await _wait_for_connection_task_cleanup(server, url)
 
 
 class _SwitchableSession:
@@ -1195,6 +1227,40 @@ async def test_mdns_removal_while_goodbye_closes_keeps_block(
     await server._handle_service_added(MagicMock(), service_type, service_name)  # noqa: SLF001
 
     assert url not in server._connection_tasks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_kept_connection_is_not_redialed_after_service_returns_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection kept through its service's removal is not redialed once the service moved."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+    old_url = "ws://10.0.0.2:9999/sendspin"
+    new_url = "ws://10.0.0.7:9999/sendspin"
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    created = _patch_controlled_connections(monkeypatch)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", old_url)
+    server._mdns_client_urls[service_name] = old_url  # noqa: SLF001
+
+    server.connect_to_client(old_url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    await server._handle_service_added(MagicMock(), service_type, service_name)  # noqa: SLF001
+    await _wait_for_dials(created, 2)
+    created[0].end(retry=True)
+    await _wait_for_connection_task_cleanup(server, old_url)
+
+    assert old_url not in server._connection_tasks  # noqa: SLF001
+    server.disconnect_from_client(new_url)
+    await _wait_for_connection_task_cleanup(server, new_url)
 
 
 def test_concurrent_attempt_before_hello_leaves_redial_to_mdns() -> None:

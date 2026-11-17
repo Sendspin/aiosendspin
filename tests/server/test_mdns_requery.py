@@ -1,4 +1,4 @@
-"""mDNS discovery keeps querying while no Sendspin client is known."""
+"""mDNS discovery keeps querying while no Sendspin client is known or a wanted one is missing."""
 
 from __future__ import annotations
 
@@ -81,6 +81,32 @@ async def test_no_requery_while_known_and_restart_when_last_removed(
     browsing_server._handle_service_removed(_SERVICE)  # noqa: SLF001
 
     assert mock_loop.call_later.call_args.args[0] == 30.0
+
+
+async def test_requery_continues_while_a_wanted_client_is_missing(
+    browsing_server: SendspinServer, mock_loop: MagicMock
+) -> None:
+    """A persistent client's lost service is re-queried, also after the client is unregistered."""
+    await browsing_server._start_mdns_discovery()  # noqa: SLF001
+    browser = browsing_server._mdns_browser  # noqa: SLF001
+    assert isinstance(browser, _FakeAsyncServiceBrowser)
+    url = "ws://192.0.2.1:8928/sendspin"
+    browsing_server._mdns_client_urls[_SERVICE] = url  # noqa: SLF001
+    other_url = "ws://192.0.2.2:8928/sendspin"
+    browsing_server._mdns_client_urls["other._sendspin._tcp.local."] = other_url  # noqa: SLF001
+    browsing_server.get_or_create_client("client-1")
+    browsing_server.register_client_url("client-1", url)
+    _fire_requery(mock_loop)
+    scheduled = mock_loop.call_later.call_count
+
+    browsing_server._handle_service_removed(_SERVICE)  # noqa: SLF001
+    await browsing_server.remove_client("client-1")
+
+    assert mock_loop.call_later.call_count == scheduled + 1
+    assert mock_loop.call_later.call_args.args[0] == 30.0
+    browser.query_scheduler.async_send_ready_queries.reset_mock()
+    _fire_requery(mock_loop)
+    browser.query_scheduler.async_send_ready_queries.assert_called_once()
 
 
 async def test_stop_cancels_pending_requery(
