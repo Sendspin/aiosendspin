@@ -128,6 +128,18 @@ def _transformer(role: PlayerV1Role) -> object:
     return req.transformer
 
 
+def test_client_format_reads_the_format_the_client_asked_for(mock_server: MagicMock) -> None:
+    """The format a client asks for is readable, and gone once the client asks for none."""
+    _client, role, _conn = _make_player(mock_server)
+    assert role.client_format is None
+
+    role.on_client_state(_state(FLAC_48K))
+    assert role.client_format == FLAC_48K
+
+    role.on_client_state(_state(None))
+    assert role.client_format is None
+
+
 def test_idle_format_applies_to_next_stream_without_starting_one(
     mock_server: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
