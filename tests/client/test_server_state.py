@@ -169,7 +169,7 @@ def _make_scheduling_connection(*, synced: bool = True) -> tuple[SendspinConnect
     conn._client = client  # noqa: SLF001
     conn._time_filter = SendspinTimeFilter()  # noqa: SLF001
     if synced:
-        conn._time_filter.update(0, 0, _NOW_US)  # noqa: SLF001
+        conn._time_filter.update(0, 1, _NOW_US)  # noqa: SLF001
     conn._pending_state = {}  # noqa: SLF001
     conn._active_roles = ["metadata@v1", "color@v1"]  # noqa: SLF001
     return conn, client
