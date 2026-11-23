@@ -20,7 +20,7 @@ class _FakeAsyncZeroconf:
     def __init__(self, **_kwargs: object) -> None:
         self.zeroconf = MagicMock()
         self.async_register_service = AsyncMock()
-        self.async_unregister_service = AsyncMock()
+        self.async_unregister_service = AsyncMock(side_effect=lambda _info: AsyncMock()())
         self.broadcast = AsyncMock()
         self.async_update_service = AsyncMock(side_effect=lambda _info: self.broadcast())
         self.async_close = AsyncMock()

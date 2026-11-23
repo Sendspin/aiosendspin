@@ -20,9 +20,14 @@ class _FakeAsyncZeroconf:
         self.kwargs = kwargs
         self.zeroconf = MagicMock()
         self.async_register_service = AsyncMock()
-        self.async_unregister_service = AsyncMock()
-        self.async_close = AsyncMock()
+        self.goodbyes = AsyncMock()
+        self.async_unregister_service = AsyncMock(side_effect=lambda _info: self.goodbyes())
+        self.goodbyes_sent_before_close: bool | None = None
+        self.async_close = AsyncMock(side_effect=self._record_close)
         _FakeAsyncZeroconf.instances.append(self)
+
+    def _record_close(self) -> None:
+        self.goodbyes_sent_before_close = self.goodbyes.await_count == 1
 
 
 @pytest.fixture
@@ -101,3 +106,13 @@ async def test_chosen_interfaces_are_advertised_without_default_route(
         assert _advertised_addresses(fake_zeroconf.instances[0]) == ["192.168.50.2"]
     finally:
         await server.close()
+
+
+async def test_goodbyes_are_sent_before_zeroconf_closes(
+    fake_zeroconf: type[_FakeAsyncZeroconf],
+) -> None:
+    """Stopping the server withdraws its service before Zeroconf shuts down."""
+    server = _make_server()
+    await server.start_server(port=0, host="127.0.0.1", discover_clients=False)
+    await server.close()
+    assert fake_zeroconf.instances[0].goodbyes_sent_before_close is True
