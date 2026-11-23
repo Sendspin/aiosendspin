@@ -40,6 +40,7 @@ def _activated_connection() -> tuple[SendspinConnection, MagicMock]:
     client.note_playback_activity = AsyncMock()
     conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, PskCategory.LONG_TERM)  # noqa: SLF001
     conn._active_roles = list(_STATE_ROLES)  # noqa: SLF001
+    conn._activities = [Activity.PLAYBACK]  # noqa: SLF001
     conn._source_stream_active = False  # noqa: SLF001
     conn._unpaired_access_enabled = AsyncMock(return_value=False)  # type: ignore[method-assign]  # noqa: SLF001
     conn._handle_server_state(  # noqa: SLF001
@@ -295,6 +296,7 @@ def _activatable(conn: SendspinConnection) -> None:
     """Give a scheduling connection what applying a server/activate needs."""
     conn._client.note_playback_activity = AsyncMock()  # noqa: SLF001
     conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, PskCategory.LONG_TERM)  # noqa: SLF001
+    conn._activities = [Activity.PLAYBACK]  # noqa: SLF001
     conn._source_stream_active = False  # noqa: SLF001
     conn._unpaired_access_enabled = AsyncMock(return_value=False)  # type: ignore[method-assign]  # noqa: SLF001
 

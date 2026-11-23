@@ -794,6 +794,7 @@ async def test_artwork_binary_dropped_when_only_player_stream_active() -> None:
     client.add_artwork_listener(lambda channel, data: captured.append((channel, data)))
 
     connection = SendspinConnection(client)
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     await connection._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
     )
@@ -843,6 +844,7 @@ async def test_audio_binary_passes_raw_send_ahead(send_ahead: int) -> None:
     )
 
     connection = SendspinConnection(client)
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     await connection._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
     )
@@ -865,9 +867,11 @@ async def test_truncated_audio_binary_is_dropped() -> None:
     client.add_audio_chunk_listener(lambda _ts, data, _fmt, _send_ahead: captured.append(data))
 
     connection = SendspinConnection(client)
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     await connection._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
     )
+    assert connection._stream_active  # noqa: SLF001
     connection._handle_binary_message(  # noqa: SLF001
         pack_player_audio_header(123_456, 0)[:-1]
     )
@@ -889,6 +893,7 @@ async def test_visualizer_binary_dropped_when_only_player_stream_active() -> Non
     client.add_visualizer_listener(captured.append)
 
     connection = SendspinConnection(client)
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     await connection._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(payload=StreamStartPayload(player=_stream_start_player()))
     )
@@ -1664,6 +1669,7 @@ async def _state_connection(
     connection._send_message = _capture  # type: ignore[method-assign]  # noqa: SLF001
     connection._time_filter = _FakeTimeFilter()  # type: ignore[assignment]  # noqa: SLF001
     connection._active_roles = active_roles  # noqa: SLF001
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     connection._reader_loop = _idle  # type: ignore[method-assign]  # noqa: SLF001
     connection._time_sync_loop = _idle  # type: ignore[method-assign]  # noqa: SLF001
     return connection, sent

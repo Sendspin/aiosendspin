@@ -54,6 +54,7 @@ def _streaming_source_connection(ws: _Ws) -> SendspinConnection:
     conn._handshake_hash = b"hash"  # noqa: SLF001
     conn._noise_psk = ResolvedPsk("paired", b"\x00" * 32, PskCategory.LONG_TERM)  # noqa: SLF001
     conn._active_roles = [Roles.SOURCE.value]  # noqa: SLF001
+    conn._activities = [Activity.PLAYBACK]  # noqa: SLF001
     conn._source_stream_active = True  # noqa: SLF001
     conn._source_start_authorized = True  # noqa: SLF001
     conn.is_time_synchronized = lambda: True  # type: ignore[method-assign]

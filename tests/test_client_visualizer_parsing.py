@@ -10,7 +10,7 @@ import pytest
 
 from aiosendspin.client.connection import SendspinConnection
 from aiosendspin.clock import ManualClock
-from aiosendspin.models.types import BinaryMessageType, Roles
+from aiosendspin.models.types import Activity, BinaryMessageType, Roles
 from aiosendspin.models.visualizer import (
     ClientHelloVisualizerSpectrum,
     ClientHelloVisualizerSupport,
@@ -230,6 +230,7 @@ async def test_handle_beat_rejects_empty_payload() -> None:
 async def test_reserved_type_21_is_ignored() -> None:
     """A type-21 binary reaches no visualizer callback and raises nothing."""
     connection, received = _connection_with_visualizer_callback()
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     connection._visualizer_stream_active = True  # noqa: SLF001
 
     body = struct.pack(">q", _NOW_US) + struct.pack(">H", 0x4500) + bytes([200])

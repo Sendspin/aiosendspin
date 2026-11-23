@@ -65,6 +65,7 @@ def _connection(
     conn._exchange_in_progress = False  # noqa: SLF001
     conn._noise_psk = ResolvedPsk("id", b"\x00" * 32, category)  # noqa: SLF001
     conn._active_roles = active_roles  # noqa: SLF001
+    conn._activities = [Activity.PLAYBACK]  # noqa: SLF001
     conn._source_stream_active = stream_active  # noqa: SLF001
     conn._reported_available = True  # noqa: SLF001
     conn._initial_state_sent = False  # noqa: SLF001
@@ -80,13 +81,19 @@ def _connection(
     return conn
 
 
-async def test_source_dropped_from_active_roles_ends_client_stream() -> None:
-    """Removing source@v1 from active_roles auto-sends client-stream/end."""
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[]),
+        ServerActivatePayload(activities=[]),
+    ],
+    ids=["source-removed", "playback-dropped"],
+)
+async def test_source_dropped_ends_client_stream(payload: ServerActivatePayload) -> None:
+    """Removing source@v1 or dropping 'playback' auto-sends client-stream/end."""
     ws = _FakeWs()
     conn = _connection(ws, active_roles=[Roles.SOURCE.value], stream_active=True)
-    await conn._apply_activation(  # noqa: SLF001
-        ServerActivatePayload(activities=[Activity.PLAYBACK], active_roles=[])
-    )
+    await conn._apply_activation(payload)  # noqa: SLF001
     assert any("client-stream/end" in m for m in ws.sent)
     assert conn._source_stream_active is False  # noqa: SLF001
 

@@ -15,7 +15,7 @@ from aiosendspin.models.player import (
     SupportedAudioFormat,
     pack_player_audio_header,
 )
-from aiosendspin.models.types import AudioCodec, Roles
+from aiosendspin.models.types import Activity, AudioCodec, Roles
 
 from .conftest import make_sdk_client
 
@@ -78,6 +78,7 @@ async def test_audio_callback_receives_negotiated_codec_payload_and_format(
     )
 
     connection = SendspinConnection(client)
+    connection._activities = [Activity.PLAYBACK]  # noqa: SLF001
     await connection._handle_stream_start(  # noqa: SLF001
         StreamStartMessage(
             payload=StreamStartPayload(
