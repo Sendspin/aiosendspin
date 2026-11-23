@@ -419,6 +419,20 @@ class SendspinServer:
         """Return the human-readable server name."""
         return self._name
 
+    async def set_name(self, name: str) -> None:
+        """Rename the server in its mDNS record and in later ``server/hello`` messages.
+
+        Connected clients keep the old name until they reconnect.
+        """
+        self._name = name
+        if self._zc is None or self._mdns_service is None:
+            return
+        info = self._mdns_service_info(
+            self._mdns_service.parsed_addresses(), self._mdns_service.port, self.API_PATH
+        )
+        self._mdns_service = info
+        await (await self._zc.async_update_service(info))
+
     @property
     def languages(self) -> tuple[str, ...] | None:
         """Return the operator's BCP 47 language preferences, or None when undeclared."""
@@ -1518,7 +1532,9 @@ class SendspinServer:
                 e,
             )
 
-    def _mdns_service_info(self, addresses: list[str], port: int, path: str) -> AsyncServiceInfo:
+    def _mdns_service_info(
+        self, addresses: list[str], port: int | None, path: str
+    ) -> AsyncServiceInfo:
         service_type = "_sendspin-server._tcp.local."
         properties: dict[str, str] = {}
         if self._name:
