@@ -59,3 +59,21 @@ def test_position_without_duration_is_sent_with_unknown_duration() -> None:
     update = Metadata(title="Live", track_progress=5_000, playback_speed=1000).snapshot_update(1)
 
     assert update.progress == Progress(track_progress=5_000, track_duration=0, playback_speed=1000)
+
+
+@pytest.mark.parametrize("field", ["title", "artist", "album_artist", "album"])
+def test_long_text_is_truncated_to_255_bytes_at_a_character_boundary(field: str) -> None:
+    """Text over the spec cap is cut without splitting a multi-byte character."""
+    update = Metadata(**{field: "é" * 200}).snapshot_update(1)
+
+    assert getattr(update, field) == "é" * 127
+
+
+@pytest.mark.parametrize(("length", "sent"), [(2048, True), (2049, False)])
+def test_artwork_url_over_2048_bytes_is_left_out(*, length: int, sent: bool) -> None:
+    """A URL over the spec cap is dropped instead of truncated."""
+    url = "https://example.com/" + "a" * (length - len("https://example.com/"))
+
+    update = Metadata(artwork_url=url).snapshot_update(1)
+
+    assert update.artwork_url == (url if sent else None)

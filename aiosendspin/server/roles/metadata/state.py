@@ -6,6 +6,15 @@ from dataclasses import dataclass
 
 from aiosendspin.models.metadata import Progress, SessionUpdateMetadata
 from aiosendspin.models.types import RepeatMode
+from aiosendspin.util import truncate_utf8
+
+TEXT_MAX_BYTES = 255
+TEXT_FIELDS = ("title", "artist", "album_artist", "album")
+ARTWORK_URL_MAX_BYTES = 2048
+
+
+def _capped_text(text: str | None) -> str | None:
+    return None if text is None else truncate_utf8(text, TEXT_MAX_BYTES)
 
 
 @dataclass
@@ -13,15 +22,15 @@ class Metadata:
     """Metadata for media playback."""
 
     title: str | None = None
-    """Title of the current media."""
+    """Title of the current media. Clients get at most 255 bytes of it in UTF-8."""
     artist: str | None = None
-    """Artist of the current media."""
+    """Artist of the current media. Clients get at most 255 bytes of it in UTF-8."""
     album_artist: str | None = None
-    """Album artist of the current media."""
+    """Album artist of the current media. Clients get at most 255 bytes of it in UTF-8."""
     album: str | None = None
-    """Album of the current media."""
+    """Album of the current media. Clients get at most 255 bytes of it in UTF-8."""
     artwork_url: str | None = None
-    """Artwork URL of the current media."""
+    """Artwork URL of the current media. Clients don't get a URL over 2048 bytes in UTF-8."""
     year: int | None = None
     """Release year of the current media."""
     track: int | None = None
@@ -134,13 +143,17 @@ class Metadata:
                 track_duration=self.track_duration or 0,
                 playback_speed=self.playback_speed,
             )
+        artwork_url = self.artwork_url
+        if artwork_url is not None and len(artwork_url.encode()) > ARTWORK_URL_MAX_BYTES:
+            # Leave out an over-long URL, since a truncated one would point nowhere.
+            artwork_url = None
         return SessionUpdateMetadata(
             timestamp=timestamp,
-            title=self.title,
-            artist=self.artist,
-            album_artist=self.album_artist,
-            album=self.album,
-            artwork_url=self.artwork_url,
+            title=_capped_text(self.title),
+            artist=_capped_text(self.artist),
+            album_artist=_capped_text(self.album_artist),
+            album=_capped_text(self.album),
+            artwork_url=artwork_url,
             year=self.year,
             track=self.track,
             progress=progress,

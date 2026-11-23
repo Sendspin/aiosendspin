@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 from aiosendspin.models.core import ServerStateMessage, ServerStatePayload
 from aiosendspin.models.metadata import SessionUpdateMetadata
 from aiosendspin.server.roles.metadata.events import MetadataClearedEvent, MetadataUpdatedEvent
-from aiosendspin.server.roles.metadata.state import Metadata
+from aiosendspin.server.roles.metadata.state import (
+    ARTWORK_URL_MAX_BYTES,
+    TEXT_FIELDS,
+    TEXT_MAX_BYTES,
+    Metadata,
+)
 from aiosendspin.server.roles.scheduled_state import ScheduledStateGroupRole
+
+logger = logging.getLogger(__name__)
 
 _UNSET = object()
 
@@ -96,6 +104,23 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
 
         Raises ValueError when scheduling None. Schedule `Metadata()` to blank the metadata.
         """
+        if metadata is not None:
+            for field in TEXT_FIELDS:
+                value = getattr(metadata, field)
+                if value is not None and len(value.encode()) > TEXT_MAX_BYTES:
+                    logger.debug(
+                        "Metadata %s is over %d bytes in UTF-8, clients get it truncated: %s",
+                        field,
+                        TEXT_MAX_BYTES,
+                        value,
+                    )
+            url = metadata.artwork_url
+            if url is not None and len(url.encode()) > ARTWORK_URL_MAX_BYTES:
+                logger.debug(
+                    "Artwork URL is over %d bytes in UTF-8, clients don't get it: %s",
+                    ARTWORK_URL_MAX_BYTES,
+                    url,
+                )
         self._apply_metadata(metadata, timestamp_us=timestamp_us, force=False)
 
     def seek(self, track_progress: int) -> None:
