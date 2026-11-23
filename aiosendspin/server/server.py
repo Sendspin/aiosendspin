@@ -10,7 +10,7 @@ from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
-from ipaddress import ip_address
+from ipaddress import IPv4Address, ip_address
 from urllib.parse import urlsplit
 
 from aiohttp import (
@@ -1378,18 +1378,39 @@ class SendspinServer:
         self._connection_options.pop(url, None)
         self._connection_reasons.pop(url, None)
 
-    async def start_server(
+    async def start_server(  # noqa: PLR0915
         self,
         port: int = 8927,
         host: str = "0.0.0.0",
         advertise_addresses: list[str] | None = None,
         *,
         discover_clients: bool = True,
+        zeroconf_interfaces: Sequence[str] | None = None,
     ) -> None:
-        """Start the server HTTP listener and (optionally) mDNS discovery/advertising."""
+        """Start the server HTTP listener and (optionally) mDNS discovery/advertising.
+
+        Args:
+            port: TCP port to listen on.
+            host: Address to listen on, or "0.0.0.0" for all addresses.
+            advertise_addresses: Addresses in the server's mDNS record, or None to pick
+                them automatically.
+            discover_clients: Browse mDNS for clients and connect to them.
+            zeroconf_interfaces: IPv4 addresses of the interfaces mDNS runs on, or None
+                for ``host``, or the default interface when ``host`` is "0.0.0.0".
+
+        Raises:
+            ValueError: If ``zeroconf_interfaces`` holds anything but IPv4 addresses.
+        """
         if self._app is not None:
             logger.warning("Server is already running")
             return
+        if zeroconf_interfaces is not None:
+            try:
+                for address in zeroconf_interfaces:
+                    IPv4Address(address)
+            except ValueError as err:
+                msg = f"zeroconf_interfaces must hold IPv4 addresses: {err}"
+                raise ValueError(msg) from err
 
         logger.info("Starting Sendspin server on port %d", port)
         self._app = self._create_web_application()
@@ -1417,10 +1438,14 @@ class SendspinServer:
         logger.info("Sendspin server started successfully on %s:%d", host, port)
 
         try:
-            self._zc = AsyncZeroconf(
-                ip_version=IPVersion.V4Only,
-                interfaces=[host] if host != "0.0.0.0" else InterfaceChoice.Default,
-            )
+            interfaces: list[str] | InterfaceChoice
+            if zeroconf_interfaces is not None:
+                interfaces = list(zeroconf_interfaces)
+            elif host != "0.0.0.0":
+                interfaces = [host]
+            else:
+                interfaces = InterfaceChoice.Default
+            self._zc = AsyncZeroconf(ip_version=IPVersion.V4Only, interfaces=interfaces)
 
             if advertise_addresses is not None:
                 addresses = advertise_addresses
