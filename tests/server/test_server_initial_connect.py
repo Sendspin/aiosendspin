@@ -12,14 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientConnectionError, ClientWebSocketResponse
-from zeroconf import ServiceStateChange
 
 from aiosendspin.models.types import ConnectionReason, GoodbyeReason, PairMethod
 from aiosendspin.noise.keys import Identity, generate_psk
 from aiosendspin.noise.pairing import PairingAttempt, PairingDialError, PairingError
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.connection import SendspinConnection
-from aiosendspin.server.server import SendspinServer, _ended_without_redial
+from aiosendspin.server.server import SendspinServer, _ended_without_redial, _MdnsGoodbyeBlock
 
 
 class _FailingInitialConnectSession:
@@ -629,36 +628,11 @@ async def test_mdns_removal_keeps_non_retained_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mdns_removal_keeps_connection_task_for_persistent_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A persistent client must keep its retry task alive after mDNS withdrawal.
-
-    Without this guarantee, a transient mDNS drop (network blip while the
-    device is still alive) silently cancels the reconnect loop and the device
-    stays unavailable until MA restart.
-    """
+async def test_mdns_removal_stops_retrying_for_persistent_client() -> None:
+    """A removed mDNS service stops the retry task but keeps the persistent client's URL."""
     session = _PersistentSuccessfulSession()
     server = _make_server(session)
     url = "ws://127.0.0.1:9999/sendspin"
-
-    class _HangingConnection:
-        def __init__(
-            self,
-            _server: SendspinServer,
-            *,
-            wsock_client: object,  # noqa: ARG002
-            url: str | None = None,  # noqa: ARG002
-            expected_client_id: str | None = None,  # noqa: ARG002
-            pairing_attempt: object | None = None,  # noqa: ARG002
-        ) -> None:
-            self.goodbye_reason = None
-            self.should_retry_server_initiated_connection = True
-
-        async def handle_client(self) -> None:
-            await asyncio.Event().wait()
-
-    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _HangingConnection)
 
     persistent_client = MagicMock()
     persistent_client.is_connected = False
@@ -675,8 +649,8 @@ async def test_mdns_removal_keeps_connection_task_for_persistent_client(
     server._handle_service_removed("service._sendspin._tcp.local.")  # noqa: SLF001
     await asyncio.sleep(0)
 
-    assert server._connection_tasks.get(url) is task  # noqa: SLF001
-    assert task.cancelling() == 0
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert task.cancelling() > 0
     assert server._client_urls.get("client-1") == url  # noqa: SLF001
 
 
@@ -730,6 +704,128 @@ def _known_disconnected_client(server: SendspinServer, url: str) -> PairingAttem
     return PairingAttempt(
         method=PairMethod.STATIC_PAIRING_CODE, pairing_code_provider=AsyncMock(return_value="1")
     )
+
+
+@pytest.mark.asyncio
+async def test_mdns_removal_keeps_live_connection_but_stops_redial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection outlives its mDNS removal, and its dial task ends when it closes."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://127.0.0.1:9999/sendspin"
+    service_name = "service._sendspin._tcp.local."
+    created = _patch_controlled_connections(monkeypatch)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", url)
+    server._mdns_client_urls[service_name] = url  # noqa: SLF001
+
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    task = server._connection_tasks.get(url)  # noqa: SLF001
+    assert task is not None
+    assert task.cancelling() == 0
+
+    created[0].end(retry=True)
+    await _wait_for_connection_task_cleanup(server, url)
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mdns_removal_stops_retrying_after_a_failed_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection whose handshake fails after its mDNS removal isn't retried."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://127.0.0.1:9999/sendspin"
+    service_name = "service._sendspin._tcp.local."
+    created: list[_ControlledConnection] = []
+
+    class _FailingHandshake(_ControlledConnection):
+        async def handle_client(self) -> None:
+            await self.ended.wait()
+            raise TimeoutError
+
+    def make(server: SendspinServer, **kwargs: object) -> _ControlledConnection:
+        conn = _FailingHandshake(server, **kwargs)
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", make)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", url)
+    server._mdns_client_urls[service_name] = url  # noqa: SLF001
+
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    created[0].ended.set()
+    await _wait_for_connection_task_cleanup(server, url)
+
+    assert url not in server._connection_tasks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_no_reconnect_goodbye_after_mdns_removal_blocks_the_re_add(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``user_request`` goodbye after the client's mDNS removal still blocks the re-add."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://10.0.0.2:9999/sendspin"
+    service_name = "service._sendspin._tcp.local."
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    created = _patch_controlled_connections(monkeypatch)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", url)
+    server._mdns_client_urls[service_name] = url  # noqa: SLF001
+
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    created[0].goodbye_reason = GoodbyeReason.USER_REQUEST
+    created[0].end(retry=False)
+    await _wait_for_connection_task_cleanup(server, url)
+    await server._handle_service_added(  # noqa: SLF001
+        MagicMock(), "_sendspin._tcp.local.", service_name
+    )
+
+    assert url not in server._connection_tasks  # noqa: SLF001
+    assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_kept_connection_reconnects_after_service_returns_at_same_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection kept through a brief mDNS removal is redialed once its service is back."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    url = "ws://10.0.0.2:9999/sendspin"
+    service_name = "service._sendspin._tcp.local."
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    created = _patch_controlled_connections(monkeypatch)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", url)
+    server._mdns_client_urls[service_name] = url  # noqa: SLF001
+
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    await server._handle_service_added(MagicMock(), "_sendspin._tcp.local.", service_name)  # noqa: SLF001
+    created[0].end(retry=True)
+    await _wait_for_dials(created, 2)
+
+    server.disconnect_from_client(url)
+    await _wait_for_connection_task_cleanup(server, url)
 
 
 class _SwitchableSession:
@@ -1084,7 +1180,7 @@ async def test_mdns_update_reconnect_decision(
 
     try:
         await server._handle_service_added(  # noqa: SLF001
-            MagicMock(), "_sendspin._tcp.local.", service_name, ServiceStateChange.Updated
+            MagicMock(), "_sendspin._tcp.local.", service_name
         )
     finally:
         if connection_task is not None:
@@ -1102,20 +1198,21 @@ async def test_mdns_update_reconnect_decision(
 
 
 @pytest.mark.parametrize(
-    "goodbye_reason",
+    ("goodbye_reason", "redial_after_removal"),
     [
-        GoodbyeReason.USER_REQUEST,
-        GoodbyeReason.CONCURRENT_ATTEMPT,
+        (GoodbyeReason.USER_REQUEST, False),
+        (GoodbyeReason.CONCURRENT_ATTEMPT, True),
         # A non-playback session that dropped without goodbye.
-        None,
+        (None, True),
     ],
 )
 @pytest.mark.asyncio
 async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
     monkeypatch: pytest.MonkeyPatch,
     goodbye_reason: GoodbyeReason | None,
+    redial_after_removal: bool,  # noqa: FBT001
 ) -> None:
-    """An mDNS update skips a client that ended its session without asking for a reconnect."""
+    """Block mDNS redials after a session ends without one, and keep no-reconnect ones on re-add."""
     server = _make_server(_PersistentSuccessfulSession())
     service_name = "service._sendspin._tcp.local."
     service_type = "_sendspin._tcp.local."
@@ -1142,21 +1239,93 @@ async def test_mdns_update_does_not_redial_after_no_reconnect_goodbye(
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _EndedSessionConnection)
 
     await server._handle_service_added(  # noqa: SLF001
-        MagicMock(), service_type, service_name, ServiceStateChange.Added
+        MagicMock(), service_type, service_name
     )
     await _wait_for_connection_task_cleanup(server, url)
 
     await server._handle_service_added(  # noqa: SLF001
-        MagicMock(), service_type, service_name, ServiceStateChange.Updated
+        MagicMock(), service_type, service_name
     )
     assert url not in server._connection_tasks  # noqa: SLF001
 
     server._handle_service_removed(service_name)  # noqa: SLF001
     await server._handle_service_added(  # noqa: SLF001
-        MagicMock(), service_type, service_name, ServiceStateChange.Added
+        MagicMock(), service_type, service_name
     )
-    assert url in server._connection_tasks  # noqa: SLF001
+    assert (url in server._connection_tasks) is redial_after_removal  # noqa: SLF001
     await _wait_for_connection_task_cleanup(server, url)
+
+
+@pytest.mark.asyncio
+async def test_mdns_removal_while_goodbye_closes_keeps_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service removed while its ``user_request`` session closes still blocks the re-add."""
+    server = _make_server(_PersistentSuccessfulSession())
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+    url = "ws://10.0.0.2:9999/sendspin"
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.2"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+
+    class _RemovedWhileClosingConnection:
+        should_retry_server_initiated_connection = False
+        goodbye_reason = GoodbyeReason.USER_REQUEST
+        _closing = True
+        _disconnecting = True
+
+        def __init__(self, _server: SendspinServer, **_kwargs: object) -> None:
+            pass
+
+        async def handle_client(self) -> None:
+            server._handle_service_removed(service_name)  # noqa: SLF001
+
+    monkeypatch.setattr(
+        "aiosendspin.server.server.SendspinConnection", _RemovedWhileClosingConnection
+    )
+
+    await server._handle_service_added(MagicMock(), service_type, service_name)  # noqa: SLF001
+    await _wait_for_connection_task_cleanup(server, url)
+    await server._handle_service_added(MagicMock(), service_type, service_name)  # noqa: SLF001
+
+    assert url not in server._connection_tasks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_kept_connection_is_not_redialed_after_service_returns_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection kept through its service's removal is not redialed once the service moved."""
+    session = _PersistentSuccessfulSession()
+    server = _make_server(session)
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+    old_url = "ws://10.0.0.2:9999/sendspin"
+    new_url = "ws://10.0.0.7:9999/sendspin"
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    created = _patch_controlled_connections(monkeypatch)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", old_url)
+    server._mdns_client_urls[service_name] = old_url  # noqa: SLF001
+
+    server.connect_to_client(old_url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    await server._handle_service_added(MagicMock(), service_type, service_name)  # noqa: SLF001
+    await _wait_for_dials(created, 2)
+    created[0].end(retry=True)
+    await _wait_for_connection_task_cleanup(server, old_url)
+
+    assert old_url not in server._connection_tasks  # noqa: SLF001
+    server.disconnect_from_client(new_url)
+    await _wait_for_connection_task_cleanup(server, new_url)
 
 
 def test_concurrent_attempt_before_hello_leaves_redial_to_mdns() -> None:
@@ -1200,7 +1369,7 @@ async def test_dial_while_connection_closes_after_goodbye(
                 return
             if via_mdns_update:
                 await server._handle_service_added(  # noqa: SLF001
-                    MagicMock(), service_type, service_name, ServiceStateChange.Updated
+                    MagicMock(), service_type, service_name
                 )
             else:
                 server.connect_to_client(url, connection_reason=ConnectionReason.PLAYBACK)
@@ -1208,7 +1377,7 @@ async def test_dial_while_connection_closes_after_goodbye(
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _ClosingConnection)
 
     await server._handle_service_added(  # noqa: SLF001
-        MagicMock(), service_type, service_name, ServiceStateChange.Added
+        MagicMock(), service_type, service_name
     )
     await _wait_for_connection_task_cleanup(server, url)
 
@@ -1259,14 +1428,14 @@ async def test_mdns_address_change_while_connection_closes(
                 return
             _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
             await server._handle_service_added(  # noqa: SLF001
-                MagicMock(), service_type, service_name, ServiceStateChange.Updated
+                MagicMock(), service_type, service_name
             )
             dialed.append(new_url in server._connection_tasks)  # noqa: SLF001
 
     monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", _ClosingConnection)
 
     await server._handle_service_added(  # noqa: SLF001
-        MagicMock(), service_type, service_name, ServiceStateChange.Added
+        MagicMock(), service_type, service_name
     )
     for _ in range(50):
         if dialed:
@@ -1274,7 +1443,8 @@ async def test_mdns_address_change_while_connection_closes(
         await asyncio.sleep(0)
 
     assert dialed == [expect_dial]
-    assert (new_url in server._mdns_goodbye_urls) is not expect_dial  # noqa: SLF001
+    blocked = server._mdns_goodbye_blocks.get(service_name)  # noqa: SLF001
+    assert (blocked is not None and blocked.url == new_url) is not expect_dial
     for url in (old_url, new_url):
         server.disconnect_from_client(url)
         await _wait_for_connection_task_cleanup(server, url)
@@ -1325,7 +1495,7 @@ async def test_reconnect_follows_mdns_address_that_expired_without_update(
                 await asyncio.Event().wait()
             _FakeAsyncServiceInfo.addresses = ["10.0.0.7", "10.0.0.2"]
             await server._handle_service_added(  # noqa: SLF001
-                MagicMock(), service_type, service_name, ServiceStateChange.Updated
+                MagicMock(), service_type, service_name
             )
             _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
 
@@ -1334,7 +1504,7 @@ async def test_reconnect_follows_mdns_address_that_expired_without_update(
     server.register_client_url("stale-client", final_url)
 
     await server._handle_service_added(  # noqa: SLF001
-        MagicMock(), service_type, service_name, ServiceStateChange.Added
+        MagicMock(), service_type, service_name
     )
     for _ in range(50):
         if final_url in dialed_urls:
@@ -1443,18 +1613,53 @@ async def test_mdns_update_after_goodbye_tracks_new_address(
     _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
     monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
     server._mdns_client_urls[service_name] = old_url  # noqa: SLF001
-    server._mdns_goodbye_urls.add(old_url)  # noqa: SLF001
+    server._mdns_goodbye_blocks[service_name] = _MdnsGoodbyeBlock(old_url, survives_removal=True)  # noqa: SLF001
     server.register_client_url("speaker", old_url)
 
     _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
     await server._handle_service_added(  # noqa: SLF001
-        MagicMock(), service_type, service_name, ServiceStateChange.Updated
+        MagicMock(), service_type, service_name
     )
     assert new_url not in server._connection_tasks  # noqa: SLF001
 
     assert server.reclaim_client_for_playback("speaker", timeout_s=0)
     assert new_url in server._connection_tasks  # noqa: SLF001
     server.disconnect_from_client(new_url)
+
+
+@pytest.mark.asyncio
+async def test_blocked_client_stays_listed_across_mdns_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that left for another server survives a reboot, and only a reclaim dials it."""
+    server = _make_server(_PersistentSuccessfulSession())
+    service_name = "service._sendspin._tcp.local."
+    service_type = "_sendspin._tcp.local."
+    old_url = "ws://10.0.0.2:9999/sendspin"
+    new_url = "ws://10.0.0.7:9999/sendspin"
+
+    _FakeAsyncServiceInfo.addresses = ["10.0.0.7"]
+    _FakeAsyncServiceInfo.port = 9999
+    _FakeAsyncServiceInfo.properties = {b"path": b"/sendspin"}
+    monkeypatch.setattr("aiosendspin.server.server.AsyncServiceInfo", _FakeAsyncServiceInfo)
+    client = server.get_or_create_client("speaker")
+    server.register_client_url("speaker", old_url)
+    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+    server._mdns_client_urls[service_name] = old_url  # noqa: SLF001
+    server._mdns_goodbye_blocks[service_name] = _MdnsGoodbyeBlock(old_url, survives_removal=True)  # noqa: SLF001
+
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    await asyncio.sleep(0)
+    await server._handle_service_added(  # noqa: SLF001
+        MagicMock(), service_type, service_name
+    )
+
+    assert server.get_client("speaker") is client
+    assert new_url not in server._connection_tasks  # noqa: SLF001
+    assert server.reclaim_client_for_playback("speaker", timeout_s=0)
+    assert new_url in server._connection_tasks  # noqa: SLF001
+    server.disconnect_from_client(new_url)
+    server._cancel_reclaim_timeout("speaker")  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -1508,7 +1713,7 @@ async def test_mdns_reannounce_keeps_pending_playback_reason(
     try:
         assert server.reclaim_client_for_playback("speaker", timeout_s=0)
         await server._handle_service_added(  # noqa: SLF001
-            MagicMock(), "_sendspin._tcp.local.", service_name, ServiceStateChange.Updated
+            MagicMock(), "_sendspin._tcp.local.", service_name
         )
         assert server.get_connection_reason(url) is ConnectionReason.PLAYBACK
     finally:

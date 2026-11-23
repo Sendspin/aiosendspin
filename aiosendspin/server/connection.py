@@ -217,6 +217,8 @@ _CLIENT_STATE_TIMEOUT_S = 5.0
 # How long a paired client may take to send client/goodbye after server/unpair.
 _UNPAIR_GOODBYE_TIMEOUT_S = 5.0
 
+_AUTO_RECONNECT_GOODBYE_REASONS = frozenset({GoodbyeReason.RESTART, GoodbyeReason.SHUTDOWN})
+
 # Distinct unknown message types warned about per connection; later ones log at debug.
 _MAX_WARNED_UNKNOWN_TYPES = 16
 
@@ -525,8 +527,8 @@ class SendspinConnection:
     def should_retry_server_initiated_connection(self) -> bool:
         """Whether the server should reconnect this URL after disconnect.
 
-        Per client/goodbye reason: only ``restart`` warrants it; every other reason,
-        including ``concurrent_attempt``, leaves reconnecting to discovery or the caller.
+        Per client/goodbye reason: only ``restart`` and ``shutdown`` warrant it; every other
+        reason, including ``concurrent_attempt``, leaves reconnecting to discovery or the caller.
         With no goodbye, assume a ``restart`` when the connection was idle or carried
         playback, else treat the drop as a session end.
         """
@@ -536,7 +538,7 @@ class SendspinConnection:
         if reason is None:
             activities = self._pairing_activities or self._declared_activities or []
             return not activities or Activity.PLAYBACK in activities
-        return reason is GoodbyeReason.RESTART
+        return reason in _AUTO_RECONNECT_GOODBYE_REASONS
 
     @property
     def goodbye_reason(self) -> GoodbyeReason | None:
@@ -3186,7 +3188,7 @@ class SendspinConnection:
                 payload.reason,
             )
         self._last_goodbye_reason = payload.reason
-        retry = payload.reason == GoodbyeReason.RESTART
+        retry = payload.reason in _AUTO_RECONNECT_GOODBYE_REASONS
         await self.disconnect(retry_connection=retry)
 
     async def _handle_client_state(self, payload: ClientStatePayload) -> None:
