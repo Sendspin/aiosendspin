@@ -1502,21 +1502,8 @@ class SendspinServer:
         if self._mdns_service is not None:
             await self._zc.async_unregister_service(self._mdns_service)
 
-        service_type = "_sendspin-server._tcp.local."
-        properties: dict[str, str] = {}
-        if self._name:
-            properties["name"] = truncate_utf8(self._name, FRIENDLY_NAME_MAX_BYTES)
-        properties["path"] = path
-
         try:
-            info = AsyncServiceInfo(
-                type_=service_type,
-                name=f"{self._id}.{service_type}",
-                server=f"{self._id}.local.",
-                parsed_addresses=addresses,
-                port=port,
-                properties=properties,
-            )
+            info = self._mdns_service_info(addresses, port, path)
             await self._zc.async_register_service(info)
             self._mdns_service = info
             logger.debug("mDNS advertising server on port %d with path %s", port, path)
@@ -1530,6 +1517,21 @@ class SendspinServer:
                 addresses,
                 e,
             )
+
+    def _mdns_service_info(self, addresses: list[str], port: int, path: str) -> AsyncServiceInfo:
+        service_type = "_sendspin-server._tcp.local."
+        properties: dict[str, str] = {}
+        if self._name:
+            properties["name"] = truncate_utf8(self._name, FRIENDLY_NAME_MAX_BYTES)
+        properties["path"] = path
+        return AsyncServiceInfo(
+            type_=service_type,
+            name=f"{self._id}.{service_type}",
+            server=f"{self._id}.local.",
+            parsed_addresses=addresses,
+            port=port,
+            properties=properties,
+        )
 
     async def _start_mdns_discovery(self) -> None:
         assert self._zc is not None
