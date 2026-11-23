@@ -11,9 +11,12 @@ import threading
 from collections import deque
 from dataclasses import dataclass, replace
 from itertools import pairwise
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -225,6 +228,7 @@ class _DummyClient:
         self.is_connected = True
         self.has_warm_reattached_roles = False
         self.has_warm_disconnected_roles = False
+        self.available = True
         self.active_roles = roles
         self.connection = _FakeConnection()
 
@@ -4361,18 +4365,40 @@ async def test_stream_start_waits_for_no_state_while_a_member_plays() -> None:
     assert playing.received
 
 
+def _disconnected_member() -> _DummyClient:
+    member = _DummyClient([_make_role()])
+    member.is_connected = False
+    member.connection = None  # type: ignore[assignment]
+    member.has_warm_disconnected_roles = True
+    return member
+
+
+def _unavailable_member() -> _DummyClient:
+    member = _DummyClient([_make_role()])
+    member.available = False
+    return member
+
+
+def _visualizer_member() -> _DummyClient:
+    role = _make_role()
+    role.role_family = "visualizer"
+    return _DummyClient([role])
+
+
 @pytest.mark.asyncio
-async def test_stream_start_waits_while_the_only_streaming_member_is_disconnected() -> None:
-    """A member kept for its reconnect does not start the stream without the syncing player."""
+@pytest.mark.parametrize(
+    "make_member", [_disconnected_member, _unavailable_member, _visualizer_member]
+)
+async def test_stream_start_waits_while_no_available_player_streams(
+    make_member: Callable[[], _DummyClient],
+) -> None:
+    """A member that plays no audio now does not start the stream without the syncing player."""
     group = _DummyGroup(clients=[])
-    disconnected = _DummyClient([_make_role()])
-    disconnected.is_connected = False
-    disconnected.connection = None  # type: ignore[assignment]
-    disconnected.has_warm_disconnected_roles = True
+    member = make_member()
     syncing_role = _make_role(min_buffer_us=2_000_000)
     syncing = _DummyClient([syncing_role])
     syncing.awaits_role_state = lambda _family: True  # type: ignore[method-assign]
-    group.clients.extend([disconnected, syncing])
+    group.clients.extend([member, syncing])
     stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)  # type: ignore[arg-type]
     stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
     commit = asyncio.create_task(stream.commit_audio())

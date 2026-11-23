@@ -1286,9 +1286,14 @@ class PushStream:
         )
 
     async def _wait_for_first_client_states(self, generation: int) -> None:
-        """Hold the stream's start while all its audio roles await their first client/state."""
+        """Hold the stream's start for first client/states while no available player streams."""
         if (
-            any(not client.has_warm_disconnected_roles for client, _ in self._get_audio_roles())
+            any(
+                role.role_family == "player"
+                and client.available
+                and not client.has_warm_disconnected_roles
+                for client, role in self._get_audio_roles()
+            )
             or not self._audio_role_awaits_first_state()
         ):
             return
@@ -1340,7 +1345,7 @@ class PushStream:
         2. Assigns timestamps to encoded chunks
         3. Sends chunks to connected players via role hooks
 
-        While no member streams yet, the first commit of a buffered source waits for
+        While no available player streams yet, the first commit of a buffered source waits for
         the first client/state of every audio role in the group, so the stream starts
         with them.
 
