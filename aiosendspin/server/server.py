@@ -1326,6 +1326,10 @@ class SendspinServer:
                     else:
                         logger.debug("Connection task for %s failed: %s", url, err)
 
+                if dial_error is not None and url in self._mdns_removed_urls:
+                    logger.debug("Not reconnecting to %s: its mDNS service was removed", url)
+                    break
+
                 sleep_s = min(backoff, MAX_RECONNECT_BACKOFF_S)
                 logger.debug("Trying to reconnect to client at %s in %.1fs", url, sleep_s)
                 if retry_event is not None:

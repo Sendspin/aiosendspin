@@ -734,6 +734,40 @@ async def test_mdns_removal_keeps_live_connection_but_stops_redial(
 
 
 @pytest.mark.asyncio
+async def test_mdns_removal_stops_retrying_after_a_failed_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection whose handshake fails after its mDNS removal isn't retried."""
+    server = _make_server(_PersistentSuccessfulSession())
+    url = "ws://127.0.0.1:9999/sendspin"
+    service_name = "service._sendspin._tcp.local."
+    created: list[_ControlledConnection] = []
+
+    class _FailingHandshake(_ControlledConnection):
+        async def handle_client(self) -> None:
+            await self.ended.wait()
+            raise TimeoutError
+
+    def make(server: SendspinServer, **kwargs: object) -> _ControlledConnection:
+        conn = _FailingHandshake(server, **kwargs)
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr("aiosendspin.server.server.SendspinConnection", make)
+    server.get_or_create_client("client-1")
+    server.register_client_url("client-1", url)
+    server._mdns_client_urls[service_name] = url  # noqa: SLF001
+
+    server.connect_to_client(url)
+    await _wait_for_dials(created, 1)
+    server._handle_service_removed(service_name)  # noqa: SLF001
+    created[0].ended.set()
+    await _wait_for_connection_task_cleanup(server, url)
+
+    assert url not in server._connection_tasks  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_no_reconnect_goodbye_after_mdns_removal_blocks_the_re_add(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
