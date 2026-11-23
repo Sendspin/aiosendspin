@@ -4447,6 +4447,21 @@ async def test_live_stream_start_does_not_wait_for_client_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_start_with_a_fixed_historical_start_does_not_wait() -> None:
+    """Historical audio given a start time keeps it instead of waiting for client/state."""
+    group = _DummyGroup(clients=[])
+    syncing = _DummyClient([_make_role()])
+    syncing.awaits_role_state = lambda _family: True  # type: ignore[method-assign]
+    group.clients.append(syncing)
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)  # type: ignore[arg-type]
+    audio_format = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+    stream.prepare_historical_audio(bytes(4800), audio_format, start_time_us=500_000)
+
+    async with asyncio.timeout(1):
+        await stream.commit_audio()
+
+
+@pytest.mark.asyncio
 async def test_mixed_delay_timeline_uses_largest_output_delay() -> None:
     """With 0 ms and 5 s delay players, timeline anchored for the largest."""
     loop = asyncio.get_running_loop()

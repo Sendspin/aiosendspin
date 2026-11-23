@@ -1370,7 +1370,12 @@ class PushStream:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
         commit_generation = self._stream_generation
         # A live source cannot catch up, so a wait would stay as lasting latency.
-        if not self._channel_timing and play_start_us is None and not self._is_live:
+        if (
+            not self._channel_timing
+            and play_start_us is None
+            and not self._historical_start_us
+            and not self._is_live
+        ):
             await self._wait_for_first_client_states(commit_generation)
             if not self._is_generation_active(commit_generation):
                 return self._stopped_commit_return_value()
