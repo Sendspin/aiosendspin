@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from aiosendspin.models.player import SupportedAudioFormat
 from aiosendspin.server.events import ClientRoleEvent, GroupRoleEvent
 
 
@@ -34,6 +35,13 @@ class MinBufferChangedEvent(ClientRoleEvent):
     """The player's reported minimum ongoing buffer duration was changed."""
 
     min_buffer_ms: int
+
+
+@dataclass
+class ClientFormatChangedEvent(ClientRoleEvent):
+    """The format the player asks for in its client/state changed, None when it asks for none."""
+
+    client_format: SupportedAudioFormat | None
 
 
 class PlayerGroupEvent(GroupRoleEvent):
