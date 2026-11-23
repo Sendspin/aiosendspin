@@ -252,7 +252,7 @@ class SendspinGroup:
     def on_client_disconnected(self, client: SendspinClient) -> None:
         """Let the active stream recheck a start that waits for the client's state."""
         if client in self._clients and self._push_stream is not None:
-            self._push_stream.on_client_disconnected()
+            self._push_stream.on_client_left(client.client_id)
 
     def _set_playback_state(self, new_state: PlaybackStateType) -> None:
         """Set playback state and notify listeners/clients when it changes."""
@@ -447,6 +447,8 @@ class SendspinGroup:
             self._clients = []
         else:
             self._clients.remove(client)
+            if self._push_stream is not None:
+                self._push_stream.on_client_left(client.client_id)
             # End the stream for the removed client via role hooks
             for role in client.active_roles:
                 role.on_stream_end()

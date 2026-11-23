@@ -1384,6 +1384,7 @@ class PushStream:
             await self._wait_for_first_client_states(commit_generation)
             if not self._is_generation_active(commit_generation):
                 return self._stopped_commit_return_value()
+            self._dialed_client_ids.clear()
 
         self._commit_in_flight += 1
         try:
@@ -2324,8 +2325,9 @@ class PushStream:
         """Hold the stream's start for a player dialed for playback until it connects."""
         self._dialed_client_ids.add(client_id)
 
-    def on_client_disconnected(self) -> None:
-        """Recheck a stream start that waits for client/state."""
+    def on_client_left(self, client_id: str) -> None:
+        """Stop holding the stream's start for a client that disconnected or left the group."""
+        self._dialed_client_ids.discard(client_id)
         self._audio_roles_changed.set()
 
     def on_role_leave(self, role: Role) -> None:

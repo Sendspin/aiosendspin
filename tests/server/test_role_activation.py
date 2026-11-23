@@ -53,6 +53,7 @@ from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, Visualiz
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, TrustedUnpairedClient
+from aiosendspin.server import push_stream as push_stream_module
 from aiosendspin.server.audio import AudioFormat
 from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.compliance import ClientComplianceError
@@ -1126,10 +1127,10 @@ async def test_clear_while_the_start_waits_keeps_the_replacement_audio() -> None
     assert stream.has_pending_audio()
 
 
-@pytest.mark.asyncio
-async def test_stream_start_waits_for_a_player_it_dials() -> None:
-    """A player that left for another server and is dialed at stream start gets the first chunk."""
-    clock = ManualClock()
+async def _dialed_player(
+    clock: ManualClock,
+) -> tuple[_MockServer, PushStream, asyncio.Task[int]]:
+    """Start a stream that dials a player which left for another server."""
     server = _MockServer(loop=asyncio.get_running_loop(), clock=clock)  # type: ignore[arg-type]
     server.request_client_playback_connection = lambda _client_id: True  # type: ignore[attr-defined]
     conn, _fake = await _connect(_hello([Roles.PLAYER.value]), server=server)
@@ -1139,6 +1140,14 @@ async def test_stream_start_waits_for_a_player_it_dials() -> None:
     stream.prepare_audio(bytes(4800 * 4), _SILENCE_FORMAT)
     commit = asyncio.create_task(stream.commit_audio())
     await asyncio.sleep(0)
+    return server, stream, commit
+
+
+@pytest.mark.asyncio
+async def test_stream_start_waits_for_a_player_it_dials() -> None:
+    """A player that left for another server and is dialed at stream start gets the first chunk."""
+    clock = ManualClock()
+    server, stream, commit = await _dialed_player(clock)
 
     clock.advance_us(100_000)
     conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False, server=server)
@@ -1159,3 +1168,31 @@ async def test_stream_start_waits_for_a_player_it_dials() -> None:
     await stream.commit_audio()
 
     assert sent_timestamps_us[0] == start_us
+
+
+@pytest.mark.asyncio
+async def test_stream_start_stops_waiting_when_a_dialed_player_drops() -> None:
+    """A dialed player dropping before its first client/state no longer holds the stream's start."""
+    server, _stream, commit = await _dialed_player(ManualClock())
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False, server=server)
+
+    _client(conn).detach_connection(None)
+
+    async with asyncio.timeout(1):
+        await commit
+
+
+@pytest.mark.asyncio
+async def test_seek_after_a_dial_timed_out_does_not_wait_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dial that never connected holds only the stream's first start, not a later seek."""
+    monkeypatch.setattr(push_stream_module, "_FIRST_CLIENT_STATE_WAIT_S", 0.3)
+    _server, stream, commit = await _dialed_player(ManualClock())
+    await commit
+
+    stream.clear()
+    stream.prepare_audio(bytes(4800 * 4), _SILENCE_FORMAT)
+
+    async with asyncio.timeout(0.1):
+        await stream.commit_audio()
