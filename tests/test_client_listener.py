@@ -1,10 +1,24 @@
 """Tests for ClientListener."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 from aiohttp import WSServerHandshakeError, web
 from pytest_aiohttp import AiohttpClient
 
 from aiosendspin.client.listener import DEFAULT_PORT, ClientListener
+
+
+class _FakeAsyncZeroconf:
+    def __init__(self) -> None:
+        self.async_register_service = AsyncMock()
+        self.goodbyes = AsyncMock()
+        self.async_unregister_service = AsyncMock(side_effect=lambda _info: self.goodbyes())
+        self.goodbyes_sent_before_close: bool | None = None
+        self.async_close = AsyncMock(side_effect=self._record_close)
+
+    def _record_close(self) -> None:
+        self.goodbyes_sent_before_close = self.goodbyes.await_count == 1
 
 
 async def _noop_handler(_ws: web.WebSocketResponse) -> None:
@@ -46,3 +60,17 @@ async def test_client_listener_accepts_upgrade_without_origin(
     await ws.receive()
 
     assert len(connections) == 1
+
+
+async def test_client_listener_sends_goodbyes_before_zeroconf_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stopping the listener withdraws its service before Zeroconf shuts down."""
+    zeroconf = _FakeAsyncZeroconf()
+    monkeypatch.setattr("aiosendspin.client.listener.AsyncZeroconf", lambda: zeroconf)
+    listener = ClientListener(
+        client_id="client-1", on_connection=_noop_handler, port=0, host="127.0.0.1"
+    )
+    await listener.start()
+    await listener.stop()
+    assert zeroconf.goodbyes_sent_before_close is True

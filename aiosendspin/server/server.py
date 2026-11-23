@@ -1775,7 +1775,7 @@ class SendspinServer:
             if self._mdns_browser is not None:
                 await self._mdns_browser.async_cancel()
             if self._mdns_service is not None:
-                await self._zc.async_unregister_service(self._mdns_service)
+                await (await self._zc.async_unregister_service(self._mdns_service))
         finally:
             await self._zc.async_close()
             self._zc = None
