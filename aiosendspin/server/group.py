@@ -244,6 +244,11 @@ class SendspinGroup:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
 
+    def on_client_disconnected(self, client: SendspinClient) -> None:
+        """Let the active stream recheck a start that waits for the client's state."""
+        if client in self._clients and self._push_stream is not None:
+            self._push_stream.on_client_disconnected()
+
     def _set_playback_state(self, new_state: PlaybackStateType) -> None:
         """Set playback state and notify listeners/clients when it changes."""
         if self._current_state == new_state:

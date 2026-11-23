@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, PropertyMock, patch
 
 import orjson
@@ -40,6 +40,7 @@ from aiosendspin.models.types import (
     ArtworkSource,
     AudioCodec,
     BinaryMessageType,
+    ConnectionReason,
     PairMethod,
     PictureFormat,
     PlaybackStateType,
@@ -51,7 +52,8 @@ from aiosendspin.models.visualizer import ClientHelloVisualizerSupport, Visualiz
 from aiosendspin.noise.keys import Identity, generate_psk, psk_id_for
 from aiosendspin.noise.pairing import PairingAttempt
 from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, TrustedUnpairedClient
-from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.audio import AudioFormat
+from aiosendspin.server.clock import LoopClock, ManualClock
 from aiosendspin.server.compliance import ClientComplianceError
 from aiosendspin.server.connection import SendspinConnection
 from aiosendspin.server.group import SendspinGroup
@@ -133,6 +135,7 @@ async def _connect(
     send_state: bool = True,
     category: PskCategory = PskCategory.SENTINEL,
     server: _MockServer | None = None,
+    url: str | None = None,
 ) -> tuple[SendspinConnection, _FakeTransport]:
     """Connect an unpaired client; a trusted one also delivers its initial client/state."""
     loop = asyncio.get_running_loop()
@@ -142,7 +145,7 @@ async def _connect(
         await server.pairing_store.add_trusted_unpaired(
             TrustedUnpairedClient(client_id=CLIENT_ID, approved_roles=approved_roles)
         )
-    conn = SendspinConnection(server, wsock_client=AsyncMock())
+    conn = SendspinConnection(server, wsock_client=AsyncMock(), url=url)
     psk = generate_psk()
     conn._client_id = CLIENT_ID  # noqa: SLF001
     conn._noise_psk = ResolvedPsk(  # noqa: SLF001
@@ -1048,3 +1051,75 @@ async def test_activation_after_rehandshake_goes_before_stream_end() -> None:
     await conn._activate()  # noqa: SLF001
 
     assert fake.sent_payloads()[0]["type"] == "server/activate"
+
+
+_SILENCE_FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+
+
+async def _player_syncing_its_clock(
+    clock: ManualClock,
+) -> tuple[SendspinConnection, PushStream, asyncio.Task[int]]:
+    """Dial a player for playback and start a stream before its first client/state."""
+    url = "ws://player:8927/sendspin"
+    server = _MockServer(loop=asyncio.get_running_loop(), clock=clock)  # type: ignore[arg-type]
+    server._connection_reasons[url] = ConnectionReason.PLAYBACK  # noqa: SLF001
+    server.request_client_playback_connection = lambda _client_id: True  # type: ignore[attr-defined]
+    conn, _fake = await _connect(
+        _hello([Roles.PLAYER.value]),
+        send_state=False,
+        server=server,
+        url=url,
+        category=PskCategory.LONG_TERM,
+    )
+    stream = _client(conn).group.start_stream()
+    stream.prepare_audio(bytes(4800 * 4), _SILENCE_FORMAT)
+    commit = asyncio.create_task(stream.commit_audio())
+    await asyncio.sleep(0)
+    return conn, stream, commit
+
+
+@pytest.mark.asyncio
+async def test_stream_started_before_the_first_client_state_starts_with_it() -> None:
+    """A player still syncing its clock at stream start gets the stream's first chunk."""
+    clock = ManualClock()
+    conn, stream, commit = await _player_syncing_its_clock(clock)
+    sent_timestamps_us: list[int] = []
+    send_binary = conn.send_binary
+
+    def record(data: bytes, **kwargs: Any) -> None:
+        sent_timestamps_us.append(kwargs["timestamp_us"])
+        send_binary(data, **kwargs)
+
+    conn.send_binary = record  # type: ignore[method-assign]
+    clock.advance_us(26_000)
+    state = dataclasses.replace(_PLAYER_STATE, min_buffer_ms=2000)
+    await conn._handle_client_state(ClientStatePayload(available=True, player=state))  # noqa: SLF001
+    start_us = await commit
+    stream.prepare_audio(bytes(4800 * 4), _SILENCE_FORMAT)
+    await stream.commit_audio()
+
+    assert sent_timestamps_us[0] == start_us
+
+
+@pytest.mark.asyncio
+async def test_stream_start_stops_waiting_when_the_player_disconnects() -> None:
+    """A player dropping before its first client/state no longer holds the stream's start."""
+    conn, _stream, commit = await _player_syncing_its_clock(ManualClock())
+
+    _client(conn).detach_connection(None)
+
+    async with asyncio.timeout(1):
+        await commit
+
+
+@pytest.mark.asyncio
+async def test_clear_while_the_start_waits_keeps_the_replacement_audio() -> None:
+    """A commit cleared while waiting for client/state returns and leaves later audio alone."""
+    _conn, stream, commit = await _player_syncing_its_clock(ManualClock())
+    stream.clear()
+    stream.prepare_audio(bytes(4800 * 4), _SILENCE_FORMAT)
+
+    async with asyncio.timeout(1):
+        await commit
+
+    assert stream.has_pending_audio()

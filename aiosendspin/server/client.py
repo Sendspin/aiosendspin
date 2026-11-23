@@ -724,6 +724,7 @@ class SendspinClient:
             self._roles_warm_disconnected = False
 
         self._connection = None
+        self.group.on_client_disconnected(self)
 
         self._server._signal_client_disconnected(  # noqa: SLF001
             self._client_id, goodbye_reason

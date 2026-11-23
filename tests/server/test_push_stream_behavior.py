@@ -87,6 +87,9 @@ class _DummyGroup:
     def _publish_if_name_changed(self, previous: str) -> None:  # noqa: ARG002
         return
 
+    def on_client_disconnected(self, client: SendspinClient) -> None:  # noqa: ARG002
+        return
+
     def on_client_connected(self, client: SendspinClient) -> None:  # noqa: ARG002
         return
 
@@ -221,6 +224,7 @@ class _DummyClient:
     def __init__(self, roles: list[_DummyRole]) -> None:
         self.is_connected = True
         self.has_warm_reattached_roles = False
+        self.has_warm_disconnected_roles = False
         self.active_roles = roles
         self.connection = _FakeConnection()
 
@@ -2499,6 +2503,9 @@ def _format_state(sample_rate: int) -> ClientStatePayload:
 class _JoiningGroup(_DummyGroup):
     """Dummy group that joins a connected client's roles to the active stream."""
 
+    def on_client_disconnected(self, client: SendspinClient) -> None:  # noqa: ARG002
+        return
+
     def on_client_connected(self, client: SendspinClient) -> None:
         if self._push_stream is not None and not self._push_stream.is_stopped:
             for role in client.active_roles:
@@ -4335,6 +4342,47 @@ async def test_commit_audio_bootstrap_includes_output_delay() -> None:
     play_start = await stream.commit_audio()
 
     assert play_start >= clock.now_us() + DEFAULT_INITIAL_DELAY_US + _OUTPUT_DELAY_US
+
+
+@pytest.mark.asyncio
+async def test_stream_start_waits_for_no_state_while_a_member_plays() -> None:
+    """A member still awaiting its first client/state does not hold a group that can play."""
+    group = _DummyGroup(clients=[])
+    playing = _make_role()
+    awaiting = _DummyClient([_make_role()])
+    awaiting.awaits_role_state = lambda _family: True  # type: ignore[method-assign]
+    group.clients.extend([_DummyClient([playing]), awaiting])
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)  # type: ignore[arg-type]
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+
+    async with asyncio.timeout(1):
+        await stream.commit_audio()
+
+    assert playing.received
+
+
+@pytest.mark.asyncio
+async def test_stream_start_waits_while_the_only_streaming_member_is_disconnected() -> None:
+    """A member kept for its reconnect does not start the stream without the syncing player."""
+    group = _DummyGroup(clients=[])
+    disconnected = _DummyClient([_make_role()])
+    disconnected.is_connected = False
+    disconnected.connection = None  # type: ignore[assignment]
+    disconnected.has_warm_disconnected_roles = True
+    syncing_role = _make_role(min_buffer_us=2_000_000)
+    syncing = _DummyClient([syncing_role])
+    syncing.awaits_role_state = lambda _family: True  # type: ignore[method-assign]
+    group.clients.extend([disconnected, syncing])
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)  # type: ignore[arg-type]
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+    commit = asyncio.create_task(stream.commit_audio())
+    await asyncio.sleep(0.05)
+
+    syncing.awaits_role_state = lambda _family: False  # type: ignore[method-assign]
+    stream.on_role_join(syncing_role)  # type: ignore[arg-type]
+    start_us = await commit
+
+    assert syncing_role.received[0].timestamp_us == start_us
 
 
 @pytest.mark.asyncio
