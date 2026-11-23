@@ -1392,8 +1392,9 @@ class SendspinServer:
         Args:
             port: TCP port to listen on.
             host: Address to listen on, or "0.0.0.0" for all addresses.
-            advertise_addresses: Addresses in the server's mDNS record, or None to pick
-                them automatically.
+            advertise_addresses: Addresses in the server's mDNS record, or None for
+                ``host``. When ``host`` is "0.0.0.0", None means the address of the
+                default route, or ``zeroconf_interfaces`` when there is no default route.
             discover_clients: Browse mDNS for clients and connect to them.
             zeroconf_interfaces: IPv4 addresses of the interfaces mDNS runs on, or None
                 for ``host``, or the default interface when ``host`` is "0.0.0.0".
@@ -1449,10 +1450,12 @@ class SendspinServer:
 
             if advertise_addresses is not None:
                 addresses = advertise_addresses
+            elif host != "0.0.0.0":
+                addresses = [host]
             elif local_ip := get_local_ip():
                 addresses = [local_ip]
             else:
-                addresses = []
+                addresses = list(zeroconf_interfaces or [])
 
             if addresses:
                 await self._start_mdns_advertising(

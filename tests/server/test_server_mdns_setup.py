@@ -68,3 +68,36 @@ async def test_non_ipv4_interface_is_rejected_before_listening(
         assert not fake_zeroconf.instances
     finally:
         await server.close()
+
+
+def _advertised_addresses(zeroconf: _FakeAsyncZeroconf) -> list[str]:
+    info = zeroconf.async_register_service.await_args.args[0]
+    return info.parsed_addresses()
+
+
+async def test_specific_host_is_advertised(
+    fake_zeroconf: type[_FakeAsyncZeroconf], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server bound to one address advertises it, not the default route's address."""
+    monkeypatch.setattr("aiosendspin.server.server.get_local_ip", lambda: "10.0.0.5")
+    server = _make_server()
+    try:
+        await server.start_server(port=0, host="127.0.0.1", discover_clients=False)
+        assert _advertised_addresses(fake_zeroconf.instances[0]) == ["127.0.0.1"]
+    finally:
+        await server.close()
+
+
+async def test_chosen_interfaces_are_advertised_without_default_route(
+    fake_zeroconf: type[_FakeAsyncZeroconf], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no default route, the record carries the addresses mDNS runs on."""
+    monkeypatch.setattr("aiosendspin.server.server.get_local_ip", lambda: None)
+    server = _make_server()
+    try:
+        await server.start_server(
+            port=0, zeroconf_interfaces=["192.168.50.2"], discover_clients=False
+        )
+        assert _advertised_addresses(fake_zeroconf.instances[0]) == ["192.168.50.2"]
+    finally:
+        await server.close()
