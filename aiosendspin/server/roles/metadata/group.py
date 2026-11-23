@@ -117,9 +117,9 @@ class MetadataGroupRole(ScheduledStateGroupRole[Metadata]):
             url = metadata.artwork_url
             if url is not None and len(url.encode()) > ARTWORK_URL_MAX_BYTES:
                 logger.debug(
-                    "Artwork URL is over %d bytes in UTF-8, clients don't get it: %s",
+                    "Artwork URL is %d bytes in UTF-8, over %d, clients don't get it",
+                    len(url.encode()),
                     ARTWORK_URL_MAX_BYTES,
-                    url,
                 )
         self._apply_metadata(metadata, timestamp_us=timestamp_us, force=False)
 
