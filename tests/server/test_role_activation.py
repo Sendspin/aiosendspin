@@ -41,6 +41,7 @@ from aiosendspin.models.types import (
     AudioCodec,
     BinaryMessageType,
     ConnectionReason,
+    GoodbyeReason,
     PairMethod,
     PictureFormat,
     PlaybackStateType,
@@ -1123,3 +1124,38 @@ async def test_clear_while_the_start_waits_keeps_the_replacement_audio() -> None
         await commit
 
     assert stream.has_pending_audio()
+
+
+@pytest.mark.asyncio
+async def test_stream_start_waits_for_a_player_it_dials() -> None:
+    """A player that left for another server and is dialed at stream start gets the first chunk."""
+    clock = ManualClock()
+    server = _MockServer(loop=asyncio.get_running_loop(), clock=clock)  # type: ignore[arg-type]
+    server.request_client_playback_connection = lambda _client_id: True  # type: ignore[attr-defined]
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), server=server)
+    client = _client(conn)
+    client.detach_connection(GoodbyeReason.ANOTHER_SERVER)
+    stream = client.group.start_stream()
+    stream.prepare_audio(bytes(4800 * 4), _SILENCE_FORMAT)
+    commit = asyncio.create_task(stream.commit_audio())
+    await asyncio.sleep(0)
+
+    clock.advance_us(100_000)
+    conn, _fake = await _connect(_hello([Roles.PLAYER.value]), send_state=False, server=server)
+    sent_timestamps_us: list[int] = []
+    send_binary = conn.send_binary
+
+    def record(data: bytes, **kwargs: Any) -> None:
+        sent_timestamps_us.append(kwargs["timestamp_us"])
+        send_binary(data, **kwargs)
+
+    conn.send_binary = record  # type: ignore[method-assign]
+    clock.advance_us(26_000)
+    state = dataclasses.replace(_PLAYER_STATE, min_buffer_ms=2000)
+    await conn._handle_client_state(ClientStatePayload(available=True, player=state))  # noqa: SLF001
+    async with asyncio.timeout(1):
+        start_us = await commit
+    stream.prepare_audio(bytes(4800 * 4), _SILENCE_FORMAT)
+    await stream.commit_audio()
+
+    assert sent_timestamps_us[0] == start_us

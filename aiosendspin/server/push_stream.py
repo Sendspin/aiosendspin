@@ -1002,6 +1002,8 @@ class PushStream:
         self._cuts_waiting = 0
         # Wakes a start waiting for client/state to recheck whether it may go ahead.
         self._audio_roles_changed = asyncio.Event()
+        # Players the group dials for playback at stream start.
+        self._dialed_client_ids: set[str] = set()
         # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
         self._historical_buffers: dict[UUID, list[tuple[bytes, AudioFormat]]] = {}
         # Optional start timestamps for historical channels (set on first historical chunk).
@@ -1276,13 +1278,16 @@ class PushStream:
         return list(self._pcm_chunk_cache[channel_int])
 
     def _audio_role_awaits_first_state(self) -> bool:
-        """Whether an audio role of a member with a connection awaits its first client/state."""
+        """Whether a dialed player awaits its connection or a connected audio role its state."""
         return any(
-            role.get_audio_requirements() is not None
-            and (not client.is_connected or client.awaits_role_state(role.role_family))
-            for client in self._group.clients
+            any(
+                role.get_audio_requirements() is not None
+                and (not client.is_connected or client.awaits_role_state(role.role_family))
+                for role in client.active_roles
+            )
             if client.connection is not None
-            for role in client.active_roles
+            else client.client_id in self._dialed_client_ids
+            for client in self._group.clients
         )
 
     async def _wait_for_first_client_states(self, generation: int) -> None:
@@ -2314,6 +2319,10 @@ class PushStream:
                 role.role_family,
                 now_us,
             )
+
+    def on_client_dialed(self, client_id: str) -> None:
+        """Hold the stream's start for a player dialed for playback until it connects."""
+        self._dialed_client_ids.add(client_id)
 
     def on_client_disconnected(self) -> None:
         """Recheck a stream start that waits for client/state."""

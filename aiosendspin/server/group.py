@@ -146,8 +146,13 @@ class SendspinGroup:
         # Reclaim any disconnected clients in the group (multi-server support).
         # This reconnects to clients that may have switched to another server.
         for client in self._clients:
-            if not client.is_connected:
-                self._server.request_client_playback_connection(client.client_id)
+            if (
+                not client.is_connected
+                and self._server.request_client_playback_connection(client.client_id)
+                and client.connection is None
+                and has_role_family("player", client.negotiated_role_ids)
+            ):
+                self._push_stream.on_client_dialed(client.client_id)
 
         self._set_playback_state(PlaybackStateType.PLAYING)
         return self._push_stream

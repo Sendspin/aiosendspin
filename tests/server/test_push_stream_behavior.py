@@ -225,6 +225,7 @@ class _DummyRole:
 
 class _DummyClient:
     def __init__(self, roles: list[_DummyRole]) -> None:
+        self.client_id = "dummy"
         self.is_connected = True
         self.has_warm_reattached_roles = False
         self.has_warm_disconnected_roles = False
