@@ -55,6 +55,8 @@ MIN_LEAD_FLOOR_US = 50_000
 # everything the producer has buffered ahead (tens of seconds), so encoding it in one
 # step would stall the loop and starve the live commit that keeps the timeline moving.
 _PCM_SEQUENCE_YIELD_INTERVAL_US = 500_000
+# Longest a stream's start waits for its members' first client/state.
+_FIRST_CLIENT_STATE_WAIT_S = 5.0
 # Dithering policy when reducing to 16-bit integer PCM.
 _DITHER_METHOD_TRIANGULAR_HP = "triangular_hp"
 # Maximum allowed drift between transformer's internal timeline and the expected output
@@ -998,6 +1000,10 @@ class PushStream:
         self._no_cut_waiting = asyncio.Event()
         self._no_cut_waiting.set()
         self._cuts_waiting = 0
+        # Wakes a start waiting for client/state to recheck whether it may go ahead.
+        self._audio_roles_changed = asyncio.Event()
+        # Players the group dials for playback at stream start.
+        self._dialed_client_ids: set[str] = set()
         # Historical audio buffers: channel_id -> list of (pcm_bytes, audio_format)
         self._historical_buffers: dict[UUID, list[tuple[bytes, AudioFormat]]] = {}
         # Optional start timestamps for historical channels (set on first historical chunk).
@@ -1271,6 +1277,39 @@ class PushStream:
             return []
         return list(self._pcm_chunk_cache[channel_int])
 
+    def _audio_role_awaits_first_state(self) -> bool:
+        """Whether a dialed player awaits its connection or a connected audio role its state."""
+        return any(
+            any(
+                role.get_audio_requirements() is not None
+                and (not client.is_connected or client.awaits_role_state(role.role_family))
+                for role in client.active_roles
+            )
+            if client.connection is not None
+            else client.client_id in self._dialed_client_ids
+            for client in self._group.clients
+        )
+
+    async def _wait_for_first_client_states(self, generation: int) -> None:
+        """Hold the stream's start for first client/states while no available player streams."""
+        if (
+            any(
+                role.role_family == "player"
+                and client.available
+                and not client.has_warm_disconnected_roles
+                for client, role in self._get_audio_roles()
+            )
+            or not self._audio_role_awaits_first_state()
+        ):
+            return
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(_FIRST_CLIENT_STATE_WAIT_S):
+                while (
+                    self._is_generation_active(generation) and self._audio_role_awaits_first_state()
+                ):
+                    self._audio_roles_changed.clear()
+                    await self._audio_roles_changed.wait()
+
     def get_late_join_target_timestamp_us(
         self,
         *,
@@ -1311,6 +1350,10 @@ class PushStream:
         2. Assigns timestamps to encoded chunks
         3. Sends chunks to connected players via role hooks
 
+        While no available player streams yet, the first commit of a buffered source waits for
+        the first client/state of every audio role in the group, so the stream starts
+        with them.
+
         Args:
             play_start_us: If provided, use this timestamp directly for all channels
                 instead of auto-calculating from clock. Useful for multi-server sync
@@ -1331,6 +1374,17 @@ class PushStream:
         if self._is_stopped:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
         commit_generation = self._stream_generation
+        # A live source cannot catch up, so a wait would stay as lasting latency.
+        if (
+            not self._channel_timing
+            and play_start_us is None
+            and not self._historical_start_us
+            and not self._is_live
+        ):
+            await self._wait_for_first_client_states(commit_generation)
+            if not self._is_generation_active(commit_generation):
+                return self._stopped_commit_return_value()
+            self._dialed_client_ids.clear()
 
         self._commit_in_flight += 1
         try:
@@ -2267,8 +2321,18 @@ class PushStream:
                 now_us,
             )
 
+    def on_client_dialed(self, client_id: str) -> None:
+        """Hold the stream's start for a player dialed for playback until it connects."""
+        self._dialed_client_ids.add(client_id)
+
+    def on_client_left(self, client_id: str) -> None:
+        """Stop holding the stream's start for a client that disconnected or left the group."""
+        self._dialed_client_ids.discard(client_id)
+        self._audio_roles_changed.set()
+
     def on_role_leave(self, role: Role) -> None:
         """Remove role-specific state so re-joins get fresh stream/start."""
+        self._audio_roles_changed.set()
         self._started_roles.discard(role)
         self._pending_join_roles.discard(role)
         self._resume_at_us.pop(role, None)
@@ -2370,6 +2434,7 @@ class PushStream:
         Args:
             role: The role that joined.
         """
+        self._audio_roles_changed.set()
         # Join immediately so replay anchors to the current shared timeline.
         # Deferring by wall-clock time can desynchronize grouped players.
         if self._commit_in_flight > 0:
@@ -3236,6 +3301,7 @@ class PushStream:
         if self._is_stopped:
             return
         self._is_stopped = True
+        self._audio_roles_changed.set()
         self._stream_generation += 1
         self._pending_join_roles.clear()
 
@@ -3279,6 +3345,7 @@ class PushStream:
         # Bump the stream generation so any in-flight commit_audio()
         # coroutine bails out before delivering chunks under the new epoch.
         self._stream_generation += 1
+        self._audio_roles_changed.set()
 
         # Clear pending audio
         self._channel_buffers.clear()

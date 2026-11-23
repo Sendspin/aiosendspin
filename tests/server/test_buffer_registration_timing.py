@@ -54,6 +54,9 @@ class _DummyGroup:
     def _publish_if_name_changed(self, previous: str) -> None:  # noqa: ARG002
         return
 
+    def on_client_disconnected(self, client: Any) -> None:  # noqa: ARG002
+        return
+
     def on_client_connected(self, client: Any) -> None:  # noqa: ARG002
         return
 

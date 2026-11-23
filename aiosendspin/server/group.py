@@ -146,8 +146,13 @@ class SendspinGroup:
         # Reclaim any disconnected clients in the group (multi-server support).
         # This reconnects to clients that may have switched to another server.
         for client in self._clients:
-            if not client.is_connected:
-                self._server.request_client_playback_connection(client.client_id)
+            if (
+                not client.is_connected
+                and self._server.request_client_playback_connection(client.client_id)
+                and client.connection is None
+                and has_role_family("player", client.negotiated_role_ids)
+            ):
+                self._push_stream.on_client_dialed(client.client_id)
 
         self._set_playback_state(PlaybackStateType.PLAYING)
         return self._push_stream
@@ -243,6 +248,11 @@ class SendspinGroup:
             for role in client.active_roles:
                 if role.get_audio_requirements() is not None:
                     self._push_stream.on_role_join(role)
+
+    def on_client_disconnected(self, client: SendspinClient) -> None:
+        """Let the active stream recheck a start that waits for the client's state."""
+        if client in self._clients and self._push_stream is not None:
+            self._push_stream.on_client_left(client.client_id)
 
     def _set_playback_state(self, new_state: PlaybackStateType) -> None:
         """Set playback state and notify listeners/clients when it changes."""
@@ -437,6 +447,8 @@ class SendspinGroup:
             self._clients = []
         else:
             self._clients.remove(client)
+            if self._push_stream is not None:
+                self._push_stream.on_client_left(client.client_id)
             # End the stream for the removed client via role hooks
             for role in client.active_roles:
                 role.on_stream_end()
