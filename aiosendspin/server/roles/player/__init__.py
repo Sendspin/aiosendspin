@@ -3,6 +3,7 @@
 from aiosendspin.models.player import ClientHelloPlayerSupport
 from aiosendspin.server.roles.player.audio_transformers import FlacEncoder, PcmPassthrough
 from aiosendspin.server.roles.player.events import (
+    ClientFormatChangedEvent,
     MinBufferChangedEvent,
     OutputDelayChangedEvent,
     PlayerGroupEvent,
@@ -31,6 +32,7 @@ register_role_support_spec(
 )
 
 __all__ = [
+    "ClientFormatChangedEvent",
     "FlacEncoder",
     "MinBufferChangedEvent",
     "OutputDelayChangedEvent",

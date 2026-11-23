@@ -25,6 +25,7 @@ from aiosendspin.server.roles.player.audio_transformers import (
     OpusEncoder,
     PcmPassthrough,
 )
+from aiosendspin.server.roles.player.events import ClientFormatChangedEvent
 from aiosendspin.server.roles.player.v1 import PlayerPersistentState, PlayerV1Role
 
 PCM_48K = SupportedAudioFormat(codec=AudioCodec.PCM, sample_rate=48000, bit_depth=16, channels=2)
@@ -128,16 +129,29 @@ def _transformer(role: PlayerV1Role) -> object:
     return req.transformer
 
 
-def test_client_format_reads_the_format_the_client_asked_for(mock_server: MagicMock) -> None:
-    """The format a client asks for is readable, and gone once the client asks for none."""
-    _client, role, _conn = _make_player(mock_server)
+def test_client_format_reads_the_format_the_client_asked_for(
+    mock_server: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The format a client asks for is readable, and each change of it emits an event."""
+    client, role, _conn = _make_player(mock_server)
+    signal = MagicMock()
+    monkeypatch.setattr(client, "_signal_event", signal)
     assert role.client_format is None
 
     role.on_client_state(_state(FLAC_48K))
     assert role.client_format == FLAC_48K
 
+    role.on_client_state(_state(FLAC_48K))
     role.on_client_state(_state(None))
     assert role.client_format is None
+
+    events = [
+        call.args[0]
+        for call in signal.call_args_list
+        if isinstance(call.args[0], ClientFormatChangedEvent)
+    ]
+    assert [event.client_format for event in events] == [FLAC_48K, None]
 
 
 def test_idle_format_applies_to_next_stream_without_starting_one(

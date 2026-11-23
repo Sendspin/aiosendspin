@@ -14,6 +14,7 @@ __all__ = [
     "ClientCredentialMismatchEvent",
     "ClientDisconnectedEvent",
     "ClientEvent",
+    "ClientFormatChangedEvent",
     "ClientGroupChangedEvent",
     "ClientRemovedEvent",
     "ClientRoleEvent",
@@ -62,6 +63,7 @@ from .group import (
     SendspinGroup,
 )
 from .roles.player.events import (
+    ClientFormatChangedEvent,
     MinBufferChangedEvent,
     OutputDelayChangedEvent,
     RequiredLeadTimeChangedEvent,

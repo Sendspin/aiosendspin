@@ -54,6 +54,7 @@ from aiosendspin.server.roles.player.capabilities import (
     filter_encodable_formats,
 )
 from aiosendspin.server.roles.player.events import (
+    ClientFormatChangedEvent,
     MinBufferChangedEvent,
     OutputDelayChangedEvent,
     RequiredLeadTimeChangedEvent,
@@ -937,6 +938,7 @@ class PlayerV1Role(Role):
             return
         self._client_format = audio_format
         self._apply_preferred_format()
+        self.emit_client_event(ClientFormatChangedEvent(client_format=audio_format))
 
     def _apply_preferred_format(self) -> None:
         """Re-derive the stream format; restart an active stream only when it changed."""
