@@ -31,6 +31,11 @@ from aiosendspin.models.types import (
 )
 from aiosendspin.server.client import SendspinClient
 from aiosendspin.server.clock import LoopClock
+from aiosendspin.server.events import (
+    ClientAvailabilityChangedEvent,
+    ClientEvent,
+    ClientLeftGroupEvent,
+)
 from aiosendspin.server.group import SendspinGroup
 from aiosendspin.server.roles.controller.v1 import ControllerV1Role
 
@@ -336,6 +341,67 @@ async def test_switch_after_leave_rejoins_previous_group() -> None:
     assert client.group is shared_group
     assert client._previous_group_id is None  # noqa: SLF001
     assert client._leave_solo_group_id is None  # noqa: SLF001
+
+
+def _record_events(client: SendspinClient) -> list[ClientEvent]:
+    events: list[ClientEvent] = []
+    client.add_event_listener(lambda _client, event: events.append(event))
+    return events
+
+
+@pytest.mark.asyncio
+async def test_availability_event_fires_only_on_change() -> None:
+    """Each change of the reported availability emits one event with the new value."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client, _ = _make_client(server, "player-a", supported_roles=[Roles.PLAYER.value])
+    events = _record_events(client)
+
+    await client.handle_availability_change(available=False)
+    await client.handle_availability_change(available=False)
+    await client.handle_availability_change(available=True)
+
+    assert [e for e in events if isinstance(e, ClientAvailabilityChangedEvent)] == [
+        ClientAvailabilityChangedEvent(available=False),
+        ClientAvailabilityChangedEvent(available=True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_leave_reports_the_previous_group() -> None:
+    """Leaving a shared group emits the left group once and exposes it while still solo."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client, _ = _make_client(server, "player-a", supported_roles=[Roles.PLAYER.value])
+    other, _ = _make_client(server, "player-b", supported_roles=[Roles.PLAYER.value])
+    shared_group = client.group
+    await shared_group.add_client(other)
+    assert client.previous_group_id is None
+    events = _record_events(client)
+
+    await client.handle_leave()
+    await client.handle_leave()
+
+    assert [e for e in events if isinstance(e, ClientLeftGroupEvent)] == [
+        ClientLeftGroupEvent(previous_group_id=shared_group.group_id)
+    ]
+    assert client.previous_group_id == shared_group.group_id
+
+
+@pytest.mark.asyncio
+async def test_previous_group_clears_when_the_app_moves_the_client() -> None:
+    """Adding the client to another group drops the group it left on its own."""
+    loop = asyncio.get_running_loop()
+    server = _DummyServer(loop=loop, clock=LoopClock(loop))
+    client, _ = _make_client(server, "player-a", supported_roles=[Roles.PLAYER.value])
+    other, _ = _make_client(server, "player-b", supported_roles=[Roles.PLAYER.value])
+    third, _ = _make_client(server, "player-c", supported_roles=[Roles.PLAYER.value])
+    await client.group.add_client(other)
+    await client.handle_availability_change(available=False)
+
+    await third.group.add_client(client)
+
+    assert client.previous_group_id is None
 
 
 @pytest.mark.asyncio

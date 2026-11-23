@@ -31,7 +31,12 @@ from aiosendspin.noise.trust_store import PskCategory
 from aiosendspin.util import PrefixLoggerAdapter, create_task
 
 from .compliance import ClientComplianceError, describe_client, noncompliance_subject
-from .events import ClientEvent, ClientGroupChangedEvent
+from .events import (
+    ClientAvailabilityChangedEvent,
+    ClientEvent,
+    ClientGroupChangedEvent,
+    ClientLeftGroupEvent,
+)
 from .roles import Role
 from .roles.base import BinaryHandling
 from .roles.negotiation import negotiate_roles, sort_role_ids
@@ -300,6 +305,13 @@ class SendspinClient:
         """Return whether the client is available to participate, per `client/state`."""
         return self._available
 
+    @property
+    def previous_group_id(self) -> str | None:
+        """ID of the shared group the client left, while alone in the solo group it moved to."""
+        if self._leave_solo_group_id != self.group.group_id or len(self.group.clients) != 1:
+            return None
+        return self._previous_group_id
+
     async def set_availability(self, available: bool) -> None:  # noqa: FBT001
         """Record the availability a `client/state` reports and notify all roles.
 
@@ -313,6 +325,8 @@ class SendspinClient:
             coro = role.on_availability_changed(old_available, available)
             if coro is not None:
                 await coro
+        if available != old_available:
+            self._signal_event(ClientAvailabilityChangedEvent(available))
 
     async def handle_availability_change(self, available: bool) -> None:  # noqa: FBT001
         """Handle a client availability change; becoming unavailable leaves any shared group."""
@@ -337,6 +351,7 @@ class SendspinClient:
         self._previous_group_id = previous_group_id
         self._leave_solo_group_id = self.group.group_id
         self._logger.debug("Stored previous group %s", previous_group_id)
+        self._signal_event(ClientLeftGroupEvent(previous_group_id))
 
     async def handle_switch_command(self) -> None:
         """Cycle this client through available groups."""
@@ -436,12 +451,7 @@ class SendspinClient:
         Per spec: if the client is still in the solo group it was moved to on becoming
         unavailable or on ``client/leave``, switch prioritizes rejoining that group.
         """
-        return (
-            self._previous_group_id is not None
-            and self._available
-            and self._leave_solo_group_id == self.group.group_id
-            and len(self.group.clients) == 1
-        )
+        return self.previous_group_id is not None and self._available
 
     async def _try_rejoin_previous_group(self) -> bool:
         if not self._should_rejoin_previous_group():

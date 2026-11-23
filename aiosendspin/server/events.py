@@ -27,6 +27,22 @@ class ClientGroupChangedEvent(ClientEvent):
     """The new group the client is now part of."""
 
 
+@dataclass
+class ClientAvailabilityChangedEvent(ClientEvent):
+    """The availability reported in the client's `client/state` changed."""
+
+    available: bool
+    """The new availability."""
+
+
+@dataclass
+class ClientLeftGroupEvent(ClientEvent):
+    """The client left a shared group through `client/leave` or by becoming unavailable."""
+
+    previous_group_id: str
+    """ID of the group the client left, which may no longer exist."""
+
+
 class GroupEvent:
     """Base event type used by SendspinGroup.add_event_listener()."""
 

@@ -10,11 +10,13 @@ __all__ = [
     "AudioCodec",
     "AudioFormat",
     "ClientAddedEvent",
+    "ClientAvailabilityChangedEvent",
     "ClientConnectedEvent",
     "ClientCredentialMismatchEvent",
     "ClientDisconnectedEvent",
     "ClientEvent",
     "ClientGroupChangedEvent",
+    "ClientLeftGroupEvent",
     "ClientRemovedEvent",
     "ClientRoleEvent",
     "ClientUpdatedEvent",
@@ -48,8 +50,10 @@ from aiosendspin.models.types import AudioCodec, SignalState
 from .audio import AudioFormat
 from .client import ConnectionSecurity, DisconnectBehaviour, SendspinClient
 from .events import (
+    ClientAvailabilityChangedEvent,
     ClientEvent,
     ClientGroupChangedEvent,
+    ClientLeftGroupEvent,
     ClientRoleEvent,
     GroupDeletedEvent,
     GroupEvent,
