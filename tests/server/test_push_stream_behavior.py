@@ -4386,6 +4386,26 @@ async def test_stream_start_waits_while_the_only_streaming_member_is_disconnecte
 
 
 @pytest.mark.asyncio
+async def test_stream_start_stops_waiting_for_a_state_that_never_comes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The start goes ahead after the wait limit and keeps the silent role held."""
+    monkeypatch.setattr(push_stream_module, "_FIRST_CLIENT_STATE_WAIT_S", 0.01)
+    group = _DummyGroup(clients=[])
+    silent_role = _make_role()
+    silent = _DummyClient([silent_role])
+    silent.awaits_role_state = lambda _family: True  # type: ignore[method-assign]
+    group.clients.append(silent)
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)  # type: ignore[arg-type]
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+
+    async with asyncio.timeout(1):
+        await stream.commit_audio()
+
+    assert silent_role.received == []
+
+
+@pytest.mark.asyncio
 async def test_mixed_delay_timeline_uses_largest_output_delay() -> None:
     """With 0 ms and 5 s delay players, timeline anchored for the largest."""
     loop = asyncio.get_running_loop()
