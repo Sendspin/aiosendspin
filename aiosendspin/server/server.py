@@ -1278,6 +1278,9 @@ class SendspinServer:
                     elif not conn.should_retry_server_initiated_connection:
                         reason = conn.goodbye_reason
                         names = [n for n, u in self._mdns_client_urls.items() if u == url]
+                        if reason in _NO_REDIAL_GOODBYE_REASONS:
+                            # A service removed before this goodbye stays blocked once it returns.
+                            names += [n for n, u in self._mdns_missing_clients.items() if u == url]
                         if names and _ended_without_redial(conn):
                             for name in names:
                                 self._block_mdns_redial(name, url, conn)
