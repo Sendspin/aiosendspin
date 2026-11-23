@@ -1340,8 +1340,9 @@ class PushStream:
         2. Assigns timestamps to encoded chunks
         3. Sends chunks to connected players via role hooks
 
-        While no member streams yet, the first commit waits for the first
-        client/state of every audio role in the group, so the stream starts with them.
+        While no member streams yet, the first commit of a buffered source waits for
+        the first client/state of every audio role in the group, so the stream starts
+        with them.
 
         Args:
             play_start_us: If provided, use this timestamp directly for all channels
@@ -1363,7 +1364,8 @@ class PushStream:
         if self._is_stopped:
             raise StreamStoppedError("Cannot commit audio on a stopped stream")
         commit_generation = self._stream_generation
-        if not self._channel_timing and play_start_us is None:
+        # A live source cannot catch up, so a wait would stay as lasting latency.
+        if not self._channel_timing and play_start_us is None and not self._is_live:
             await self._wait_for_first_client_states(commit_generation)
             if not self._is_generation_active(commit_generation):
                 return self._stopped_commit_return_value()

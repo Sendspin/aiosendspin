@@ -4406,6 +4406,21 @@ async def test_stream_start_stops_waiting_for_a_state_that_never_comes(
 
 
 @pytest.mark.asyncio
+async def test_live_stream_start_does_not_wait_for_client_state() -> None:
+    """A live source starts at once, since a wait would stay as latency."""
+    group = _DummyGroup(clients=[])
+    syncing = _DummyClient([_make_role()])
+    syncing.awaits_role_state = lambda _family: True  # type: ignore[method-assign]
+    group.clients.append(syncing)
+    stream = PushStream(loop=asyncio.get_running_loop(), clock=ManualClock(), group=group)  # type: ignore[arg-type]
+    stream.set_live_source(True)
+    stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+
+    async with asyncio.timeout(1):
+        await stream.commit_audio()
+
+
+@pytest.mark.asyncio
 async def test_mixed_delay_timeline_uses_largest_output_delay() -> None:
     """With 0 ms and 5 s delay players, timeline anchored for the largest."""
     loop = asyncio.get_running_loop()
