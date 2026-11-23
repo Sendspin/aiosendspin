@@ -142,6 +142,10 @@ async def test_unpair_drops_record_and_closes() -> None:
 
             await server.unpair(identity.peer_id)
             await _await_disconnected(client)
+            # The client can report disconnected before the server handles its goodbye.
+            async with asyncio.timeout(5):
+                while server_client.is_connected:  # noqa: ASYNC110
+                    await asyncio.sleep(0.01)
 
             assert conn.goodbye_reason is GoodbyeReason.UNPAIRED
             assert await client_store.record_by_psk_id(psk_id) is None
