@@ -10,6 +10,7 @@ import logging
 import threading
 import weakref
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from errno import EAGAIN
 from functools import lru_cache
@@ -43,6 +44,9 @@ if TYPE_CHECKING:
     from aiosendspin.server.roles import AudioRequirements, Role
 
 _LOGGER = logging.getLogger(__name__)
+
+_DSP_WORKERS = 4
+_DSP_EXECUTOR = ThreadPoolExecutor(max_workers=_DSP_WORKERS, thread_name_prefix="aiosendspin-dsp")
 
 # TODO: test if still required, since I fixed double stream start messages
 # Default initial delay before first audio plays (microseconds)
@@ -343,10 +347,13 @@ async def _run_off_loop[T, *Ts](func: Callable[[*Ts], T], /, *args: *Ts) -> T:
     """
     Run func on a worker thread and return its result.
 
+    The worker comes from a pool of its own, so blocking jobs queued on the loop's default
+    executor by the application cannot delay encoding past a chunk's play time.
+
     A cancelled caller still waits for the thread to finish before CancelledError is
     re-raised, so the work never outlives the coroutine that started it.
     """
-    future = asyncio.get_running_loop().run_in_executor(None, func, *args)
+    future = asyncio.get_running_loop().run_in_executor(_DSP_EXECUTOR, func, *args)
     cancelled: asyncio.CancelledError | None = None
     while not future.done():
         try:

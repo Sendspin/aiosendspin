@@ -9,6 +9,7 @@ import struct
 import sys
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
@@ -6327,3 +6328,30 @@ async def test_clear_from_near_a_resampled_chunk_start(
         for previous, chunk in pairwise(received):
             gap_us = chunk.timestamp_us - previous.timestamp_us - previous.duration_us
             assert abs(gap_us) <= 2 * 1_000_000 / 44_100
+
+
+@pytest.mark.asyncio
+async def test_commit_is_not_delayed_by_a_saturated_default_executor() -> None:
+    """Application jobs filling the loop's default executor must not hold back encoding."""
+    loop = asyncio.get_running_loop()
+    default_executor = ThreadPoolExecutor(max_workers=2)
+    loop.set_default_executor(default_executor)
+    release = threading.Event()
+    blockers = [loop.run_in_executor(None, release.wait) for _ in range(4)]
+    try:
+        group = _DummyGroup(clients=[])
+        _, conn = _make_connected_player(loop, group, "p1", clock=LoopClock(loop))
+        stream = PushStream(loop=loop, clock=LoopClock(loop), group=group)
+        stream.prepare_audio(bytes(4800), AudioFormat(sample_rate=48000, bit_depth=16, channels=2))
+
+        loop.call_later(1.0, release.set)
+        started = loop.time()
+
+        await stream.commit_audio()
+
+        assert loop.time() - started < 0.5
+        assert conn.sent_binary
+    finally:
+        release.set()
+        await asyncio.gather(*blockers)
+        default_executor.shutdown()
