@@ -76,6 +76,17 @@ def test_encode_letterboxes_to_the_declared_dimensions() -> None:
         assert decoded.convert("RGB").getpixel((0, 0)) == (0, 0, 0)
 
 
+def test_encode_fits_a_wide_image_into_a_one_pixel_channel() -> None:
+    """A fitted side that rounds below one pixel is kept at one."""
+    agr = ArtworkGroupRole(_make_group_stub())
+    image = Image.new("RGB", (3, 2), (255, 0, 0))
+
+    encoded = agr._process_and_encode_image(image, 1, 1, PictureFormat.PNG)  # noqa: SLF001
+
+    with Image.open(BytesIO(encoded)) as decoded:
+        assert decoded.size == (1, 1)
+
+
 # DEPRECATED(spec-pr-168): remove in aiosendspin <version>
 def test_encode_still_supports_bmp() -> None:
     """A client declaring the removed 'bmp' format still gets a BMP image."""
@@ -336,3 +347,72 @@ async def test_replacing_scheduled_artwork_restates_current_for_single_message_c
     await _settle()
     assert legacy_sent[3:] == [(3, far_us)]
     legacy.on_disconnect()
+
+
+@pytest.mark.asyncio
+async def test_replaced_replays_copy_one_image_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay replaced while encoding keeps the next one from copying the image until done."""
+    group, _clock = _make_scheduling_group()
+    agr = ArtworkGroupRole(group)
+    image = _image(1)
+    await agr.set_album_artwork(image)
+    copies = 0
+    copy = image.copy
+
+    def _counted_copy() -> Image.Image:
+        nonlocal copies
+        copies += 1
+        return copy()
+
+    monkeypatch.setattr(image, "copy", _counted_copy)
+    member = _Member()
+    release = _gate_encoding(agr, monkeypatch)
+
+    for _ in range(5):
+        agr.send_current_artwork(member)  # type: ignore[arg-type]
+        await _settle()
+    copies_while_encoding = copies
+    release.set()
+    await _settle()
+
+    assert copies_while_encoding == 1
+    assert member.sent == [(1, 1_000_000)]
+
+
+@pytest.mark.asyncio
+async def test_encodes_for_many_members_run_two_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Members joining together never have more than two encodes running at once."""
+    group, _clock = _make_scheduling_group()
+    agr = ArtworkGroupRole(group)
+    await agr.set_album_artwork(_image(1))
+    release = threading.Event()
+    counter = threading.Lock()
+    running = 0
+    peak = 0
+    encode = agr._process_and_encode_image  # noqa: SLF001
+
+    def _counted(*args: Any) -> bytes:
+        nonlocal running, peak
+        with counter:
+            running += 1
+            peak = max(peak, running)
+        release.wait(5)
+        with counter:
+            running -= 1
+        return encode(*args)
+
+    monkeypatch.setattr(agr, "_process_and_encode_image", _counted)
+    members = [_Member() for _ in range(3)]
+
+    for member in members:
+        agr.subscribe(member)  # type: ignore[arg-type]
+    await _settle()
+    release.set()
+    await _settle()
+
+    assert peak <= 2
+    assert all(member.sent == [(1, 1_000_000)] for member in members)
